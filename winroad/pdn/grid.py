@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
 from .component import GridComponent, RepairChannelStraps, Rings, Straps
-from .types import GridComponentType, GridType, Halo, Rect, Shape, _name, _not_implemented, _validate_halo
+from .types import GridComponentType, GridType, Halo, PdnIssue, Rect, Shape, _name, _not_implemented, _validate_halo, _validate_rect
 from .via import Connect, Via
 
 @dataclass
@@ -126,6 +126,20 @@ class Grid:
                 result = [connect for connect in result if {connect.layer0, connect.layer1} == {layer0, layer1}]
         return list(result)
 
+    def findShapeContainingRect(self, rect: Rect) -> List[Shape]:
+        """按已有 runtime shape 查找覆盖给定矩形的纯状态对象。
+
+        这里不触发几何生成，只检查导入或测试手工挂上的 shape，等价于 C++ 查询
+        已生成网格后的只读视图。
+        """
+
+        lx, ly, ux, uy = _validate_rect(rect, "query rect")
+        return [
+            shape
+            for shape in self.getShapes()
+            if shape.rect[0] <= lx and shape.rect[1] <= ly and shape.rect[2] >= ux and shape.rect[3] >= uy
+        ]
+
     def makeShapes(self, global_shapes: Any, obstructions: Any) -> None:
         _not_implemented("Grid::makeShapes")
 
@@ -151,16 +165,27 @@ class Grid:
         self.resetShapes()
 
     def checkSetup(self) -> None:
+        issues = self.collectSetupIssues()
+        if issues:
+            raise ValueError("; ".join(f"{issue.path}: {issue.message}" for issue in issues))
+
+    def collectSetupIssues(self, path: str = "") -> List[PdnIssue]:
+        issues: List[PdnIssue] = []
+        base = path or f"grid:{self.getLongName()}"
         if self.domain is None:
-            raise ValueError(f"grid {self.name!r} has no voltage domain")
-        for component in self.getGridComponents():
+            issues.append(PdnIssue(base, f"grid {self.name!r} has no voltage domain"))
+        for index, component in enumerate(self.getGridComponents()):
+            component_path = f"{base}/component[{index}]/{component.type().value}"
             if component.getGrid() is not self:
-                raise ValueError(f"component {component.type().value} is attached to the wrong grid")
-        for connect in self.connect:
+                issues.append(PdnIssue(component_path, f"component {component.type().value} is attached to the wrong grid"))
+            issues.extend(component.collectSetupIssues(component_path))
+        for index, connect in enumerate(self.connect):
+            connect_path = f"{base}/connect[{index}]"
             if connect.getGrid() is not self:
-                raise ValueError(f"connect {_name(connect.layer0)}->{_name(connect.layer1)} is attached to the wrong grid")
+                issues.append(PdnIssue(connect_path, f"connect {_name(connect.layer0)}->{_name(connect.layer1)} is attached to the wrong grid"))
             if connect.layer0 is None or connect.layer1 is None:
-                raise ValueError("connect requires both lower and upper layers")
+                issues.append(PdnIssue(connect_path, "connect requires both lower and upper layers"))
+        return issues
 
     def report(self) -> Dict[str, Any]:
         return {

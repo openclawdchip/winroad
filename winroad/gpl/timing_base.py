@@ -74,6 +74,15 @@ class TimingBase:
         if self.nbc_ is not None:
             self.nbc_.resetTimingNetWeights()
 
+    def addTimingDrivenNet(self, gnet: GNet) -> None:
+        """记录 timing-driven net，真实 STA slack 筛选仍在未翻译入口中。"""
+
+        if gnet not in self.timing_driven_nets_:
+            self.timing_driven_nets_.append(gnet)
+
+    def clearTimingDrivenNets(self) -> None:
+        self.timing_driven_nets_.clear()
+
     def updateGNetWeights(self) -> None:
         raise NotImplementedError("OpenROAD timing-driven gnet weight update has not been translated yet")
 
@@ -131,5 +140,17 @@ class TimingBase:
             "restore_count": self.restore_count_,
             "last_restored_weights": self.last_restored_weights_,
         }
+
+    def reportTimingNets(self, sample_limit: int = 0) -> Dict[str, Any]:
+        """导出 timing-driven net 样本和权重快照状态。"""
+
+        report: Dict[str, Any] = {
+            "timing_driven_nets": len(self.timing_driven_nets_),
+            "snapshot_weights": len(self.prev_timing_weights_),
+            "snapshot_weights_by_id": len(self.prev_timing_weights_by_id_),
+        }
+        if sample_limit > 0:
+            report["sample_nets"] = [gnet.report() for gnet in self.timing_driven_nets_[:sample_limit]]
+        return report
 
 

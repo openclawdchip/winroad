@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence
 
 from .buffered_net import BufferedNet
-from .common import RepairDesignLimits, RepairDesignViolationCounters, _not_translated
+from .common import RepairDesignLimits, RepairDesignViolationCounters, RepairFlowState, _not_translated
 
 
 class ResizerObserver:
@@ -150,6 +150,23 @@ class RepairDesign:
     def limits(self) -> RepairDesignLimits:
         return self.limits_
 
+    def importConfig(self, data: Dict[str, Any]) -> RepairDesignLimits:
+        """导入 repair_design violation 配置，不启动真实 net 修复。"""
+
+        return self.configureLimits(
+            max_wire_length=data.get("max_wire_length"),
+            max_slew=data.get("max_slew"),
+            max_cap=data.get("max_cap"),
+            max_fanout=data.get("max_fanout"),
+            slew_margin=data.get("slew_margin"),
+            cap_margin=data.get("cap_margin"),
+            corner=data.get("corner"),
+            buffer_cells=data.get("buffer_cells"),
+        )
+
+    def exportConfig(self) -> Dict[str, Any]:
+        return self.reportLimits()
+
     def reportLimits(self) -> Dict[str, Any]:
         return self.limits_.as_dict()
 
@@ -221,6 +238,51 @@ class RepairDesign:
 
     def reportViolationCounters(self, *_args: Any, **_kwargs: Any) -> Dict[str, int]:
         return self.violationCounters().as_dict()
+
+    def reportState(self) -> Dict[str, Any]:
+        return RepairFlowState(
+            name="RepairDesign",
+            config=self.reportLimits(),
+            counters=self.reportViolationCounters(),
+            details={
+                "initial_design_area": self.initial_design_area_,
+                "slew_rc_factor": self.slew_rc_factor_,
+                "buffer_sizes": list(self.buffer_sizes_),
+            },
+        ).as_dict()
+
+    def statistics(self) -> Dict[str, Any]:
+        return self.reportState()
+
+    def validateBatch(self, batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        """校验 repair_design 批处理限制参数。"""
+
+        errors: List[str] = []
+        normalized: List[Dict[str, Any]] = []
+        numeric_fields = ("max_wire_length", "max_slew", "max_cap", "slew_margin", "cap_margin")
+        for index, item in enumerate(batch):
+            try:
+                config = dict(item)
+                for field in numeric_fields:
+                    if config.get(field) is not None and float(config[field]) < 0.0:
+                        raise ValueError(f"{field} must be non-negative")
+                if config.get("max_fanout") is not None and int(config["max_fanout"]) < 0:
+                    raise ValueError("max_fanout must be non-negative")
+                normalized.append(
+                    RepairDesignLimits(
+                        max_wire_length=config.get("max_wire_length"),
+                        max_slew=config.get("max_slew"),
+                        max_cap=config.get("max_cap"),
+                        max_fanout=config.get("max_fanout"),
+                        slew_margin=float(config.get("slew_margin", 0.0) or 0.0),
+                        cap_margin=float(config.get("cap_margin", 0.0) or 0.0),
+                        corner=config.get("corner"),
+                        buffer_cells=list(config.get("buffer_cells", []) or []),
+                    ).as_dict()
+                )
+            except Exception as exc:  # noqa: BLE001 - 批处理报告所有错误。
+                errors.append(f"batch[{index}]: {exc}")
+        return {"valid": not errors, "errors": errors, "items": normalized}
 
     def setDebugGraphics(self, graphics: ResizerObserver) -> None:
         self.graphics_ = graphics

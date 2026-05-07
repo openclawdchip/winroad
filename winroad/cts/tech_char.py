@@ -91,6 +91,7 @@ class TechChar:
     def report(self) -> Dict[str, Any]:
         """返回当前 LUT/segment 外层状态快照。"""
 
+        validation = self.validateLut()
         return {
             "num_wire_segments": len(self.wire_segments),
             "num_lut_keys": len(self.key_to_wire_segments),
@@ -105,6 +106,8 @@ class TechChar:
             "num_slew_lut_keys": len(self.slew_lut),
             "num_results": len(self.result_data),
             "num_solutions": len(self.solution_data),
+            "valid": not validation,
+            "validation_errors": validation,
         }
 
     def reportSegment(self, key: Any) -> List[Dict[str, Any]]:
@@ -396,6 +399,41 @@ class TechChar:
     def loadLut(self, path: str) -> None:
         self.importLut(path)
 
+    def validateLut(self) -> List[str]:
+        """检查 LUT、key 到 segment 索引和 bounds 的一致性。
+
+        这不是 characterization 正确性证明，只确认 Python 状态层没有
+        悬空索引、反向边界或负延迟/负 slew 等明显损坏。
+        """
+
+        errors: List[str] = []
+        all_keys = set(self.delay_lut) | set(self.slew_lut) | set(self.key_to_wire_segments)
+        for key in all_keys:
+            if len(key) != 3:
+                errors.append(f"LUT key {key} 不是三元组")
+                continue
+            length, load, output_slew = key
+            if length < 0 or load < 0 or output_slew < 0:
+                errors.append(f"LUT key {key} 含负值")
+            for value in self.delay_lut.get(key, []):
+                if value < 0:
+                    errors.append(f"delay_lut[{key}] 含负延迟 {value}")
+            for value in self.slew_lut.get(key, []):
+                if value < 0:
+                    errors.append(f"slew_lut[{key}] 含负 slew {value}")
+            for idx in self.key_to_wire_segments.get(key, []):
+                if idx < 0 or idx >= len(self.wire_segments):
+                    errors.append(f"key_to_wire_segments[{key}] 引用越界 segment {idx}")
+        for idx, segment in enumerate(self.wire_segments):
+            errors.extend(f"wire_segments[{idx}]: {error}" for error in segment.validate())
+        if not self.checkCharacterizationBounds():
+            errors.append("characterization bounds 最小值大于最大值")
+        if self.length_unit < 0 or self.length_unit_ratio < 0:
+            errors.append("length_unit/length_unit_ratio 不能为负数")
+        if self.res_per_dbu < 0.0 or self.cap_per_dbu < 0.0:
+            errors.append("res_per_dbu/cap_per_dbu 不能为负数")
+        return errors
+
     def finalizeRootSinkBuffers(self) -> None:
         _not_translated("TechChar::finalizeRootSinkBuffers")
 
@@ -595,6 +633,26 @@ class WireSegment:
             "wl2_first_buffer": self.wl2_first_buffer,
             "last_wl": self.last_wl,
         }
+
+    def validate(self) -> List[str]:
+        """检查 wire segment 数据是否可被 LUT 容器安全引用。"""
+
+        errors: List[str] = []
+        if self.length < 0.0:
+            errors.append("length 不能为负数")
+        if self.power < 0.0:
+            errors.append("power 不能为负数")
+        if self.segment_delay < 0:
+            errors.append("segment_delay 不能为负数")
+        if self.input_cap < 0 or self.input_slew < 0:
+            errors.append("input_cap/input_slew 不能为负数")
+        if self.load < 0 or self.output_slew < 0:
+            errors.append("load/output_slew 不能为负数")
+        if self.cap < 0.0 or self.res < 0.0:
+            errors.append("cap/res 不能为负数")
+        if len(self.buffer_masters) not in {0, len(self.buffer_locations)}:
+            errors.append("buffer_masters 数量需要为 0 或与 buffer_locations 一致")
+        return errors
 
     @classmethod
     def fromDict(cls, data: Dict[str, Any]) -> "WireSegment":

@@ -103,6 +103,23 @@ class frLayer:
     def getConstraints(self) -> List[Any]:
         return self.constraints
 
+    def to_dict(self) -> Dict[str, Any]:
+        """返回 layer 的 Python 状态快照；约束仅保存名称，避免假装解析 LEF 语义。"""
+
+        return {
+            "name": self.getName(),
+            "layer_num": self.layer_num,
+            "width": self.width,
+            "min_width": self.min_width,
+            "pitch": self.getPitch(),
+            "direction": self.getDir().value,
+            "layer_type": self.layer_type.value,
+            "unidirectional": self.unidirectional,
+            "default_via_def": self.default_via_def.getName() if self.default_via_def else None,
+            "secondary_via_defs": [via_def.getName() for via_def in self.secondary_via_defs],
+            "constraints": [_object_name(constraint) for constraint in self.constraints],
+        }
+
 
 @dataclass
 class frViaDef:
@@ -127,6 +144,23 @@ class frViaDef:
     def getLayer2Num(self) -> frLayerNum:
         return self.layer2_num
 
+    def getTech(self) -> Optional["frTechObject"]:
+        return self.owner
+
+    def isDefault(self) -> bool:
+        return self.is_default
+
+    def to_dict(self) -> Dict[str, Any]:
+        """返回 via def 的边界状态，不展开 cut/metal shape。"""
+
+        return {
+            "name": self.name,
+            "layer1_num": self.layer1_num,
+            "cut_layer_num": self.cut_layer_num,
+            "layer2_num": self.layer2_num,
+            "is_default": self.is_default,
+        }
+
 
 @dataclass
 class frVia:
@@ -148,6 +182,9 @@ class frVia:
     def getOrigin(self) -> Point:
         return self.origin
 
+    def getNet(self) -> Optional[Any]:
+        return self.owner
+
     def addToNet(self, net: "frNet") -> None:
         self.owner = net
 
@@ -160,6 +197,15 @@ class frVia:
     def getBBox(self) -> Rect:
         x, y = self.origin
         return (x, y, x, y)
+
+    def to_dict(self) -> Dict[str, Any]:
+        """返回 via 实例快照；真实 via 几何仍由后续 frViaDef 翻译负责。"""
+
+        return {
+            "via_def": self.via_def.getName() if self.via_def else None,
+            "origin": self.origin,
+            "owner": _object_name(self.owner),
+        }
 
 
 @dataclass
@@ -182,6 +228,20 @@ class frShape:
     def getBBox(self) -> Rect:
         return self.bbox
 
+    def getNet(self) -> Optional[Any]:
+        return self.owner
+
+    def setLayerNum(self, layer_num: frLayerNum) -> None:
+        self.layer_num = layer_num
+
+    def setBBox(self, bbox: Rect) -> None:
+        self.bbox = bbox
+
+    def to_dict(self) -> Dict[str, Any]:
+        """返回 shape 边界状态；不区分 rect/pathseg/polygon 的内部点列。"""
+
+        return {"layer_num": self.layer_num, "bbox": self.bbox, "owner": _object_name(self.owner)}
+
 
 @dataclass
 class frGuide(frShape):
@@ -202,6 +262,22 @@ class frGuide(frShape):
     def getEndLayerNum(self) -> frLayerNum:
         return self.end_layer_num
 
+    def setBeginLayerNum(self, layer_num: frLayerNum) -> None:
+        self.begin_layer_num = layer_num
+
+    def setEndLayerNum(self, layer_num: frLayerNum) -> None:
+        self.end_layer_num = layer_num
+
+    def typeId(self) -> frBlockObjectEnum:
+        return frBlockObjectEnum.frcGuide
+
+    def to_dict(self) -> Dict[str, Any]:
+        """返回 guide box 状态，供 route guide report/snapshot 使用。"""
+
+        data = super().to_dict()
+        data.update({"begin_layer_num": self.begin_layer_num, "end_layer_num": self.end_layer_num})
+        return data
+
 
 @dataclass
 class frMarker:
@@ -219,6 +295,12 @@ class frMarker:
     def getLayerNum(self) -> frLayerNum:
         return self.layer_num
 
+    def setBBox(self, bbox: Rect) -> None:
+        self.bbox = bbox
+
+    def setLayerNum(self, layer_num: frLayerNum) -> None:
+        self.layer_num = layer_num
+
     def addSrc(self, obj: Any) -> None:
         if obj not in self.sources:
             self.sources.append(obj)
@@ -232,8 +314,23 @@ class frMarker:
     def getConstraint(self) -> Optional[Any]:
         return self.constraint
 
+    def getOwner(self) -> Optional[Any]:
+        return self.owner
+
     def typeId(self) -> frBlockObjectEnum:
         return frBlockObjectEnum.frcMarker
+
+    def to_dict(self) -> Dict[str, Any]:
+        """返回 marker 状态；不执行 DRC 分类或几何重算。"""
+
+        return {
+            "bbox": self.bbox,
+            "layer_num": self.layer_num,
+            "constraint": _object_name(self.constraint),
+            "sources": [_object_name(src) for src in self.sources],
+            "owner": _object_name(self.owner),
+            "type_id": int(self.typeId()),
+        }
 
 
 @dataclass
@@ -251,6 +348,23 @@ class frNode:
 
     def getId(self) -> int:
         return self.id
+
+    def getLoc(self) -> Point:
+        return self.loc
+
+    def getLayerNum(self) -> frLayerNum:
+        return self.layer_num
+
+    def to_dict(self) -> Dict[str, Any]:
+        """返回拓扑节点快照；父子关系使用 id，避免递归展开。"""
+
+        return {
+            "id": self.id,
+            "loc": self.loc,
+            "layer_num": self.layer_num,
+            "parent": self.parent.getId() if self.parent is not None else None,
+            "children": [child.getId() for child in self.children],
+        }
 
 
 @dataclass
@@ -365,6 +479,30 @@ class frNet:
     def getNodes(self) -> List[frNode]:
         return self.nodes
 
+    def getGRShapes(self) -> List[Any]:
+        return self.gr_shapes
+
+    def getGRVias(self) -> List[Any]:
+        return self.gr_vias
+
+    def getRoot(self) -> Optional[frNode]:
+        return self.root
+
+    def setRoot(self, node: Optional[frNode]) -> None:
+        self.root = node
+
+    def getRootGCellNode(self) -> Optional[frNode]:
+        return self.root_gcell_node
+
+    def setRootGCellNode(self, node: Optional[frNode]) -> None:
+        self.root_gcell_node = node
+
+    def getFirstNonRPinNode(self) -> Optional[frNode]:
+        return self.first_non_rpin_node
+
+    def setFirstNonRPinNode(self, node: Optional[frNode]) -> None:
+        self.first_non_rpin_node = node
+
     def removeShape(self, shape: frShape) -> None:
         if shape in self.shapes:
             self.shapes.remove(shape)
@@ -418,6 +556,12 @@ class frNet:
     def isFixed(self) -> bool:
         return self.is_fixed
 
+    def setHasInitialRouting(self, value: bool) -> None:
+        self.has_initial_routing = value
+
+    def hasInitialRouting(self) -> bool:
+        return self.has_initial_routing
+
     def updateIsClock(self, value: bool) -> None:
         self.is_clock = value
         self.updateAbsPriority()
@@ -432,6 +576,33 @@ class frNet:
     def hasNDR(self) -> bool:
         return self.nondefault_rule is not None
 
+    def getNondefaultRule(self) -> Optional[Any]:
+        return self.nondefault_rule
+
+    def setSpecial(self, value: bool) -> None:
+        self.is_special = value
+
+    def isSpecial(self) -> bool:
+        return self.is_special
+
+    def setConnectedByAbutment(self, value: bool) -> None:
+        self.is_connected_by_abutment = value
+
+    def isConnectedByAbutment(self) -> bool:
+        return self.is_connected_by_abutment
+
+    def setHasJumpers(self, value: bool) -> None:
+        self.has_jumpers = value
+
+    def hasJumpers(self) -> bool:
+        return self.has_jumpers
+
+    def getAbsPriorityLvl(self) -> int:
+        return self.abs_priority_lvl
+
+    def setAbsPriorityLvl(self, value: int) -> None:
+        self.abs_priority_lvl = value
+
     def updateAbsPriority(self) -> None:
         if self.router_cfg is None:
             return
@@ -444,6 +615,36 @@ class frNet:
 
     def typeId(self) -> frBlockObjectEnum:
         return frBlockObjectEnum.frcNet
+
+    def getOwner(self) -> Optional["frBlock"]:
+        return self.owner
+
+    def to_dict(self) -> Dict[str, Any]:
+        """返回 net 的对象计数和状态位；不推导连通性或修复布线。"""
+
+        return {
+            "name": self.name,
+            "inst_terms": len(self.inst_terms),
+            "bterms": len(self.bterms),
+            "shapes": [shape.to_dict() if hasattr(shape, "to_dict") else _object_name(shape) for shape in self.shapes],
+            "vias": [via.to_dict() if hasattr(via, "to_dict") else _object_name(via) for via in self.vias],
+            "patch_wires": len(self.patch_wires),
+            "guides": [guide.to_dict() if hasattr(guide, "to_dict") else _object_name(guide) for guide in self.guides],
+            "orig_guides": len(self.orig_guides),
+            "gr_shapes": len(self.gr_shapes),
+            "gr_vias": len(self.gr_vias),
+            "nodes": [node.to_dict() for node in self.nodes],
+            "modified": self.modified,
+            "is_fake": self.is_fake_net,
+            "is_fixed": self.is_fixed,
+            "has_initial_routing": self.has_initial_routing,
+            "is_clock": self.is_clock,
+            "is_special": self.is_special,
+            "is_connected_by_abutment": self.is_connected_by_abutment,
+            "has_jumpers": self.has_jumpers,
+            "abs_priority_lvl": self.abs_priority_lvl,
+            "nondefault_rule": _object_name(self.nondefault_rule),
+        }
 
 
 @dataclass
@@ -502,6 +703,14 @@ class frTechObject:
     def getViaDefs(self) -> List[frViaDef]:
         return list(self.via_defs.values())
 
+    def to_dict(self) -> Dict[str, Any]:
+        """返回 tech 容器快照；只包含已加载到 Python 边界的 layer/via def。"""
+
+        return {
+            "layers": [layer.to_dict() for layer in self.layers],
+            "via_defs": [via_def.to_dict() for via_def in self.getViaDefs()],
+        }
+
 
 @dataclass
 class frBlock:
@@ -539,6 +748,9 @@ class frBlock:
     def getMarkers(self) -> List[frMarker]:
         return self.markers
 
+    def getMarkerCount(self) -> int:
+        return len(self.markers)
+
     def clearMarkers(self) -> None:
         for marker in self.markers:
             marker.owner = None
@@ -549,6 +761,32 @@ class frBlock:
 
     def getTrackPatterns(self, layer_num: frLayerNum, is_vertical: bool) -> List[Any]:
         return self.track_patterns.get((layer_num, is_vertical), [])
+
+    def removeNet(self, net: frNet) -> None:
+        if net in self.nets:
+            self.nets.remove(net)
+            net.owner = None
+
+    def clearNets(self) -> None:
+        for net in self.nets:
+            net.owner = None
+        self.nets.clear()
+
+    def getName(self) -> str:
+        return self.name
+
+    def to_dict(self) -> Dict[str, Any]:
+        """返回 block 快照；track pattern 仅记录数量，不展开 PDK 轨道对象。"""
+
+        return {
+            "name": self.name,
+            "nets": [net.to_dict() for net in self.nets],
+            "markers": [marker.to_dict() for marker in self.markers],
+            "track_patterns": {
+                f"{layer_num}:{int(is_vertical)}": len(patterns)
+                for (layer_num, is_vertical), patterns in self.track_patterns.items()
+            },
+        }
 
 
 class frRegionQuery:
@@ -592,6 +830,19 @@ class frRegionQuery:
         if obj in self.objects_:
             self.objects_.remove(obj)
 
+    def getObjects(self) -> List[Any]:
+        return self.objects_
+
+    def snapshot(self) -> Dict[str, Any]:
+        """返回 region query 当前线性索引摘要；不构建或模拟 R-tree。"""
+
+        by_layer: Dict[frLayerNum, int] = {}
+        for obj in self.objects_:
+            layer_num = getattr(obj, "getLayerNum", lambda: None)()
+            if layer_num is not None:
+                by_layer[layer_num] = by_layer.get(layer_num, 0) + 1
+        return {"objects": len(self.objects_), "by_layer": by_layer}
+
 
 class frDesign:
     """对应 ``frDesign.h`` 的 drt 私有设计对象。"""
@@ -633,6 +884,9 @@ class frDesign:
 
     def getMasters(self) -> List[Any]:
         return self.masters_
+
+    def getMaster(self, name: str) -> Optional[Any]:
+        return self.name2master_.get(name)
 
     def addUserSelectedVia(self, via_name: str) -> None:
         if via_name not in self.user_selected_vias_:
@@ -678,6 +932,24 @@ class frDesign:
 
     def getVersion(self) -> int:
         return self.version_
+
+    def getTopBlockName(self) -> str:
+        return self.topBlock_.getName() if self.topBlock_ is not None else ""
+
+    def snapshot(self) -> Dict[str, Any]:
+        """返回 frDesign 的状态快照；用于 Python 接口层报告和 smoke 验证。"""
+
+        block = self.getTopBlock()
+        return {
+            "version": self.version_,
+            "top_block": block.to_dict() if block is not None else None,
+            "tech": self.tech_.to_dict(),
+            "masters": [_object_name(master) for master in self.masters_],
+            "updates": sum(len(bucket) for bucket in self.updates_),
+            "update_buckets": len(self.updates_),
+            "user_selected_vias": list(self.user_selected_vias_),
+            "region_query": self.rq_.snapshot(),
+        }
 
 
 def _rect_intersects(lhs: Rect, rhs: Rect) -> bool:

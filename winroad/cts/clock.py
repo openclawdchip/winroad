@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
 from .types import InstType
 
@@ -45,6 +45,26 @@ class ClockInst:
 
     def isClockBuffer(self) -> bool:
         return self.type is InstType.CLOCK_BUFFER
+
+    def isSink(self) -> bool:
+        return self.type is InstType.CLOCK_SINK
+
+    def validate(self) -> List[str]:
+        """检查单个 clock instance 的纯状态合法性。
+
+        这里只检查 Python 状态容器自身是否自洽，不访问 OpenDB/STA；
+        真实 pin、master、placement 合法性仍属于未翻译的 C++ 流程。
+        """
+
+        errors: List[str] = []
+        if not self.name:
+            errors.append("ClockInst.name 不能为空")
+        if not isinstance(self.type, InstType):
+            errors.append(f"{self.name}: type 必须是 InstType")
+        for attr in ("input_cap", "insertion_delay", "output_cap", "ideal_output_cap"):
+            if float(getattr(self, attr)) < 0.0:
+                errors.append(f"{self.name}: {attr} 不能为负数")
+        return errors
 
     def toDict(self) -> Dict[str, Any]:
         return {
@@ -127,6 +147,7 @@ class ClockSubNet:
 
     def report(self) -> Dict[str, Any]:
         driver = self.instances[0].getName() if self.instances else None
+        validation = self.validate()
         return {
             "name": self.name,
             "driver": driver,
@@ -134,6 +155,8 @@ class ClockSubNet:
             "num_sinks": self.getNumSinks(),
             "sinks": [inst.getName() for inst in self.getSinks()],
             "instances": [inst.getName() for inst in self.instances],
+            "valid": not validation,
+            "validation_errors": validation,
         }
 
     def toDict(self) -> Dict[str, Any]:
@@ -142,6 +165,26 @@ class ClockSubNet:
             "leaf_level": self.leaf_level,
             "instances": [inst.getName() for inst in self.instances],
         }
+
+    def validate(self) -> List[str]:
+        """检查 subnet driver/sink 列表是否满足 CTS 网络状态约束。"""
+
+        errors: List[str] = []
+        if not self.name:
+            errors.append("ClockSubNet.name 不能为空")
+        if not self.instances:
+            errors.append(f"{self.name}: subnet 至少需要一个 driver")
+            return errors
+        seen: Set[str] = set()
+        for idx, inst in enumerate(self.instances):
+            errors.extend(f"{self.name}: {error}" for error in inst.validate())
+            if inst.getName() in seen:
+                errors.append(f"{self.name}: instance {inst.getName()} 重复出现在同一 subnet")
+            seen.add(inst.getName())
+            # OpenROAD ClockSubNet 约定第一个实例为 driver，后续实例为 sinks。
+            if idx == 0 and inst.isSink() and self.getNumSinks() > 0:
+                errors.append(f"{self.name}: driver {inst.getName()} 标记为 sink")
+        return errors
 
 
 @dataclass
@@ -226,6 +269,13 @@ class Clock:
     def setSubNets(self, subnets: Iterable[ClockSubNet]) -> None:
         self.sub_nets = list(subnets)
 
+    def rebuildNameIndex(self) -> None:
+        """从 buffer/sink 列表重建名称索引，供导入或手工改状态后修复。"""
+
+        self.name_to_inst.clear()
+        for inst in self.clock_buffers + self.sinks:
+            self.name_to_inst[inst.getName()] = inst
+
     def forEachClockBuffer(self, func: Callable[[ClockInst], None]) -> None:
         for inst in self.clock_buffers:
             func(inst)
@@ -239,6 +289,7 @@ class Clock:
             func(subnet)
 
     def report(self) -> Dict[str, Any]:
+        validation = self.validateNetwork()
         return {
             "name": self.getName(),
             "sdc_name": self.getSdcName(),
@@ -250,6 +301,8 @@ class Clock:
             "buffers": [inst.toDict() for inst in self.clock_buffers],
             "sinks": [inst.toDict() for inst in self.sinks],
             "subnets": [subnet.report() for subnet in self.sub_nets],
+            "valid": not validation,
+            "validation_errors": validation,
         }
 
     def toDict(self) -> Dict[str, Any]:
@@ -304,3 +357,34 @@ class Clock:
             with open(data_or_path, "r", encoding="utf-8") as stream:
                 data_or_path = json.load(stream)
         return cls.fromDict(data_or_path)
+
+    def snapshot(self) -> Dict[str, Any]:
+        """返回带 report 与可反序列化 payload 的 clock network 快照。"""
+
+        return {
+            "payload": self.toDict(),
+            "report": self.report(),
+        }
+
+    def validateNetwork(self) -> List[str]:
+        """检查 clock/buffer/sink/subnet 的 Python 状态是否自洽。"""
+
+        errors: List[str] = []
+        if not self.net_name:
+            errors.append("Clock.net_name 不能为空")
+        names: Set[str] = set()
+        for inst in self.clock_buffers + self.sinks:
+            errors.extend(inst.validate())
+            if inst.getName() in names:
+                errors.append(f"{self.net_name}: instance {inst.getName()} 在 clock 内重复")
+            names.add(inst.getName())
+            if self.name_to_inst.get(inst.getName()) is not inst:
+                errors.append(f"{self.net_name}: name_to_inst 缺失或未指向 {inst.getName()}")
+        for subnet in self.sub_nets:
+            errors.extend(subnet.validate())
+            for inst in subnet.instances:
+                if inst.getName() not in names:
+                    errors.append(
+                        f"{self.net_name}: subnet {subnet.getName()} 引用未注册 instance {inst.getName()}"
+                    )
+        return errors

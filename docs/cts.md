@@ -17,6 +17,7 @@
 - 第二轮继续按 OpenROAD `src/cts` 当前源码边界深化，范围仍限 CTS 顶层 Python 骨架，不翻译/引入 `odb` 实现。
 - 第四轮继续深化纯 Python 状态层，重点覆盖 CtsOptions set/get/reset、Clock/SubNet 遍历、TechChar LUT 容器查询、TreeBuilder blockage/legalization 状态、TritonCTS report/clock bookkeeping；真实 CTS/STA/DB 写回仍保留 `NotImplementedError`。
 - 第六轮继续按 OpenROAD `src/cts` 边界补齐可落地状态逻辑：Clock network serialization/report、CtsOptions profile dump/load、TechChar LUT export/import、TreeBuilder candidate/legalization report、TritonCTS state snapshot；真实 CTS/STA/DB 写回仍保留 `NotImplementedError`。
+- 第七轮继续深化 Python 接口状态层，范围限制在 `winroad/cts/*` 和 `docs/cts.md`：补齐 clock/subnet/sink/buffer、tree builder、tech char、options、TritonCTS snapshot 的导入导出、合法性检查、report 聚合；真实 CTS 构树、STA/DB 写回、repair/balance 算法仍保留同名入口并显式抛 `NotImplementedError`。
 - 翻译 `Util.h` 基础几何工具：
   - `fuzzyEqual`
   - `fuzzyEqualOrGreater`
@@ -31,6 +32,7 @@
   - sink region、sink/buffer/subnet 遍历、driver/net/pin 关联接口
   - 第四轮补齐 `ClockSubNet` driver/sink/inst 列表访问、`forEachInst`、迭代器，以及 `Clock` sink/buffer/subnet 列表访问和 `forEachClockBuffer`、`forEachSink`、`forEachSubNet`
   - 第六轮补齐 `ClockInst.toDict/fromDict`、`ClockSubNet.report/toDict`、`Clock.report/toDict/fromDict`、`Clock.serialize/deserialize`，用于 clock network JSON 状态往返和报告
+  - 第七轮补齐 `ClockInst.validate/isSink`、`ClockSubNet.validate`、`Clock.rebuildNameIndex`、`Clock.validateNetwork`、`Clock.snapshot`，并把 `valid/validation_errors` 聚合进 report
 - 翻译 `CtsOptions.h` 参数入口：
   - `NdrStrategy`
   - `MasterType`
@@ -40,6 +42,7 @@
   - 补齐 skip nets、observer、metrics、fanout、diameter/cluster size、macro cluster、static layers、inferred flags、sink buffer max-cap derate、delay buffer derate、CTS library、buffer/dummy count 等接口
   - 第四轮补齐 clock/root/sink buffer reset、clock net object reset、sink clustering max-cap、balance levels、dummy load prefix 和统计 count reset 等状态接口
   - 第六轮补齐 `toProfile`、`loadProfile`、`dumpProfile`、`fromProfile`、`readProfile`、`reportProfile`，支持参数 profile 的 JSON dump/load；logger/observer 等运行期对象不序列化，net/master 对象以名称字符串快照表示
+  - 第七轮补齐 `validate`，检查 DBU、buffer 距离、聚类规模、derate、NDR enum、steps 等纯参数状态；`reportProfile` 增加合法性摘要
 - 翻译 `TechChar.h` 特征化表核心容器：
   - `WireSegment`
   - `TechChar`
@@ -52,6 +55,7 @@
   - 补齐 bounds/report 边界：`reportCharacterizationBounds`、`checkCharacterizationBounds`、`initCharacterization`
   - 第四轮补齐 `addLutEntry`、`hasLutEntry`、`getDelayLut`、`getSlewLut`、`getDelay`、`getSlew`、`getSegmentsForKey`，并在 segment 写入时维护 bounds 快照
   - 第六轮补齐 `exportLut`、`importLut`、`dumpLut`、`loadLut`，以及 `WireSegment.toDict/fromDict`，支持已存在 LUT/segment/result 外层状态导出导入
+  - 第七轮补齐 `TechChar.validateLut` 和 `WireSegment.validate`，检查 LUT key、segment 索引、负延迟/负 slew、bounds、RC 单位和 buffer master/location 数量一致性；`TechChar.report` 增加合法性摘要
   - 补齐后续算法入口：`finalizeRootSinkBuffers`、`getMaxCapLimit`、`collectSlewsLoadsFromTableAxis`、`reduceOrExpand`、`smallestDiffIter`、`largestDiffIter`、`createPatterns`、`createStaInstance`、`setParasitics`、`computeTopologyResults`、`updateBufferTopologies`、`cellNameToID`、`getCurrConfig`、`getNextConfig`、`getMasterFromConfig`、`swapTopologyBuffer`
   - `WireSegment` 补齐 input cap/input slew/length/load/output slew 查询接口
 - 翻译 `TreeBuilder.h` 树构建器边界：
@@ -62,6 +66,7 @@
   - 第三轮补齐 `getTechChar`、`getLogger`、`addBlockage`、`getBlockages`、`clearBlockages`、`setBufferSize`、`getLegalizationCandidates`、`getOccupiedLocs`、`clearOccupiedLocs`
   - 第四轮补齐纯几何/状态版 `mergeBlockages`、`findBlockage`、`checkLegalityLoc`、`legalizeOneBuffer`、`resetLegalizationState`、`reportLegalizationState`
   - 第六轮补齐 `reportLegalizationCandidates`、`reportCandidateLegalization`，报告候选点、占用状态、blockage 命中和第一个可选合法点
+  - 第七轮补齐 `exportLegalizationState`、`importLegalizationState`、`validateLegalizationState`、`snapshotState`，支持 blockage/occupied/insertion delay 状态往返和合法性报告
 - 翻译 `HTreeBuilder.h` H-tree 入口：
   - `LevelTopology`
   - `SegmentBuilder`
@@ -103,6 +108,7 @@
   - 补齐 `clear`，用于释放 builders、clock roots、net/builder 索引、DB/NDR 标记和统计计数
   - 第四轮补齐 `report`、bookkeeping metrics、`setupCharacterization` 状态挂接、`getAllClockTreeLevels` 状态查询、clock net/fixed net/inst/subnet 注册和 `clearClockBookkeeping`
   - 第六轮补齐 `snapshotState`、`dumpStateSnapshot`、`reportStateSnapshot`，聚合 options profile、TechChar report/LUT、clock network 序列化、builder legalization、clock root、DB/NDR 标记和 clock bookkeeping 状态
+  - 第七轮补齐 `loadStateSnapshot` 和 `validateState`，可从 `snapshotState(include_lut=True)` 恢复 options、TechChar LUT、builder clock/legalization 纯状态，并聚合 options/tech_char/clock/tree builder/bookkeeping 合法性错误；`report` 增加 `valid/validation_errors`
 
 ## 未实现
 
@@ -114,6 +120,7 @@
 - `LatencyBalancer.cpp` 中 STA 初始化、graph 构建、delay buffer 插入与传播。
 - `TritonCTS.cpp` 中完整 run 流程、clock root 查找、DB 写回、NDR 写回、macro/register 分树、dummy load、clock net repair。
 - 真实 CTS 构树、合法化、DB 写回、NDR 写回、dummy load 插入、repair clock nets、latency balance、STA/OpenDB/Resizer 联动入口全部保留同名函数并显式抛出 `NotImplementedError`，避免伪造算法行为。
+- 第七轮 smoke 已覆盖 snapshot 往返和 `runTritonCts`、`writeDataToDb`、`repairClockNets`、`balanceLatency` 仍抛 `NotImplementedError`。
 
 ## 说明
 

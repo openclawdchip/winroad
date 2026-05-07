@@ -699,6 +699,277 @@ class GlobalRouter:
             "nets": nets,
         }
 
+    @staticmethod
+    def _segment_orientation(segment: GSegment) -> str:
+        """返回 segment 的方向标签，保持 report 字段稳定。"""
+
+        if segment.isVia():
+            return "via"
+        if segment.init_layer != segment.final_layer:
+            return "layer_change"
+        if segment.init_y == segment.final_y:
+            return "horizontal"
+        if segment.init_x == segment.final_x:
+            return "vertical"
+        return "non_manhattan"
+
+    @staticmethod
+    def _segment_unit_edges(segment: GSegment) -> List[Tuple[int, int, int, int, int]]:
+        """把同层曼哈顿 segment 展开为 unit grid edges。
+
+        FastRoute 的资源表按相邻 grid edge 保存；guide segment 可以跨多个
+        tile，因此 report 查询资源时需要做这个轻量展开。via 不消耗二维
+        edge，真实 via cost/resistance 仍由未移植入口负责。
+        """
+
+        if segment.isVia() or segment.init_layer != segment.final_layer:
+            return []
+        if segment.init_x != segment.final_x and segment.init_y != segment.final_y:
+            return []
+        edges: List[Tuple[int, int, int, int, int]] = []
+        if segment.init_x == segment.final_x:
+            step = 1 if segment.final_y >= segment.init_y else -1
+            for y in range(segment.init_y, segment.final_y, step):
+                edges.append((segment.init_x, y, segment.final_x, y + step, segment.init_layer))
+        else:
+            step = 1 if segment.final_x >= segment.init_x else -1
+            for x in range(segment.init_x, segment.final_x, step):
+                edges.append((x, segment.init_y, x + step, segment.final_y, segment.init_layer))
+        return edges
+
+    def getSegmentStatus(
+        self,
+        segment: GSegment,
+        *,
+        net: Any = None,
+        index: Optional[int] = None,
+        include_resources: bool = True,
+    ) -> Dict[str, Any]:
+        """返回单个 GSegment 的状态查询结果。
+
+        该接口只解释已有 segment，不尝试修正、拆线或估算绕线；这让它能安全
+        用在 guide/segment 序列化后的 round-trip 校验中。
+        """
+
+        low_layer = min(segment.init_layer, segment.final_layer)
+        high_layer = max(segment.init_layer, segment.final_layer)
+        status: Dict[str, Any] = {
+            "net": _object_name(net) if net is not None else "",
+            "index": index,
+            "segment": segment.toDict(),
+            "orientation": self._segment_orientation(segment),
+            "is_line": self.segmentIsLine(segment),
+            "is_via": segment.isVia(),
+            "is_jumper": segment.isJumper(),
+            "is_3d_route": segment.is3DRoute(),
+            "length": segment.length(),
+            "layer_span": [low_layer, high_layer],
+            "bbox": list(self.globalRoutingToBox(segment)),
+            "endpoints": [
+                {"x": segment.init_x, "y": segment.init_y, "layer": segment.init_layer},
+                {"x": segment.final_x, "y": segment.final_y, "layer": segment.final_layer},
+            ],
+        }
+        if include_resources:
+            status["resource_edges"] = [
+                self.fastroute_core.getEdgeResourceRecord(x1, y1, x2, y2, layer)
+                for x1, y1, x2, y2, layer in self._segment_unit_edges(segment)
+            ]
+        return status
+
+    def validateSegment(self, segment: GSegment, *, net: Any = None, index: Optional[int] = None) -> Dict[str, Any]:
+        """校验单个 segment 的边界合法性，返回结构化问题列表。"""
+
+        issues: List[Dict[str, Any]] = []
+        if segment.init_layer <= 0 or segment.final_layer <= 0:
+            issues.append({"type": "non_positive_layer", "message": "routing layer 应为正数"})
+        if segment.init_layer != segment.final_layer and not segment.isVia():
+            issues.append({"type": "layer_change_not_via", "message": "跨层 segment 必须保持同一 x/y"})
+        if (
+            segment.init_layer == segment.final_layer
+            and segment.init_x != segment.final_x
+            and segment.init_y != segment.final_y
+        ):
+            issues.append({"type": "non_manhattan", "message": "同层 segment 必须水平或垂直"})
+        if segment.init_x == segment.final_x and segment.init_y == segment.final_y and segment.init_layer == segment.final_layer:
+            issues.append({"type": "zero_length", "message": "同点同层 segment 没有线长或 via 含义"})
+        if self.grid.x_grids and (
+            min(segment.init_x, segment.final_x) < 0 or max(segment.init_x, segment.final_x) >= self.grid.x_grids
+        ):
+            issues.append({"type": "x_out_of_grid", "message": "segment x 坐标超出 grid 范围"})
+        if self.grid.y_grids and (
+            min(segment.init_y, segment.final_y) < 0 or max(segment.init_y, segment.final_y) >= self.grid.y_grids
+        ):
+            issues.append({"type": "y_out_of_grid", "message": "segment y 坐标超出 grid 范围"})
+        if self.grid.num_layers and max(segment.init_layer, segment.final_layer) > self.grid.num_layers:
+            issues.append({"type": "layer_out_of_grid", "message": "segment layer 超出 grid layer 范围"})
+        return {
+            "format": "winroad-grt-segment-validation",
+            "version": 1,
+            "valid": not issues,
+            "issue_count": len(issues),
+            "net": _object_name(net) if net is not None else "",
+            "index": index,
+            "issues": issues,
+        }
+
+    def validateRoute(self, db_net: Any) -> Dict[str, Any]:
+        """校验单 net 的当前 route。
+
+        覆盖轻量边界：segment 几何、端点连通性、pin 是否被已有 segment 覆盖。
+        不调用 pin access、maze routing 或 OpenDB wire 修复逻辑。
+        """
+
+        route = self.routes.get(db_net, [])
+        issues: List[Dict[str, Any]] = []
+        segment_reports = []
+        for index, segment in enumerate(route):
+            seg_report = self.validateSegment(segment, net=db_net, index=index)
+            segment_reports.append(seg_report)
+            for issue in seg_report["issues"]:
+                issues.append({"type": issue["type"], "segment_index": index, "message": issue["message"]})
+        if not route:
+            issues.append({"type": "empty_route", "message": "net 没有保存任何 global-route segment"})
+        elif not self.isConnected(db_net):
+            issues.append({"type": "disconnected_route", "message": "route segment 端点图不连通"})
+
+        net = self.db_net_map.get(db_net)
+        uncovered_pins: List[str] = []
+        if net is not None:
+            for pin in net.getPins():
+                if not any(self.segmentCoversPin(segment, pin) for segment in route):
+                    uncovered_pins.append(pin.getName())
+            if uncovered_pins:
+                issues.append(
+                    {
+                        "type": "uncovered_pins",
+                        "message": "已有 route 未覆盖部分 pin 的 on-grid 坐标",
+                        "pins": uncovered_pins,
+                    }
+                )
+        return {
+            "format": "winroad-grt-route-validation",
+            "version": 1,
+            "net": _object_name(db_net),
+            "valid": not issues,
+            "issue_count": len(issues),
+            "issues": issues,
+            "segments": segment_reports,
+            "uncovered_pins": uncovered_pins,
+        }
+
+    def validateRoutes(self, nets: Optional[Sequence[Any]] = None) -> Dict[str, Any]:
+        """批量校验 routes，返回全局和逐 net 结果。"""
+
+        selected_nets = list(nets) if nets is not None else list(self.routes)
+        net_reports = [self.validateRoute(db_net) for db_net in selected_nets]
+        resource_report = self.fastroute_core.validateResources()
+        issue_count = sum(report["issue_count"] for report in net_reports) + resource_report["issue_count"]
+        return {
+            "format": "winroad-grt-routes-validation",
+            "version": 1,
+            "valid": issue_count == 0,
+            "issue_count": issue_count,
+            "net_count": len(net_reports),
+            "nets": net_reports,
+            "resources": resource_report,
+        }
+
+    def getNetRouteStatus(self, db_net: Any, *, include_segments: bool = True) -> Dict[str, Any]:
+        """返回单 net 的 route/guide/net 状态汇总。"""
+
+        net = self.db_net_map.get(db_net)
+        route = self.routes.get(db_net, [])
+        status = {
+            "net": _object_name(db_net),
+            "registered": net is not None,
+            "pin_count": net.getNumPins() if net is not None else 0,
+            "layer_range": list(self.getNetLayerRange(db_net)),
+            "alpha_beta_gamma": list(self.getNetAlphaBetaGamma(db_net)),
+            "metrics": self.getNetRouteMetrics(db_net),
+            "validation": self.validateRoute(db_net),
+            "has_route": bool(route),
+            "partial_segment_count": len(self.partial_routes.get(db_net, [])),
+        }
+        if include_segments:
+            status["segments"] = [
+                self.getSegmentStatus(segment, net=db_net, index=index)
+                for index, segment in enumerate(route)
+            ]
+        return status
+
+    def getRoutesStatus(self, nets: Optional[Sequence[Any]] = None) -> Dict[str, Any]:
+        """批量返回 routes 状态，作为 report/序列化的统一入口。"""
+
+        selected_nets = list(nets) if nets is not None else list(self.routes)
+        return {
+            "format": "winroad-grt-routes-status",
+            "version": 1,
+            "net_count": len(selected_nets),
+            "metrics": self.getRouteMetrics(),
+            "validation": self.validateRoutes(selected_nets),
+            "resource_summary": self.fastroute_core.getResourceSummary(),
+            "congestion": self.createCongestionReport(),
+            "nets": [self.getNetRouteStatus(db_net) for db_net in selected_nets],
+        }
+
+    def createRouteReport(self, nets: Optional[Sequence[Any]] = None) -> Dict[str, Any]:
+        """创建 JSON 安全 route report。"""
+
+        report = self.getRoutesStatus(nets)
+        report["format"] = "winroad-grt-route-report"
+        report["state_format"] = "winroad-grt-state"
+        return report
+
+    def writeRouteReport(self, file_name: str, nets: Optional[Sequence[Any]] = None) -> None:
+        """写出 route/net/segment/resource/congestion 聚合 report。"""
+
+        with open(file_name, "w", encoding="utf-8") as out:
+            json.dump(self.createRouteReport(nets), out, indent=2)
+            out.write("\n")
+
+    def writeBatchReports(self, reports: Dict[str, str], nets: Optional[Sequence[Any]] = None) -> Dict[str, str]:
+        """批量写 report 文件。
+
+        ``reports`` 的 key 是 report 类型，value 是输出文件名；支持
+        ``route``、``resource``、``congestion``、``state`` 和 ``validation``。
+        返回实际写出的类型到文件名映射。
+        """
+
+        written: Dict[str, str] = {}
+        for report_type, file_name in reports.items():
+            if report_type == "route":
+                self.writeRouteReport(file_name, nets)
+            elif report_type == "resource":
+                self.writeResourceReport(file_name)
+            elif report_type == "congestion":
+                self.writeCongestionReport(file_name)
+            elif report_type == "state":
+                self.saveState(file_name)
+            elif report_type == "validation":
+                with open(file_name, "w", encoding="utf-8") as out:
+                    json.dump(self.validateRoutes(nets), out, indent=2)
+                    out.write("\n")
+            else:
+                raise ValueError(f"未知 grt report 类型: {report_type}")
+            written[report_type] = file_name
+        return written
+
+    def getEdgeResourceRecord(self, x1: int, y1: int, x2: int, y2: int, layer: int) -> Dict[str, int]:
+        """GlobalRouter 侧转发单 edge resource 查询。"""
+
+        return self.fastroute_core.getEdgeResourceRecord(x1, y1, x2, y2, layer)
+
+    def getEdgeResourceRecords(self) -> List[Dict[str, int]]:
+        """返回所有 edge resource records。"""
+
+        return self.fastroute_core.iterEdgeResourceRecords()
+
+    def applyEdgeResourceRecords(self, records: Sequence[Dict[str, int]], *, clear: bool = False) -> int:
+        """批量导入 edge resource records。"""
+
+        return self.fastroute_core.applyEdgeResourceRecords(records, clear=clear)
+
     def startIncremental(self) -> None:
         self.is_incremental = True
         self.grouter_cbk = GRouteDbCbk(self)

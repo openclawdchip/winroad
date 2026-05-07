@@ -254,6 +254,16 @@ class frDebugSettings:
     dumpDir: str = ""
     snapshotDir: str = ""
 
+    def to_dict(self) -> dict[str, Any]:
+        """返回 debug 设置快照；只暴露状态，不触发图形或 worker 调试。"""
+
+        return asdict(self)
+
+    def copy(self) -> "frDebugSettings":
+        """复制一份 debug 设置，便于后续 worker/snapshot 入口复用。"""
+
+        return frDebugSettings(**self.to_dict())
+
 __all__ = [
     "ParamStruct",
     "Point",

@@ -624,6 +624,7 @@ class CtsOptions:
 
     def reportProfile(self) -> Dict[str, Any]:
         profile = self.toProfile()
+        validation = self.validate()
         profile["summary"] = {
             "num_buffers": len(self.buffer_list),
             "num_clock_net_objs": len(self.clock_nets_objs),
@@ -631,7 +632,61 @@ class CtsOptions:
             "num_buffer_count_entries": len(self.buffer_count),
             "num_dummy_count_entries": len(self.dummy_count),
         }
+        profile["valid"] = not validation
+        profile["validation_errors"] = validation
         return profile
 
     def _profileKey(self, value: Any) -> str:
         return str(getattr(value, "name", value))
+
+    def validate(self) -> List[str]:
+        """检查 CTS 选项状态是否满足 Python 接口层可执行前置条件。
+
+        该函数不推断 buffer、不查询 Liberty，也不替代 C++ 的 setup/check；
+        它只把明显会破坏状态导入导出或容器逻辑的参数提前暴露出来。
+        """
+
+        errors: List[str] = []
+        if self.db_units == 0 or self.db_units < -1:
+            errors.append("db_units 必须为 -1 或正整数")
+        if self.wire_segment_unit < 0:
+            errors.append("wire_segment_unit 不能为负数")
+        if self.num_max_leaf_sinks <= 0:
+            errors.append("num_max_leaf_sinks 必须为正数")
+        if self.max_slew < 0:
+            errors.append("max_slew 不能为负数")
+        if self.char_wirelength_iterations <= 0:
+            errors.append("char_wirelength_iterations 必须为正数")
+        if self.cap_steps <= 0:
+            errors.append("cap_steps 必须为正数")
+        if self.slew_steps <= 0:
+            errors.append("slew_steps 必须为正数")
+        if self.clock_tree_max_depth <= 0:
+            errors.append("clock_tree_max_depth 必须为正数")
+        if self.buf_dist_ratio < 0.0:
+            errors.append("buf_dist_ratio 不能为负数")
+        if self.clustering_capacity < 0.0:
+            errors.append("clustering_capacity 不能为负数")
+        if self.max_fanout < 0:
+            errors.append("max_fanout 不能为负数")
+        if self.buffer_distance is not None and self.buffer_distance < 0:
+            errors.append("buffer_distance 不能为负数")
+        if self.vertex_buffer_distance is not None and self.vertex_buffer_distance < 0:
+            errors.append("vertex_buffer_distance 不能为负数")
+        if self.max_diameter < 0.0 or self.macro_max_diameter < 0.0:
+            errors.append("cluster diameter 不能为负数")
+        if self.sink_clusters_size <= 0 or self.macro_sink_clusters_size <= 0:
+            errors.append("cluster size 必须为正数")
+        if self.num_static_layers < 0:
+            errors.append("num_static_layers 不能为负数")
+        if self.sink_buffer_input_cap < 0.0:
+            errors.append("sink_buffer_input_cap 不能为负数")
+        if self.sink_buffer_max_cap_derate < 0.0:
+            errors.append("sink_buffer_max_cap_derate 不能为负数")
+        if self.delay_buffer_derate < 0.0:
+            errors.append("delay_buffer_derate 不能为负数")
+        if not isinstance(self.ndr_strategy, NdrStrategy):
+            errors.append("ndr_strategy 必须是 NdrStrategy")
+        if any(not str(buf) for buf in self.buffer_list):
+            errors.append("buffer_list 不能包含空 buffer 名")
+        return errors

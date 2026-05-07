@@ -60,6 +60,12 @@
   - resource/congestion JSON schema：`FastRouteCore.getResourceSnapshotSchema()`、`getCongestionReportSchema()`，报告新增 `format`、`version`、`schema`，congestion tile record 新增 `overflow`。
   - `GlobalRouter` 状态差异与合并：`diffStateDict()`、`diffState()`、`mergeStateDict()`、`mergeState()`，支持 route replace/append/keep、adjustment replace/append/keep 以及 config/resources 合并开关。
   - Net route metrics：`getNetRouteMetrics()`、`getRouteMetrics()`，统计 segment、wirelength、layer wirelength、via、jumper、bbox、连通性和 pin 数。
+- 第七轮继续补齐 OpenROAD FastRoute/GlobalRouter 边界的状态查询、校验和批处理 report：
+  - `FastRouteCore.setEdgeUsage()`、`getEdgeUsage()`、`getEdgeResourceRecord()`、`iterEdgeResourceRecords()`、`applyEdgeResourceRecords()`，统一使用规范化无向 grid edge，便于 resource JSON round-trip。
+  - `FastRouteCore.getTileCongestionRecord()`、`getResourceSummary()`、`validateResources()`，可查询单 tile 拥塞、资源摘要，并检查负数资源、非相邻 edge、usage-only edge。
+  - `GlobalRouter.getSegmentStatus()`、`validateSegment()`，提供单 segment 的方向、端点、bbox、layer span、unit resource edges 和结构化校验问题。
+  - `GlobalRouter.validateRoute()`、`validateRoutes()`、`getNetRouteStatus()`、`getRoutesStatus()`，补齐 net/route 级状态查询，覆盖 segment 几何、连通性、pin 覆盖和资源校验。
+  - `GlobalRouter.createRouteReport()`、`writeRouteReport()`、`writeBatchReports()`、`getEdgeResourceRecord()`、`getEdgeResourceRecords()`、`applyEdgeResourceRecords()`，提供 route/resource/congestion/state/validation 批量 report 写出接口。
 - 已提供基础便利函数：
   - `create_global_router()`
   - `print_groute()`
@@ -161,6 +167,64 @@ for path in (json1, json2):
 for path in split_dir.glob("*"):
     path.unlink()
 split_dir.rmdir()
+print("smoke ok")
+'@ | python -
+```
+
+## 第七轮验证命令
+
+```powershell
+python -m py_compile D:\winroad_py\winroad\grt\types.py D:\winroad_py\winroad\grt\guide.py D:\winroad_py\winroad\grt\congestion.py D:\winroad_py\winroad\grt\grid.py D:\winroad_py\winroad\grt\fast_route.py D:\winroad_py\winroad\grt\global_router.py D:\winroad_py\winroad\grt\__init__.py
+@'
+from pathlib import Path
+from winroad.grt import GSegment, GlobalRouter, Net, Pin
+
+base = Path("D:/winroad_py")
+r = GlobalRouter()
+r.grid.init((0, 0, 100, 100), 10, 10, 10, True, True, 4)
+r.fastroute().setGridsAndLayers(4, 4, 4)
+r.fastroute().setEdgeCapacity(0, 0, 1, 0, 1, 2)
+r.fastroute().setEdgeUsage(0, 0, 1, 0, 1, 1)
+
+net = "n1"
+wr_net = Net(net)
+wr_net.addPin(Pin(position=(0, 0), on_grid_position=(0, 0), layers=[1], connection_layer=1))
+r.db_net_map[net] = wr_net
+r.setRoute(net, [GSegment(0, 0, 1, 2, 0, 1), GSegment(2, 0, 1, 2, 0, 3)])
+r.updateResources(0, 0, 1, 0, 1, 2, net)
+
+seg_status = r.getSegmentStatus(r.getRoute(net)[0], net=net, index=0)
+assert seg_status["orientation"] == "horizontal"
+assert len(seg_status["resource_edges"]) == 2
+assert r.validateSegment(r.getRoute(net)[0])["valid"]
+assert r.validateRoute(net)["valid"]
+
+records = r.getEdgeResourceRecords()
+r2 = GlobalRouter()
+assert r2.applyEdgeResourceRecords(records, clear=True) == len(records)
+assert r2.getEdgeResourceRecord(1, 0, 0, 0, 1)["usage"] == r.getEdgeResourceRecord(0, 0, 1, 0, 1)["usage"]
+
+report = r.createRouteReport()
+assert report["format"] == "winroad-grt-route-report"
+assert report["validation"]["valid"]
+assert r.fastroute().getTileCongestionRecord(0, 0, 1)["overflow"] >= 0
+assert r.fastroute().validateResources()["valid"]
+
+route_report = base / ".grt_route_report.json"
+validation_report = base / ".grt_validation_report.json"
+written = r.writeBatchReports({"route": str(route_report), "validation": str(validation_report)})
+assert set(written) == {"route", "validation"}
+for path in (route_report, validation_report):
+    assert path.exists()
+    path.unlink()
+
+for call in (r.fastroute().run, r.globalRoute):
+    try:
+        call()
+    except NotImplementedError:
+        pass
+    else:
+        raise AssertionError("routing algorithms must stay unsupported")
 print("smoke ok")
 '@ | python -
 ```

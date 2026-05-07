@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
-from .types import FailedViaReason, Rect, Shape, SplitCut, _name, _not_implemented, _validate_non_negative, _validate_rect
+from .types import FailedViaReason, Rect, Shape, SplitCut, _name, _normalize_failed_via_reason, _not_implemented, _validate_non_negative, _validate_rect
 
 @dataclass
 class Via:
@@ -23,6 +23,8 @@ class Via:
         if self.connect is None:
             raise ValueError("via requires a connect")
         self.area = _validate_rect(self.area, "via area")
+        if self.failed_reason is not None:
+            self.failed_reason = _normalize_failed_via_reason(self.failed_reason)
         if self.lower is not None:
             self.lower.addVia(self)
         if self.upper is not None:
@@ -46,9 +48,9 @@ class Via:
     def getGrid(self) -> "Grid":
         return self.connect.getGrid()
 
-    def markFailed(self, reason: FailedViaReason) -> None:
+    def markFailed(self, reason: FailedViaReason | str) -> None:
         self.failed = True
-        self.failed_reason = reason
+        self.failed_reason = _normalize_failed_via_reason(reason)
 
     def report(self) -> Dict[str, Any]:
         return {
@@ -278,10 +280,15 @@ class Connect:
     failed_vias: Dict[FailedViaReason, List[Tuple[Any, Rect]]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if self.grid is None:
+            raise ValueError("connect requires a grid")
+        if self.layer0 is None or self.layer1 is None:
+            raise ValueError("connect requires both lower and upper layers")
         self.setSplitCuts(self.split_cuts)
         self.setCutPitch(self.cut_pitch_x, self.cut_pitch_y)
         self.setMaxRows(self.max_rows)
         self.setMaxColumns(self.max_columns)
+        self.ongrid = set(self.ongrid)
 
     def addFixedVia(self, via: Any) -> None:
         if via not in self.fixed_generate_vias:
@@ -355,6 +362,10 @@ class Connect:
             raise ValueError("via is attached to a different connect")
         if via not in self.vias:
             self.vias.append(via)
+        if via.lower is not None:
+            via.lower.addVia(via)
+        if via.upper is not None:
+            via.upper.addVia(via)
 
     def makeVia(self, wire: Any, lower: Shape, upper: Shape, wire_type: Any, via_shapes: Any) -> None:
         _not_implemented("Connect::makeVia")
@@ -366,16 +377,20 @@ class Connect:
         self.fixed_generate_vias = [via for via in self.fixed_generate_vias if _name(via) not in blocked]
         self.fixed_tech_vias = [via for via in self.fixed_tech_vias if _name(via) not in blocked]
 
-    def addFailedVia(self, reason: FailedViaReason, rect: Rect, net: Any) -> None:
-        if not isinstance(reason, FailedViaReason):
-            reason = FailedViaReason[str(reason).upper()]
+    def addFailedVia(self, reason: FailedViaReason | str, rect: Rect, net: Any) -> None:
+        reason = _normalize_failed_via_reason(reason)
         self.failed_vias.setdefault(reason, []).append((net, _validate_rect(rect, "failed via rect")))
 
     def clearFailedVias(self) -> None:
         self.failed_vias.clear()
 
     def printViaReport(self) -> Dict[str, int]:
-        return {reason.value: len(items) for reason, items in self.failed_vias.items()}
+        report = {reason.value: len(items) for reason, items in self.failed_vias.items()}
+        for via in self.vias:
+            if via.failed:
+                reason = via.failed_reason or FailedViaReason.OTHER
+                report[reason.value] = report.get(reason.value, 0) + 1
+        return report
 
     def failedViaReport(self, include_locations: bool = True) -> Dict[str, Any]:
         by_reason = self.printViaReport()
@@ -384,6 +399,10 @@ class Connect:
             for reason, items in self.failed_vias.items():
                 for net, rect in items:
                     failures.append({"reason": reason.value, "net": _name(net) if net is not None else None, "rect": rect})
+            for via in self.vias:
+                if via.failed:
+                    reason = via.failed_reason or FailedViaReason.OTHER
+                    failures.append({"reason": reason.value, "net": _name(via.net) if via.net is not None else None, "rect": via.area})
         return {
             "grid": self.grid.getLongName(),
             "layers": [_name(self.layer0), _name(self.layer1)],

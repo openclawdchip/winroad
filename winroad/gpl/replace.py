@@ -79,6 +79,11 @@ class Replace:
     def clearPlacementClusters(self) -> None:
         self.clusters_.clear()
 
+    def getPlacementClusters(self) -> Clusters:
+        """返回 cluster 拷贝，避免调用方直接改内部容器。"""
+
+        return [list(cluster) for cluster in self.clusters_]
+
     def getTotalPlaceableInsts(self) -> int:
         return self.total_placeable_insts_
 
@@ -187,6 +192,31 @@ class Replace:
             return {}
         return self.tb_.reportTimingDriven()
 
+    def reportDebug(self) -> Dict[str, Any]:
+        """导出 GUI/debug 配置状态，和 C++ debug setter 字段一一对应。"""
+
+        return {
+            "enabled": self.gui_debug_,
+            "pause_iterations": self.gui_debug_pause_iterations_,
+            "update_iterations": self.gui_debug_update_iterations_,
+            "draw_bins": self.gui_debug_draw_bins_,
+            "initial": self.gui_debug_initial_,
+            "inst": getattr(self.gui_debug_inst_, "name", None),
+            "start_iter": self.gui_debug_start_iter_,
+            "rudy_start": self.gui_debug_rudy_start_,
+            "rudy_stride": self.gui_debug_rudy_stride_,
+            "generate_images": self.gui_debug_generate_images_,
+            "images_path": self.gui_debug_images_path_,
+        }
+
+    def reportClusters(self) -> Dict[str, Any]:
+        """导出 placement cluster 关系摘要。"""
+
+        return {
+            "clusters": len(self.clusters_),
+            "cluster_sizes": [len(cluster) for cluster in self.clusters_],
+        }
+
     def reportStatus(self) -> Dict[str, Any]:
         return {
             "placeable_insts": self.total_placeable_insts_,
@@ -199,7 +229,10 @@ class Replace:
             "nesterov_place": self.reportNesterovPlace(),
             "routability": self.reportRoutability(),
             "timing": self.reportTimingDriven(),
-            "base_common": self.pbc_.printInfo() if self.pbc_ is not None else {},
+            "debug": self.reportDebug(),
+            "cluster_report": self.reportClusters(),
+            "base_common": self.pbc_.reportConnectivity() if self.pbc_ is not None else {},
+            "placer_bases": [pb.reportStatus() for pb in self.pbVec_],
             "nesterov_base_common": self.nbc_.reportStatus() if self.nbc_ is not None else {},
         }
 
@@ -219,6 +252,36 @@ class Replace:
         options.overflow = overflow
         options.validate(self.log_)
 
+    def setTimingDrivenMode(self, options: PlaceOptions, enabled: bool) -> None:
+        options.timingDrivenMode = enabled
+        options.validate(self.log_)
+
+    def setRoutabilityDrivenMode(self, options: PlaceOptions, enabled: bool) -> None:
+        options.routabilityDrivenMode = enabled
+        options.validate(self.log_)
+
+    def setBinGridCnt(self, options: PlaceOptions, bin_cnt_x: int, bin_cnt_y: int) -> None:
+        options.binGridCntX = bin_cnt_x
+        options.binGridCntY = bin_cnt_y
+        options.validate(self.log_)
+
+    def setPad(self, options: PlaceOptions, pad_left: int, pad_right: int) -> None:
+        options.padLeft = pad_left
+        options.padRight = pad_right
+        options.validate(self.log_)
+
+    def setTimingNetWeightOverflows(self, options: PlaceOptions, overflows: List[int]) -> None:
+        options.timingNetWeightOverflows = list(overflows)
+        options.validate(self.log_)
+        if self.tb_ is not None:
+            self.tb_.setTimingNetWeightOverflows(options.timingNetWeightOverflows)
+
+    def setTimingNetWeightMax(self, options: PlaceOptions, max_weight: float) -> None:
+        options.timingNetWeightMax = max_weight
+        options.validate(self.log_)
+        if self.tb_ is not None:
+            self.tb_.setTimingNetWeightMax(max_weight)
+
     def initNesterovPlace(self, options: PlaceOptions, threads: int, check_density: bool) -> bool:
         options.validate(self.log_)
         if self.pbc_ is None:
@@ -234,6 +297,7 @@ class Replace:
                 self.nbVec_.append(NesterovBase(nbVars, pb, self.nbc_, self.log_))
         if self.rb_ is None:
             self.rb_ = RouteBase(RouteBaseVars.from_options(options), self.db_, self.fr_, self.nbc_, self.nbVec_, self.log_)
+            self.rb_.initRouteBase()
         if self.tb_ is None:
             self.tb_ = TimingBase(self.nbc_, self.fr_, self.rs_, self.log_)
             self.tb_.setTimingNetWeightOverflows(options.timingNetWeightOverflows)

@@ -230,6 +230,36 @@ class RepairDesignViolationCounters:
             "max_fanout": self.max_fanout,
         }
 
+def _move_type_from_value(value: Any) -> MoveType:
+    """把配置导入里的字符串/枚举归一化为 ``MoveType``。
+
+    这里不调用 ``Resizer.parseMove``，避免 common.py 反向依赖顶层入口；别名只覆盖
+    OpenROAD Tcl/日志里常见写法，未知值直接报错，防止批处理配置静默漏项。
+    """
+
+    if isinstance(value, MoveType):
+        return value
+    normalized = str(value).strip().lower().replace("-", "_")
+    aliases = {
+        "buffer": MoveType.BUFFER,
+        "unbuffer": MoveType.UNBUFFER,
+        "swap": MoveType.SWAP,
+        "size": MoveType.SIZE,
+        "sizeup": MoveType.SIZEUP,
+        "size_up": MoveType.SIZEUP,
+        "sizedown": MoveType.SIZEDOWN,
+        "size_down": MoveType.SIZEDOWN,
+        "clone": MoveType.CLONE,
+        "split": MoveType.SPLIT,
+        "vtswap_speed": MoveType.VTSWAP_SPEED,
+        "vt_swap_speed": MoveType.VTSWAP_SPEED,
+        "sizeup_match": MoveType.SIZEUP_MATCH,
+        "size_up_match": MoveType.SIZEUP_MATCH,
+    }
+    if normalized not in aliases:
+        raise ValueError(f"unknown rsz move: {value}")
+    return aliases[normalized]
+
 @dataclass
 class RepairSetupConfig:
     """RepairSetup 一轮优化使用的轻量配置。"""
@@ -261,6 +291,29 @@ class RepairSetupConfig:
             "move_sequence": [move.value for move in self.move_sequence],
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RepairSetupConfig":
+        """从 JSON-safe dict 恢复 setup 配置。
+
+        调用方常从 Tcl/Python 批处理读入字符串 move 名称；这里统一转为枚举，但不
+        启动任何优化动作。
+        """
+
+        moves = [_move_type_from_value(move) for move in data.get("move_sequence", [])]
+        return cls(
+            setup_slack_margin=float(data.get("setup_slack_margin", 0.0)),
+            verbose=bool(data.get("verbose", False)),
+            skip_pin_swap=bool(data.get("skip_pin_swap", False)),
+            skip_gate_cloning=bool(data.get("skip_gate_cloning", False)),
+            skip_size_down=bool(data.get("skip_size_down", False)),
+            skip_buffering=bool(data.get("skip_buffering", False)),
+            skip_buffer_removal=bool(data.get("skip_buffer_removal", False)),
+            skip_vt_swap=bool(data.get("skip_vt_swap", False)),
+            max_repairs_per_pass=int(data.get("max_repairs_per_pass", 1)),
+            max_end_repairs=int(data.get("max_end_repairs", -1)),
+            move_sequence=moves,
+        )
+
 @dataclass
 class RepairHoldConfig:
     """RepairHold 的 pass limit、buffer 和 setup 保护配置。"""
@@ -280,6 +333,18 @@ class RepairHoldConfig:
             "setup_slack_margin": self.setup_slack_margin,
         }
 
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RepairHoldConfig":
+        """从导出 dict 恢复 hold 配置；buffer cell 保留为导入对象/名称。"""
+
+        return cls(
+            buffer_cell=data.get("buffer_cell"),
+            max_passes=int(data.get("max_passes", 0)),
+            max_repairs_per_pass=int(data.get("max_repairs_per_pass", 0)),
+            allow_setup_violations=bool(data.get("allow_setup_violations", False)),
+            setup_slack_margin=float(data.get("setup_slack_margin", 0.0)),
+        )
+
 @dataclass
 class RecoverPowerConfig:
     """RecoverPower 的轻量配置，不触发 cell swap / size-down。"""
@@ -297,6 +362,71 @@ class RecoverPowerConfig:
             "verbose": self.verbose,
             "scene": _json_value(self.scene),
             "setup_slack_margin": self.setup_slack_margin,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "RecoverPowerConfig":
+        """从 JSON-safe dict 恢复 power recovery 配置。"""
+
+        return cls(
+            recover_power_percent=float(data.get("recover_power_percent", 0.0)),
+            match_cell_footprint=bool(data.get("match_cell_footprint", False)),
+            verbose=bool(data.get("verbose", False)),
+            scene=data.get("scene"),
+            setup_slack_margin=float(data.get("setup_slack_margin", 1e-11)),
+        )
+
+@dataclass
+class RepairFlowState:
+    """Repair* 流程通用状态快照。
+
+    C++ 对象通常把配置、计数器和当前工作集散落在成员变量里；Python 接口层提供
+    一个只读快照对象，便于测试、批处理日志和后续 Tcl report 复用。
+    """
+
+    name: str
+    config: Dict[str, Any] = field(default_factory=dict)
+    counters: Dict[str, Any] = field(default_factory=dict)
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "config": _json_value(self.config),
+            "counters": _json_value(self.counters),
+            "details": _json_value(self.details),
+        }
+
+@dataclass
+class BufferedNetState:
+    """BufferedNet 的树和指标快照。"""
+
+    tree: Dict[str, Any]
+    metrics: Dict[str, Any]
+    text: str = ""
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"tree": self.tree, "metrics": self.metrics, "text": self.text}
+
+@dataclass
+class MoveTrackerState:
+    """MoveTracker 的 endpoint、violator 和 move 统计快照。"""
+
+    current_endpoint: Any
+    move_summary: Dict[str, int]
+    move_summary_by_type: Dict[str, Dict[str, int]]
+    critical_pins: List[Any] = field(default_factory=list)
+    violators: List[Any] = field(default_factory=list)
+    pending_count: int = 0
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "current_endpoint": _json_value(self.current_endpoint),
+            "critical_pins": _json_value(self.critical_pins),
+            "violators": _json_value(self.violators),
+            "move_summary": self.move_summary,
+            "move_summary_by_type": self.move_summary_by_type,
+            "pending_count": self.pending_count,
         }
 
 @dataclass

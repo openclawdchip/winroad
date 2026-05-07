@@ -147,3 +147,27 @@
 - `cts`：补 Clock network 序列化、CtsOptions profile 导入导出、TechChar LUT 导入导出、TreeBuilder candidate/legalization 报告、TritonCTS 顶层状态快照。
 - `pdn`：补 PdnGen config/state 导入导出、domain/grid/component 汇总、via failure 聚合、renderer selection snapshot、sroute summary。
 - `rcx`：从单文件拆成 package，保留旧 `winroad/rcx.py` 兼容转发，补 config/status/report、corner 校验和 options 状态。
+
+## 2026-05-07 第七轮
+
+本轮继续 6 线程并行。`rcx` 已完成 package 化，本轮回到 `gpl/grt/rsz/cts/pdn/drt`
+六个非 ODB 顶层模块，继续按 OpenROAD C++ 文件边界补接口层状态、序列化、校验和 report。
+`odb` 仍放到最后。
+
+| 模块 | 线程 id | 昵称 | 状态 | 负责范围 |
+| --- | --- | --- | --- | --- |
+| `gpl` | `019e029d-8a70-7ba1-b5cd-185f7c9e2595` | Volta | 已完成 | `winroad/gpl/*`, `docs/gpl.md` |
+| `grt` | `019e029d-8add-7910-9ffd-4789ddf6a0ed` | Hubble | 已完成 | `winroad/grt/*`, `docs/grt.md` |
+| `rsz` | `019e029d-8b5f-7721-9f79-fec71ec163ee` | Huygens | 已完成 | `winroad/rsz/*`, `docs/rsz.md` |
+| `cts` | `019e029d-8b94-7ca0-835e-097a3a561892` | Erdos | 已完成 | `winroad/cts/*`, `docs/cts.md` |
+| `pdn` | `019e029d-8baf-7272-837f-906612f591d6` | Avicenna | 已完成 | `winroad/pdn/*`, `docs/pdn.md` |
+| `drt` | `019e029d-8bcc-71e2-be2f-6d94c554984c` | Jason | 已完成 | `winroad/drt/*`, `docs/drt.md` |
+
+### 第七轮已完成摘要
+
+- `gpl`：补 Instance/Pin/Net/GCell/GPin/GNet/Tile 报告、pin 关系重建、DB 删除关系断开、tile grid 查询、Replace 配置 setter。
+- `grt`：补 edge resource/usage record、tile congestion record、segment/net/routes 状态查询、结构化校验、route 聚合 report 和批量 report 写出。
+- `rsz`：补 RepairFlowState、BufferedNetState、MoveTrackerState，RepairDesign/Setup/Hold/RecoverPower 配置导入导出、批处理校验和顶层 Resizer 转发。
+- `cts`：补 Clock network 合法性校验、CtsOptions profile 校验、TechChar LUT/WireSegment 校验、TreeBuilder 合法化状态导入导出、TritonCTS snapshot 往返。
+- `pdn`：补 PdnIssue/setup issue 聚合、shape/connection/repair/via 几何参数校验、failed via reason 归一化、config/state import 重复与版本校验。
+- `drt`：补 frDesign/frBlock/frNet/frVia/frLayer/FlexDR/FlexGR/FlexGridGraph/FlexPA/GC/TritonRoute 状态访问、snapshot、guide/marker/report 汇总和配置接口。

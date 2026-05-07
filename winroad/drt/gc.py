@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 from .fr import frDesign, frMarker, frTechObject
 from .types import Rect, RouterConfiguration, _unsupported
@@ -58,11 +58,42 @@ class FlexGCWorker:
     def setIgnoreMinArea(self) -> None:
         self.ignore_min_area_ = True
 
+    def getExtBox(self) -> Rect:
+        return self.ext_box_
+
+    def getDrcBox(self) -> Rect:
+        return self.drc_box_
+
+    def getTargetObjs(self) -> Set[Any]:
+        return self.target_objs_
+
+    def addMarker(self, marker: frMarker) -> None:
+        """记录外部已创建 marker；不执行 DRC 检查。"""
+
+        self.markers_.append(marker)
+
+    def clearMarkers(self) -> None:
+        self.markers_.clear()
+
     def getMarkers(self) -> List[frMarker]:
         return self.markers_
 
     def getPWires(self) -> List[Any]:
         return self.pwires_
+
+    def snapshot(self) -> Dict[str, Any]:
+        """返回 GC worker 状态；不跑规则检查，也不更新 DR net。"""
+
+        return {
+            "ext_box": self.ext_box_,
+            "drc_box": self.drc_box_,
+            "target_net": getattr(self.target_net_, "getName", lambda: str(self.target_net_))() if self.target_net_ is not None else "",
+            "target_objs": len(self.target_objs_),
+            "markers": [marker.to_dict() if hasattr(marker, "to_dict") else str(marker) for marker in self.markers_],
+            "pwires": len(self.pwires_),
+            "ignore_db": self.ignore_db_,
+            "ignore_min_area": self.ignore_min_area_,
+        }
 
     def init(self, design: frDesign) -> None:
         _unsupported("FlexGCWorker::init")

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
-from .types import ExtensionMode, GridComponentType, Halo, Rect, Shape, _name, _normalize_extension_mode, _not_implemented, _validate_halo, _validate_non_negative, _validate_positive, _validate_rect
+from .types import ExtensionMode, GridComponentType, Halo, PdnIssue, Rect, Shape, _name, _normalize_extension_mode, _not_implemented, _validate_halo, _validate_non_negative, _validate_positive, _validate_rect
 
 @dataclass
 class GridComponent:
@@ -86,6 +86,15 @@ class GridComponent:
             "shape_count": len(self.shapes),
             "shapes": [shape.report() for shape in self.shapes],
         }
+
+    def collectSetupIssues(self, path: str = "") -> List[PdnIssue]:
+        issues: List[PdnIssue] = []
+        location = path or f"component:{type(self).__name__}"
+        try:
+            self.checkLayerSpecifications()
+        except ValueError as exc:
+            issues.append(PdnIssue(location, str(exc)))
+        return issues
 
     def type(self) -> GridComponentType:
         raise NotImplementedError
@@ -173,6 +182,8 @@ class Rings(GridComponent):
                 raise ValueError("ring layer is required")
             _validate_positive(layer.width, "ring width")
             _validate_non_negative(layer.spacing, "ring spacing")
+        if all(layer.layer == self.layers[0].layer for layer in self.layers):
+            raise ValueError("rings require two different routing layers")
 
 
 @dataclass
@@ -256,6 +267,8 @@ class Straps(GridComponent):
             _validate_positive(self.pitch, "strap pitch")
         _validate_non_negative(self.spacing, "strap spacing")
         _validate_non_negative(self.number_of_straps, "number_of_straps")
+        if self.number_of_straps > 1 and self.spacing == 0:
+            raise ValueError("multi-strap groups require positive spacing")
 
 
 @dataclass

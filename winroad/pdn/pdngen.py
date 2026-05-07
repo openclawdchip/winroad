@@ -10,7 +10,7 @@ from .domain import GridSwitchedPower, PowerCell, VoltageDomain
 from .grid import BumpGrid, CoreGrid, ExistingGrid, Grid, InstanceGrid
 from .renderer import PDNRenderer
 from .sroute import SRoute
-from .types import ExtensionMode, FailedViaReason, GridComponentType, GridType, Halo, PowerSwitchNetworkType, Rect, Shape, ShapeType, SplitCut, StartsWith, _name, _normalize_extension_mode, _normalize_power_switch_network, _not_implemented, _rect_intersects, _starts_with_power
+from .types import ExtensionMode, FailedViaReason, GridComponentType, GridType, Halo, PdnIssue, PowerSwitchNetworkType, Rect, Shape, ShapeType, SplitCut, StartsWith, _name, _normalize_extension_mode, _normalize_power_switch_network, _not_implemented, _rect_intersects, _starts_with_power, _validate_optional_rect, _validate_rect
 from .via import Connect, Via
 
 @dataclass
@@ -53,6 +53,7 @@ class PdnGen:
             "sroute": self.sroute.report() if self.sroute is not None else None,
             "sroute_connects": self.sroute.getSrouteConnects() if self.sroute is not None else [],
             "debug_renderer": self.debug_renderer.report() if self.debug_renderer is not None else None,
+            "setup_issues": self.reportSetupIssues(),
         }
 
     def reportSummary(self) -> Dict[str, Any]:
@@ -71,6 +72,7 @@ class PdnGen:
             "allow_repair_channels": self.allow_repair_channels,
             "sroute": self.sroute.summary() if self.sroute is not None else None,
             "renderer": self.debug_renderer.snapshot() if self.debug_renderer is not None else None,
+            "setup_issue_count": len(self.collectSetupIssues()),
             "domains": domain_summaries,
         }
 
@@ -114,6 +116,7 @@ class PdnGen:
         }
 
     def importConfig(self, data: Mapping[str, Any], resolver: Any = None) -> "PdnGen":
+        self._check_version(data)
         db = self.db
         logger = self.logger
         self.reset()
@@ -133,10 +136,15 @@ class PdnGen:
                     self._resolve_ref(cell_data.get("ground"), resolver),
                 )
             )
+        seen_domains: Set[str] = set()
         for domain_data in data.get("domains", []):
+            domain_name = str(domain_data["name"])
+            if domain_name in seen_domains:
+                raise ValueError(f"duplicate voltage domain in config: {domain_name!r}")
+            seen_domains.add(domain_name)
             domain = VoltageDomain(
                 pdngen=self,
-                name=str(domain_data["name"]),
+                name=domain_name,
                 block=self._get_block(),
                 power=self._resolve_ref(domain_data.get("power"), resolver),
                 ground=self._resolve_ref(domain_data.get("ground"), resolver),
@@ -146,6 +154,8 @@ class PdnGen:
                 switched_power=self._resolve_ref(domain_data.get("switched_power"), resolver),
             )
             if domain_data.get("core", False):
+                if self.core_domain is not None:
+                    raise ValueError("config contains more than one core voltage domain")
                 self.core_domain = domain
             else:
                 self.domains.append(domain)
@@ -165,6 +175,7 @@ class PdnGen:
         return self
 
     def importState(self, data: Mapping[str, Any], resolver: Any = None) -> "PdnGen":
+        self._check_version(data)
         config = data.get("config", data)
         self.importConfig(config, resolver=resolver)
         runtime = data.get("runtime", {})
@@ -449,12 +460,30 @@ class PdnGen:
                     connect.filterVias(filter_text)
 
     def checkSetup(self) -> None:
+        issues = self.collectSetupIssues()
+        if issues:
+            raise ValueError("; ".join(f"{issue.path}: {issue.message}" for issue in issues))
+
+    def collectSetupIssues(self) -> List[PdnIssue]:
+        issues: List[PdnIssue] = []
         if self.db is None:
-            raise ValueError("PdnGen has not been initialized with db")
-        if not self.getDomains():
-            raise ValueError("PdnGen has no voltage domains")
-        for domain in self.getDomains():
-            domain.checkSetup()
+            issues.append(PdnIssue("pdngen", "PdnGen has not been initialized with db"))
+        domains = self.getDomains()
+        if not domains:
+            issues.append(PdnIssue("pdngen", "PdnGen has no voltage domains"))
+        seen_domains: Set[str] = set()
+        for index, domain in enumerate(domains):
+            domain_path = f"pdngen/domain[{index}]/{domain.getName()}"
+            if domain.getName() in seen_domains:
+                issues.append(PdnIssue(domain_path, f"duplicate voltage domain {domain.getName()!r}"))
+            seen_domains.add(domain.getName())
+            if domain.pdngen is not self:
+                issues.append(PdnIssue(domain_path, f"voltage domain {domain.getName()!r} is attached to the wrong PdnGen"))
+            issues.extend(domain.collectSetupIssues(domain_path))
+        return issues
+
+    def reportSetupIssues(self) -> List[Dict[str, str]]:
+        return [issue.report() for issue in self.collectSetupIssues()]
 
     def repairVias(self, nets: Set[Any]) -> None:
         self.checkSetup()
@@ -719,11 +748,17 @@ class PdnGen:
             strap.connect_pad_layers = [self._resolve_ref(layer, resolver) for layer in data.get("connect_pad_layers", [])]
         if isinstance(strap, RepairChannelStraps):
             strap.connect_to = self._resolve_ref(data.get("connect_to"), resolver)
-            strap.area = tuple(data.get("area", (0, 0, 0, 0)))  # type: ignore[assignment]
-            strap.available_area = tuple(data.get("available_area", (0, 0, 0, 0)))  # type: ignore[assignment]
-            strap.obs_check_area = tuple(data.get("obs_check_area", (0, 0, 0, 0)))  # type: ignore[assignment]
+            strap.area = _validate_rect(tuple(data.get("area", (0, 0, 0, 0))), "repair area")  # type: ignore[arg-type]
+            strap.available_area = _validate_rect(tuple(data.get("available_area", (0, 0, 0, 0))), "repair available_area")  # type: ignore[arg-type]
+            strap.obs_check_area = _validate_rect(tuple(data.get("obs_check_area", (0, 0, 0, 0))), "repair obs_check_area")  # type: ignore[arg-type]
             strap.repair_nets = {self._resolve_ref(net, resolver) for net in data.get("repair_nets", [])}
             strap.invalid = bool(data.get("invalid", False))
+            target_index = data.get("target")
+            if target_index is not None:
+                straps = grid.getStraps()
+                target_index = int(target_index)
+                if 0 <= target_index < len(straps):
+                    strap.target = straps[target_index]
         return strap
 
     def _import_connect_config(self, grid: Grid, data: Mapping[str, Any], resolver: Any) -> Connect:
@@ -748,6 +783,9 @@ class PdnGen:
     def _import_grid_state(self, grid: Grid, data: Mapping[str, Any], resolver: Any) -> None:
         components = grid.getGridComponents()
         shapes_by_ref: Dict[Any, Shape] = {}
+        # Runtime state 是“已生成/导入”的瞬时状态；重新导入前必须清理旧 shape/via，
+        # 否则同一份 state round trip 多次会把 via 回链重复挂在 Shape 上。
+        grid.resetShapes()
         for component_data in data.get("components", []):
             index = int(component_data.get("index", -1))
             if index < 0 or index >= len(components):
@@ -761,8 +799,12 @@ class PdnGen:
                     wire_type=self._resolve_ref(shape_data.get("wire_type"), resolver),
                     shape_type=ShapeType(shape_data.get("shape_type", ShapeType.SHAPE.value)),
                     locked=bool(shape_data.get("locked", False)),
-                    obstruction=shape_data.get("obstruction"),
+                    obstruction=_validate_optional_rect(tuple(shape_data["obstruction"]), "shape obstruction") if shape_data.get("obstruction") is not None else None,
                 )
+                for rect in shape_data.get("iterm_connections", []):
+                    shape.addITermConnection(tuple(rect))  # type: ignore[arg-type]
+                for rect in shape_data.get("bterm_connections", []):
+                    shape.addBTermConnection(tuple(rect))  # type: ignore[arg-type]
                 component.addShape(shape)
                 shapes_by_ref[(index, shape_index)] = shape
         for connect_index, connect_data in enumerate(data.get("connect", [])):
@@ -783,7 +825,12 @@ class PdnGen:
                 )
                 connect.addVia(via)
             for failure in connect_data.get("failed_vias", []):
-                connect.addFailedVia(FailedViaReason(failure.get("reason", FailedViaReason.OTHER.value)), tuple(failure.get("rect", (0, 0, 0, 0))), self._resolve_ref(failure.get("net"), resolver))  # type: ignore[arg-type]
+                connect.addFailedVia(FailedViaReason(failure.get("reason", FailedViaReason.OTHER.value)), _validate_rect(tuple(failure.get("rect", (0, 0, 0, 0))), "failed via rect"), self._resolve_ref(failure.get("net"), resolver))  # type: ignore[arg-type]
+
+    def _check_version(self, data: Mapping[str, Any]) -> None:
+        version = int(data.get("version", 1))
+        if version != 1:
+            raise ValueError(f"unsupported PDN export version: {version}")
 
     def _ref(self, value: Any) -> Any:
         return None if value is None else _name(value)
@@ -863,6 +910,12 @@ def report_pdn_via_failures(pdngen_obj: PdnGen, include_locations: bool = True) 
     """报告当前 Python PDN 对象树记录的 failed via。"""
 
     return pdngen_obj.viaFailureReport(include_locations=include_locations)
+
+
+def report_pdn_setup_issues(pdngen_obj: PdnGen) -> List[Dict[str, str]]:
+    """聚合报告 Python 接口层 setup/参数错误，不触发真实 PDN 算法。"""
+
+    return pdngen_obj.reportSetupIssues()
 
 
 def export_power_grid_config(pdngen_obj: PdnGen) -> Dict[str, Any]:

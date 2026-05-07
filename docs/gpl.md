@@ -148,3 +148,27 @@
 - Route/Timing 状态层
   - `RouteBase` 新增 congestion snapshot 历史容器，统一保存 rc/overflow/utilization/tile/inflation 样本，并在报告中导出。
   - `TimingBase` 新增按对象 identity 保存的 timing weight 快照、恢复计数、last restored 数量；真实 STA slack 读取和 net reweight 仍显式未实现。
+
+## 第七轮补充
+
+- PlacerBase 对象关系/报告
+  - `Instance.report()`、`Pin.report()`、`Net.report()`、`PlacerBase.reportStatus()` 补齐稳定字典导出。
+  - `PlacerBaseCommon.rebuildPinRelationships()` 可重新扫描当前 ODB 骨架的 ITerm/BTerm，并同步 Instance/Net 反向关系。
+  - `removeDbInst()` / `removeDbNet()` 删除时会断开相关 pin 的实例端或线网端，避免 Python 对象图保留悬挂引用。
+  - `reportConnectivity()` 汇总 inst/pin/net 数量、dangling pin、HPWL、macro area，并可返回少量对象样本。
+
+- InitialPlace 报告
+  - 新增 `reportMatrix()` 和 solution vector 访问口，导出 sparse matrix/RHS/solution 容器形状。
+  - `createSparseMatrix()` 仍只建立可验证占位形状；真实 B2B stamping 和 BiCGSTAB 求解继续保留未翻译边界。
+
+- Nesterov 对象关系/报告
+  - `GCell.report()`、`GPin.report()`、`GNet.report()` 补齐对象关系、bbox、density box、权重和 WA 累计状态。
+  - `BinGrid.reportBins()` 支持导出 bin 样本，`NesterovBase.reportStatus()` 增加 snapshot/SLP/gradient 容器尺寸。
+  - `NesterovBaseCommon.reportObjects()`、`reportChangedGCells()` 补齐 gcell/gpin/gnet 样本和 callback changed-gcell 队列报告。
+  - 新增 `setCustomNetWeight()`、`resetCustomNetWeights()`，只维护权重状态，不执行 timing/STA 优化。
+
+- Route/Timing/Replace 状态入口
+  - `Tile.report()`、`TileGrid.getTile()`、`TileGrid.reportStatus()` 补齐 tile grid 几何和样本报告。
+  - `RouteBase.reportCongestion()` 现在包含 tile grid、min-RC 保存 cell/region 数。
+  - `TimingBase.addTimingDrivenNet()`、`clearTimingDrivenNets()`、`reportTimingNets()` 补齐 timing-driven net 容器状态；真实 STA slack 筛选、resizer 交互仍抛 `NotImplementedError`。
+  - `Replace` 新增 cluster 拷贝读取、debug 报告、cluster 报告，以及 timing/routability/bin/pad/timing weight 配置 setter。

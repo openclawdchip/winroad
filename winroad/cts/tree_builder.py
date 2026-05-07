@@ -263,6 +263,7 @@ class TreeBuilder:
         self.sink_insertion_delays.clear()
 
     def reportLegalizationState(self) -> Dict[str, Any]:
+        validation = self.validateLegalizationState()
         return {
             "num_blockages": len(self.blockages),
             "num_occupied_locations": len(self.occupied_locations),
@@ -279,7 +280,66 @@ class TreeBuilder:
                     self.sink_insertion_delays.items(), key=lambda item: (item[0].x, item[0].y)
                 )
             ],
+            "valid": not validation,
+            "validation_errors": validation,
         }
+
+    def exportLegalizationState(self) -> Dict[str, Any]:
+        """导出只包含 Python 合法化容器的数据，便于 snapshot 往返。"""
+
+        return {
+            "blockages": [self._boxReport(blockage) for blockage in self.blockages],
+            "occupied_locations": [self._pointReport(point) for point in self.occupied_locations],
+            "sink_insertion_delays": [
+                {"point": self._pointReport(point), "delay": delay}
+                for point, delay in self.sink_insertion_delays.items()
+            ],
+            "buffer_width": self.buffer_width,
+            "buffer_height": self.buffer_height,
+        }
+
+    def importLegalizationState(self, data: Dict[str, Any], clear: bool = True) -> None:
+        """导入合法化状态。
+
+        这里不会调用 DB placement 或真正 legalization，只恢复第七轮状态模型
+        所需的 blockage、占用点和 insertion delay 容器。
+        """
+
+        if clear:
+            self.blockages.clear()
+            self.occupied_locations.clear()
+            self.sink_insertion_delays.clear()
+        self.buffer_width = float(data.get("buffer_width", self.buffer_width))
+        self.buffer_height = float(data.get("buffer_height", self.buffer_height))
+        for item in data.get("blockages", []):
+            self.blockages.append(
+                Box(
+                    float(item.get("x_min", 0.0)),
+                    float(item.get("y_min", 0.0)),
+                    float(item.get("x_max", 0.0)),
+                    float(item.get("y_max", 0.0)),
+                )
+            )
+        for item in data.get("occupied_locations", []):
+            self.occupied_locations.add(Point(float(item.get("x", 0.0)), float(item.get("y", 0.0))))
+        for item in data.get("sink_insertion_delays", []):
+            point_data = item.get("point", {})
+            point = Point(float(point_data.get("x", 0.0)), float(point_data.get("y", 0.0)))
+            self.sink_insertion_delays[point] = float(item.get("delay", 0.0))
+
+    def validateLegalizationState(self) -> List[str]:
+        """检查 blockage/occupied/sink delay 容器是否自洽。"""
+
+        errors: List[str] = []
+        if self.buffer_width < 0.0 or self.buffer_height < 0.0:
+            errors.append("buffer_width/buffer_height 不能为负数")
+        for idx, blockage in enumerate(self.blockages):
+            if blockage.x_min > blockage.x_max or blockage.y_min > blockage.y_max:
+                errors.append(f"blockage[{idx}] 边界反向")
+        for point, delay in self.sink_insertion_delays.items():
+            if delay < 0.0:
+                errors.append(f"sink insertion delay at ({point.x}, {point.y}) 不能为负数")
+        return errors
 
     def sinkHasInsertionDelay(self, sink: Point) -> bool:
         return sink in self.sink_insertion_delays
@@ -378,6 +438,21 @@ class TreeBuilder:
 
     def setDrivingNet(self, net: Any) -> None:
         self.driving_net = net
+
+    def snapshotState(self) -> Dict[str, Any]:
+        """返回 TreeBuilder 的纯状态快照，不包含真实 DB/STA 对象。"""
+
+        return {
+            "clock": self.clock.toDict(),
+            "tree_type": self.getTreeTypeAsString(),
+            "tree_buf_levels": self.tree_buf_levels,
+            "num_children": len(self.children),
+            "top_buffer_name": self.top_buffer_name,
+            "ave_sink_arrival": self.ave_arrival,
+            "n_dummies": self.n_dummies,
+            "legalization": self.exportLegalizationState(),
+            "legalization_report": self.reportLegalizationState(),
+        }
 
 
 class LevelTopology(Enum):

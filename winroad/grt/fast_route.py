@@ -424,9 +424,85 @@ class FastRouteCore:
     def getEdgeCapacity(self, x1: int, y1: int, x2: int, y2: int, layer: int) -> int:
         return self.edge_capacities.get(self._edge_key(x1, y1, x2, y2, layer), 0)
 
+    def setEdgeUsage(self, x1: int, y1: int, x2: int, y2: int, layer: int, usage: int) -> None:
+        """直接设置 edge usage，供状态恢复/批处理校验使用。
+
+        C++ FastRoute 的 usage 通常由 maze/rip-up 流程更新；Python 边界层
+        这里只保存显式传入的资源状态，不尝试反推真实布线消耗。
+        """
+
+        key = self._edge_key(x1, y1, x2, y2, layer)
+        self.edge_usage[key] = int(usage)
+
+    def getEdgeUsage(self, x1: int, y1: int, x2: int, y2: int, layer: int) -> int:
+        """返回规范化无向 grid edge 的 usage。"""
+
+        return self.edge_usage.get(self._edge_key(x1, y1, x2, y2, layer), 0)
+
     def getAvailableResources(self, x1: int, y1: int, x2: int, y2: int, layer: int) -> int:
         key = self._edge_key(x1, y1, x2, y2, layer)
         return self.edge_capacities.get(key, 0) - self.edge_usage.get(key, 0)
+
+    def getEdgeResourceRecord(self, x1: int, y1: int, x2: int, y2: int, layer: int) -> Dict[str, int]:
+        """返回单条 edge 的 JSON 安全资源记录。
+
+        记录字段与 resource snapshot 的 edge records 保持一致，额外带上
+        ``capacity``/``usage``/``available``/``overflow``，方便上层 report
+        不再读取 tuple-key dict。
+        """
+
+        key = self._edge_key(x1, y1, x2, y2, layer)
+        capacity = self.edge_capacities.get(key, 0)
+        usage = self.edge_usage.get(key, 0)
+        return {
+            "x1": key[0],
+            "y1": key[1],
+            "x2": key[2],
+            "y2": key[3],
+            "layer": key[4],
+            "capacity": capacity,
+            "usage": usage,
+            "available": capacity - usage,
+            "overflow": max(0, usage - capacity),
+        }
+
+    def iterEdgeResourceRecords(self) -> List[Dict[str, int]]:
+        """列出所有出现过 capacity 或 usage 的 edge 资源记录。"""
+
+        keys = set(self.edge_capacities) | set(self.edge_usage)
+        return [
+            self.getEdgeResourceRecord(key[0], key[1], key[2], key[3], key[4])
+            for key in sorted(keys)
+        ]
+
+    def applyEdgeResourceRecords(self, records: Sequence[Dict[str, int]], *, clear: bool = False) -> int:
+        """批量导入 edge 资源记录，返回导入条数。
+
+        ``records`` 可来自 ``iterEdgeResourceRecords`` 或 resource JSON 中的
+        records；只处理显式给出的 capacity/usage/value 字段，不启动任何
+        FastRoute 算法。
+        """
+
+        if clear:
+            self.edge_capacities.clear()
+            self.edge_usage.clear()
+        count = 0
+        for rec in records:
+            x1, y1, x2, y2, layer = (
+                int(rec["x1"]),
+                int(rec["y1"]),
+                int(rec["x2"]),
+                int(rec["y2"]),
+                int(rec["layer"]),
+            )
+            if "capacity" in rec:
+                self.setEdgeCapacity(x1, y1, x2, y2, layer, int(rec["capacity"]))
+            elif "value" in rec and "usage" not in rec:
+                self.setEdgeCapacity(x1, y1, x2, y2, layer, int(rec["value"]))
+            if "usage" in rec:
+                self.setEdgeUsage(x1, y1, x2, y2, layer, int(rec["usage"]))
+            count += 1
+        return count
 
     def incrementEdge3DUsage(self, x1: int, y1: int, x2: int, y2: int, layer: int) -> None:
         key = self._edge_key(x1, y1, x2, y2, layer)
@@ -554,6 +630,57 @@ class FastRouteCore:
         """返回单个 tile 的 congestion 摘要。"""
 
         return self.buildTileCongestion().get((x, y, layer), TileInformation())
+
+    def getTileCongestionRecord(self, x: int, y: int, layer: int) -> Dict[str, Any]:
+        """返回单 tile 的 JSON 安全 congestion record。"""
+
+        info = self.getTileCongestion(x, y, layer)
+        return {
+            "x": x,
+            "y": y,
+            "layer": layer,
+            "capacity": info.congestion.capacity,
+            "usage": info.congestion.usage,
+            "overflow": max(0, info.congestion.usage - info.congestion.capacity),
+            "nets": [str(net) for net in info.nets],
+        }
+
+    def getResourceSummary(self) -> Dict[str, Any]:
+        """返回 resource 的紧凑摘要，供 GlobalRouter 状态页和 smoke 使用。"""
+
+        records = self.iterEdgeResourceRecords()
+        return {
+            "edge_count": len(records),
+            "total_capacity": sum(rec["capacity"] for rec in records),
+            "total_usage": sum(rec["usage"] for rec in records),
+            "total_overflow": sum(rec["overflow"] for rec in records),
+            "overflow_edge_count": sum(1 for rec in records if rec["overflow"] > 0),
+        }
+
+    def validateResources(self) -> Dict[str, Any]:
+        """校验资源表是否自洽，返回问题列表而不是抛异常。
+
+        这是边界层校验：检查负数、非相邻 edge 和 usage-only edge；真实
+        capacity 初始化/obstruction 折减仍由未移植算法入口负责。
+        """
+
+        issues: List[Dict[str, Any]] = []
+        for rec in self.iterEdgeResourceRecords():
+            dx = abs(rec["x1"] - rec["x2"])
+            dy = abs(rec["y1"] - rec["y2"])
+            if rec["capacity"] < 0 or rec["usage"] < 0:
+                issues.append({"type": "negative_resource", "edge": rec})
+            if dx + dy != 1:
+                issues.append({"type": "non_adjacent_edge", "edge": rec})
+            if rec["usage"] and rec["capacity"] == 0:
+                issues.append({"type": "usage_without_capacity", "edge": rec})
+        return {
+            "format": "winroad-grt-resource-validation",
+            "version": 1,
+            "valid": not issues,
+            "issue_count": len(issues),
+            "issues": issues,
+        }
 
     def reportCongestionSummary(self) -> Dict[str, Any]:
         """返回 report 边界使用的拥塞统计。"""

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from .flex_dr import FlexDR, FlexDRViaData
+from .flex_gr import FlexGR
 from .flex_pa import FlexPA
 from .fr import frDesign, frMarker
 from .types import ParamStruct, Rect, RouterConfiguration, frDebugSettings, _unsupported
@@ -55,11 +57,19 @@ class TritonRoute:
     def getRouterConfigurationState(self) -> dict[str, Any]:
         return self.router_cfg_.to_dict()
 
+    def updateRouterConfiguration(self, **values: Any) -> None:
+        """按字段名更新 RouterConfiguration；未知字段会显式报错。"""
+
+        self.router_cfg_.update(**values)
+
     def getDb(self) -> Any:
         return self.db_
 
     def getDebugSettings(self) -> frDebugSettings:
         return self.debug_
+
+    def getDebugSettingsState(self) -> dict[str, Any]:
+        return self.debug_.to_dict()
 
     def setParams(self, params: ParamStruct) -> None:
         """按 C++ setParams 的职责写入 RouterConfiguration。"""
@@ -186,6 +196,20 @@ class TritonRoute:
     def getCloudSize(self) -> int:
         return self.cloud_sz_
 
+    def isDistributed(self) -> bool:
+        return self.distributed_
+
+    def getDistributedState(self) -> Dict[str, Any]:
+        """返回分布式配置状态；不发送设计或 global updates。"""
+
+        return {
+            "enabled": self.distributed_,
+            "ip": self.dist_ip_,
+            "port": self.dist_port_,
+            "shared_volume": self.shared_volume_,
+            "cloud_size": self.cloud_sz_,
+        }
+
     def getNumDRVs(self) -> int:
         if self.num_drvs_ < 0:
             raise RuntimeError("Detailed routing has not been run yet.")
@@ -209,6 +233,88 @@ class TritonRoute:
         self.dr_ = None
         self.pa_ = None
         self.num_drvs_ = -1
+
+    def ensureDR(self) -> FlexDR:
+        """创建或返回 DR 阶段对象；不会调用 FlexDR::init/main。"""
+
+        if self.design_ is None:
+            self.design_ = frDesign(self.logger_, self.router_cfg_)
+        if self.dr_ is None:
+            self.dr_ = FlexDR(self, self.design_, self.logger_, self.db_, self.router_cfg_)
+        return self.dr_
+
+    def ensurePA(self) -> FlexPA:
+        """创建或返回 PA 阶段对象；不会生成 access point。"""
+
+        if self.design_ is None:
+            self.design_ = frDesign(self.logger_, self.router_cfg_)
+        if self.pa_ is None:
+            self.pa_ = FlexPA(self.design_, self.logger_, self.dist_, self.router_cfg_)
+        return self.pa_
+
+    def makeGR(self) -> FlexGR:
+        """创建轻量 GR 阶段对象；调用方若执行 main 仍会得到 NotImplementedError。"""
+
+        if self.design_ is None:
+            self.design_ = frDesign(self.logger_, self.router_cfg_)
+        return FlexGR(self.design_, self.logger_, self.stt_builder_, self.router_cfg_)
+
+    def collectMarkers(self) -> List[frMarker]:
+        """收集当前 top block 中已有 marker；不运行 checkDRC。"""
+
+        if self.design_ is None or self.design_.getTopBlock() is None:
+            return []
+        return list(self.design_.getTopBlock().getMarkers())
+
+    def getMarkerSummary(self) -> Dict[str, Any]:
+        """返回 marker 摘要，供 report/snapshot 使用。"""
+
+        markers = self.collectMarkers()
+        by_layer: Dict[int, int] = {}
+        for marker in markers:
+            by_layer[marker.getLayerNum()] = by_layer.get(marker.getLayerNum(), 0) + 1
+        return {"count": len(markers), "by_layer": by_layer}
+
+    def getRouteGuideSummary(self) -> List[Dict[str, Any]]:
+        """返回 net guide 摘要；只统计已有 guide，不估算覆盖或修补 guide。"""
+
+        if self.design_ is None or self.design_.getTopBlock() is None:
+            return []
+        rows: List[Dict[str, Any]] = []
+        for net in self.design_.getTopBlock().getNets():
+            rows.append(
+                {
+                    "net": net.getName(),
+                    "guides": len(net.getGuides()),
+                    "orig_guides": len(net.getOrigGuides()),
+                    "routes": len(net.getShapes()),
+                    "vias": len(net.getVias()),
+                    "modified": net.isModified(),
+                }
+            )
+        return rows
+
+    def snapshot(self) -> Dict[str, Any]:
+        """返回 TritonRoute 顶层状态；真实 drt/ODB 处理仍由未实现入口承载。"""
+
+        return {
+            "has_design": self.design_ is not None,
+            "num_drvs": self.num_drvs_,
+            "distributed": self.getDistributedState(),
+            "worker_results_size": self.results_sz_,
+            "router_cfg": self.router_cfg_.to_dict(),
+            "debug": self.debug_.to_dict(),
+            "markers": self.getMarkerSummary(),
+            "route_guides": self.getRouteGuideSummary(),
+            "design": self.design_.snapshot() if self.design_ is not None else None,
+            "dr": self.dr_.snapshot() if self.dr_ is not None else None,
+            "pa": self.pa_.snapshot() if self.pa_ is not None else None,
+        }
+
+    def writeSnapshot(self, file_name: str) -> None:
+        """把当前 Python 接口层状态写成 JSON；不写 DEF/ODB。"""
+
+        Path(file_name).write_text(json.dumps(self.snapshot(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     def initGuide(self) -> bool:
         _unsupported("TritonRoute::initGuide")
@@ -285,6 +391,11 @@ class TritonRoute:
             Path(target).write_text(report, encoding="utf-8")
         elif self.logger_ is not None and hasattr(self.logger_, "info"):
             self.logger_.info(report.rstrip())
+
+    def reportMarkers(self, file_name: str = "") -> None:
+        """报告当前已有 marker；不调用 GC，也不创建新的 violation。"""
+
+        self.reportDRC(file_name, self.collectMarkers(), "DRT_MARKER")
 
     def reportConstraints(self) -> None:
         if self.design_ is None:

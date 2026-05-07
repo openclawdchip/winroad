@@ -10,7 +10,7 @@ from .clock import Clock, ClockInst, ClockSubNet
 from .options import CtsOptions
 from .tech_char import TechChar
 from .tree_builder import HTreeBuilder, TreeBuilder
-from .types import NdrStrategy, _not_translated
+from .types import NdrStrategy, TreeType, _not_translated
 
 
 @dataclass
@@ -88,11 +88,14 @@ class TritonCTS:
         }
 
     def report(self) -> Dict[str, Any]:
+        validation = self.validateState()
         return {
             "metrics": self.reportCtsMetrics(),
             "options": self.options.toProfile(),
             "clock_roots": [self._objectName(root) for root in self.clock_roots],
             "builders": [self.reportClockNetwork(builder.getClock()) for builder in self.builders],
+            "valid": not validation,
+            "validation_errors": validation,
         }
 
     def snapshotState(self, include_lut: bool = False) -> Dict[str, Any]:
@@ -117,6 +120,57 @@ class TritonCTS:
         with open(path, "w", encoding="utf-8") as stream:
             json.dump(snapshot, stream, indent=2, sort_keys=True)
         return snapshot
+
+    def loadStateSnapshot(self, data_or_path: Any, clear: bool = True) -> None:
+        """导入 `snapshotState` 导出的纯 Python 状态。
+
+        导入过程只恢复 options、TechChar LUT/report 相关状态和 builder 的
+        clock/legalization 容器；真实 CTS 构树、STA、DB 写回入口仍保持
+        `NotImplementedError`，避免用快照伪造算法结果。
+        """
+
+        if isinstance(data_or_path, str):
+            with open(data_or_path, "r", encoding="utf-8") as stream:
+                data_or_path = json.load(stream)
+        data = dict(data_or_path)
+        if clear:
+            self.clear()
+        if "options" in data:
+            self.options.loadProfile(data["options"])
+        tech_data = data.get("tech_char")
+        if isinstance(tech_data, dict) and "wire_segments" in tech_data:
+            self.tech_char.importLut(tech_data)
+        self.root_buffers = list(data.get("root_buffers", self.root_buffers))
+        self.sink_buffers = list(data.get("sink_buffers", self.sink_buffers))
+        if "ndr_strategy" in data:
+            self.setNdrStrategy(NdrStrategy(data["ndr_strategy"]))
+        self.clock_roots = list(data.get("clock_roots", self.clock_roots))
+
+        pending_parents: List[Tuple[TreeBuilder, Optional[str]]] = []
+        by_name: Dict[str, TreeBuilder] = {}
+        for item in data.get("builders", []):
+            clock_data = item.get("clock", {})
+            clock = Clock.fromDict(clock_data)
+            builder = HTreeBuilder(options=self.options, clock=clock, logger=self.logger, db=self.db)
+            tree_type = item.get("tree_type")
+            if tree_type:
+                builder.setTreeType(TreeType(tree_type))
+            builder.tree_buf_levels = int(item.get("tree_buf_levels", 0))
+            builder.top_buffer_name = str(item.get("top_buffer_name", ""))
+            builder.ave_arrival = float(item.get("ave_sink_arrival", 0.0))
+            builder.n_dummies = int(item.get("n_dummies", 0))
+            legalization = item.get("legalization", {})
+            if "blockages" not in legalization and "legalization_report" in item:
+                legalization = item["legalization_report"]
+            builder.importLegalizationState(legalization)
+            self.builders.append(builder)
+            by_name[clock.getName()] = builder
+            pending_parents.append((builder, item.get("parent")))
+
+        for builder, parent_name in pending_parents:
+            if parent_name and parent_name in by_name:
+                builder.parent = by_name[parent_name]
+                by_name[parent_name].children.append(builder)
 
     def reportStateSnapshot(self) -> Dict[str, Any]:
         return self.snapshotState(include_lut=False)
@@ -505,6 +559,37 @@ class TritonCTS:
         self.num_fixed_nets = 0
         self.dummy_load_index = 0
 
+    def validateState(self) -> List[str]:
+        """聚合检查 TritonCTS 顶层 bookkeeping 与子容器状态。"""
+
+        errors: List[str] = []
+        errors.extend(f"options: {error}" for error in self.options.validate())
+        errors.extend(f"tech_char: {error}" for error in self.tech_char.validateLut())
+        builder_names: Set[str] = set()
+        for builder in self.builders:
+            name = builder.getClock().getName()
+            if name in builder_names:
+                errors.append(f"builder {name} 重复")
+            builder_names.add(name)
+            errors.extend(f"clock {name}: {error}" for error in builder.getClock().validateNetwork())
+            errors.extend(
+                f"builder {name}: {error}" for error in builder.validateLegalizationState()
+            )
+            parent = builder.getParent()
+            if parent is not None and builder not in parent.getChildren():
+                errors.append(f"builder {name}: parent/children 关系不一致")
+        for builder in self.db_written_builders:
+            if builder not in self.builders:
+                errors.append(f"db_written builder {self._builderName(builder)} 不在 builders 中")
+        for builder in self.ndr_applied_builders:
+            if builder not in self.builders:
+                errors.append(f"ndr_applied builder {self._builderName(builder)} 不在 builders 中")
+        if self.num_clk_nets != len(self.visited_clock_nets):
+            errors.append("num_clk_nets 与 visited_clock_nets 数量不一致")
+        if self.number_of_clocks < 0 or self.num_fixed_nets < 0 or self.dummy_load_index < 0:
+            errors.append("clock/fixed/dummy 计数不能为负数")
+        return errors
+
     def _builderSnapshot(self, builder: TreeBuilder) -> Dict[str, Any]:
         return {
             "name": self._builderName(builder),
@@ -518,7 +603,8 @@ class TritonCTS:
             "ave_sink_arrival": builder.getAveSinkArrival(),
             "n_dummies": builder.getNDummies(),
             "clock": builder.getClock().toDict(),
-            "legalization": builder.reportLegalizationState(),
+            "legalization": builder.exportLegalizationState(),
+            "legalization_report": builder.reportLegalizationState(),
         }
 
     def _builderName(self, builder: TreeBuilder) -> str:

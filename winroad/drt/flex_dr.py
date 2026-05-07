@@ -15,6 +15,11 @@ class FlexDRViaData:
 
     halfViaEncArea: List[Tuple[frCoord, frCoord]] = field(default_factory=list)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """返回 via 搜索辅助数据快照；不生成新 via，也不评估 enclosure。"""
+
+        return {"halfViaEncArea": list(self.halfViaEncArea)}
+
 
 @dataclass
 class FlexDRSearchRepairArgs:
@@ -40,6 +45,21 @@ class FlexDRSearchRepairArgs:
             and self.ripupMode == other.ripupMode
             and self.followGuide == other.followGuide
         )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """返回 searchRepair 参数状态；算法入口本身仍保持未实现。"""
+
+        return {
+            "size": self.size,
+            "offset": self.offset,
+            "mazeEndIter": self.mazeEndIter,
+            "workerDRCCost": self.workerDRCCost,
+            "workerMarkerCost": self.workerMarkerCost,
+            "workerFixedShapeCost": self.workerFixedShapeCost,
+            "workerMarkerDecay": self.workerMarkerDecay,
+            "ripupMode": self.ripupMode.value,
+            "followGuide": self.followGuide,
+        }
 
 
 class FlexDR:
@@ -85,8 +105,22 @@ class FlexDR:
     def setDistributed(self, dist: Any, remote_ip: str, remote_port: int, directory: str) -> None:
         self.distributed_ = {"dist": dist, "remote_ip": remote_ip, "remote_port": remote_port, "dir": directory}
 
+    def getDistributedState(self) -> Dict[str, Any]:
+        """返回 distributed worker 连接状态，不启动远端 worker。"""
+
+        return dict(self.distributed_)
+
+    def getIter(self) -> int:
+        return self.iter_
+
     def incIter(self) -> None:
         self.iter_ += 1
+
+    def setNumViols(self, viols: List[int]) -> None:
+        self.numViols_ = list(viols)
+
+    def getNumViols(self) -> List[int]:
+        return self.numViols_
 
     def init(self) -> None:
         _unsupported("FlexDR::init")
@@ -111,6 +145,35 @@ class FlexDR:
             Path(self.router_cfg_.GUIDE_REPORT_FILE).write_text(report, encoding="utf-8")
         elif self.logger_ is not None and hasattr(self.logger_, "info"):
             self.logger_.info(report.rstrip())
+
+    def getGuideCoverageRows(self) -> List[Dict[str, Any]]:
+        """返回当前 guide 覆盖报告行；只统计已有 guide，不做覆盖率估算。"""
+
+        block = self.design_.getTopBlock()
+        rows: List[Dict[str, Any]] = []
+        if block is None:
+            return rows
+        for net in block.getNets():
+            rows.append(
+                {
+                    "net": net.getName(),
+                    "guides": len(net.getGuides()),
+                    "orig_guides": len(net.getOrigGuides()),
+                    "has_guides": net.hasGuides(),
+                }
+            )
+        return rows
+
+    def snapshot(self) -> Dict[str, Any]:
+        """返回 DR 阶段状态快照；不运行 detailed routing 或 DRC 修复。"""
+
+        return {
+            "iter": self.iter_,
+            "num_viols": list(self.numViols_),
+            "via_data": self.via_data_.to_dict(),
+            "distributed": self.getDistributedState(),
+            "guide_coverage": self.getGuideCoverageRows(),
+        }
 
     def fixMaxSpacing(self) -> None:
         _unsupported("FlexDR::fixMaxSpacing")

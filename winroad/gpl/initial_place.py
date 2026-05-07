@@ -137,6 +137,22 @@ class InitialPlace:
             self.solutionVecY_[index] = float(inst.cy())
         self.matrix_nonzero_count_ = sum(len(row) for row in self.sparseMatrix_)
 
+    def reportMatrix(self, sample_limit: int = 0) -> Dict[str, Any]:
+        """导出 sparse matrix 占位形状；真实 B2B stamping 仍未翻译。"""
+
+        report: Dict[str, Any] = {
+            "rows": len(self.sparseMatrix_),
+            "nonzeros": self.matrix_nonzero_count_,
+            "rhs_x": len(self.rhsVecX_),
+            "rhs_y": len(self.rhsVecY_),
+            "solution_x": len(self.solutionVecX_),
+            "solution_y": len(self.solutionVecY_),
+            "reuse_count": self.matrix_reuse_count_,
+        }
+        if sample_limit > 0:
+            report["sample_rows"] = [list(row) for row in self.sparseMatrix_[:sample_limit]]
+        return report
+
     def updateCoordi(self) -> None:
         if len(self.instLocVecX_) != len(self.instLocVecY_):
             raise ValueError("InitialPlace coordinate vectors have different lengths")
@@ -158,6 +174,7 @@ class InitialPlace:
             "matrix_reuse_count": self.matrix_reuse_count_,
             "rhs_vector_size": len(self.rhsVecX_),
             "solution_vector_size": len(self.solutionVecX_),
+            "matrix": self.reportMatrix(),
         }
 
     def getInstLocVecX(self) -> List[float]:
@@ -174,5 +191,11 @@ class InitialPlace:
 
     def getRhsVecY(self) -> List[float]:
         return self.rhsVecY_
+
+    def getSolutionVecX(self) -> List[float]:
+        return self.solutionVecX_
+
+    def getSolutionVecY(self) -> List[float]:
+        return self.solutionVecY_
 
 

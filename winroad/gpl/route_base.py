@@ -70,6 +70,18 @@ class Tile:
     def setInflatedRatio(self, ratio: float) -> None:
         self.inflatedRatio_ = ratio
 
+    def report(self) -> Dict[str, Any]:
+        """导出 tile 状态，真实 RUDY/GR 计算仍由未翻译入口负责。"""
+
+        return {
+            "index": (self.x_, self.y_),
+            "box": (self.lx_, self.ly_, self.ux_, self.uy_),
+            "layers": self.layers_,
+            "area": self.area(),
+            "inflation_ratio": self.inflationRatio_,
+            "inflated_ratio": self.inflatedRatio_,
+        }
+
 
 @dataclass
 class TileGrid:
@@ -146,6 +158,14 @@ class TileGrid:
     def tiles(self) -> List[Tile]:
         return self.tiles_
 
+    def getTile(self, x: int, y: int) -> Optional[Tile]:
+        if x < 0 or y < 0 or x >= self.tileCntX_ or y >= self.tileCntY_:
+            return None
+        index = y * self.tileCntX_ + x
+        if index >= len(self.tiles_):
+            return None
+        return self.tiles_[index]
+
     def initTiles(self, use_rudy: bool) -> None:
         self.tileStor_.clear()
         for y in range(max(0, self.tileCntY_)):
@@ -154,6 +174,23 @@ class TileGrid:
                 ly = self.ly_ + y * self.tileSizeY_
                 self.tileStor_.append(Tile(x, y, lx, ly, lx + self.tileSizeX_, ly + self.tileSizeY_, self.numRoutingLayers_))
         self.tiles_ = list(self.tileStor_)
+
+    def reportStatus(self, sample_limit: int = 0) -> Dict[str, Any]:
+        """导出 tile grid 几何配置，供 RouteBase 报告和 smoke 使用。"""
+
+        report: Dict[str, Any] = {
+            "tile_count": len(self.tiles_),
+            "tile_count_x": self.tileCntX_,
+            "tile_count_y": self.tileCntY_,
+            "tile_size_x": self.tileSizeX_,
+            "tile_size_y": self.tileSizeY_,
+            "origin": (self.lx_, self.ly_),
+            "box": (self.lx(), self.ly(), self.ux(), self.uy()),
+            "routing_layers": self.numRoutingLayers_,
+        }
+        if sample_limit > 0:
+            report["sample_tiles"] = [tile.report() for tile in self.tiles_[:sample_limit]]
+        return report
 
 
 class RouteBase:
@@ -391,6 +428,9 @@ class RouteBase:
             "overflow_history": list(self.route_overflow_),
             "utilization_history": list(self.route_utilization_),
             "congestion_history": [dict(item) for item in self.congestion_history_],
+            "tile_grid": self.tg_.reportStatus(),
+            "min_rc_saved_cells": len(self.minRcCellSizes_),
+            "min_rc_saved_regions": len(self.minRcTargetDensity_),
         }
 
 

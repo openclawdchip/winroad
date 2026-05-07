@@ -135,6 +135,18 @@ def _validate_rect(rect: Rect, name: str = "rect") -> Rect:
     return (lx, ly, ux, uy)
 
 
+def _validate_optional_rect(rect: Optional[Rect], name: str = "rect") -> Optional[Rect]:
+    """校验可为空的矩形字段。
+
+    C++ 侧很多几何字段用 `std::optional<Rect>` 或空指针表达“尚未生成”，
+    Python 边界也允许 None；一旦有值，就必须是合法的四元坐标。
+    """
+
+    if rect is None:
+        return None
+    return _validate_rect(rect, name)
+
+
 def _validate_halo(halo: Halo, name: str = "halo") -> Halo:
     if len(halo) != 4:
         raise ValueError(f"{name} must contain four offsets")
@@ -158,6 +170,20 @@ def _validate_positive(value: int, name: str) -> int:
     return normalized
 
 
+def _normalize_failed_via_reason(value: FailedViaReason | str) -> FailedViaReason:
+    """把 Tcl 字符串、导出状态字符串和枚举统一成失败原因枚举。"""
+
+    if isinstance(value, FailedViaReason):
+        return value
+    upper = str(value).upper()
+    if upper in FailedViaReason.__members__:
+        return FailedViaReason[upper]
+    for item in FailedViaReason:
+        if item.value.upper() == upper:
+            return item
+    raise ValueError(f"unknown failed via reason: {value!r}")
+
+
 def _name(obj: Any) -> str:
     """取得 ODB/WinRoad 对象名；不依赖 odb 具体类型。"""
 
@@ -174,6 +200,22 @@ def _not_implemented(name: str) -> None:
     """统一提示：边界已建立，真实 C++ 算法后续翻译。"""
 
     raise NotImplementedError(f"pdn::{name} 尚未翻译：本轮只建立源码边界。")
+
+
+@dataclass(frozen=True)
+class PdnIssue:
+    """纯 Python setup/report 阶段的错误聚合项。
+
+    真实 OpenROAD logger 会带有错误码和源位置；这里保留层级路径、严重级别和
+    message，方便上层一次性返回所有接口层问题，而不是遇到第一个错误就停止。
+    """
+
+    path: str
+    message: str
+    severity: str = "error"
+
+    def report(self) -> Dict[str, str]:
+        return {"path": self.path, "message": self.message, "severity": self.severity}
 
 
 @dataclass
@@ -196,6 +238,12 @@ class Shape:
         if self.layer is None:
             raise ValueError("shape layer is required")
         self.rect = _validate_rect(self.rect)
+        self.obstruction = _validate_optional_rect(self.obstruction, "shape obstruction")
+        if not isinstance(self.shape_type, ShapeType):
+            self.shape_type = ShapeType(self.shape_type)
+        # iterm/bterm connection 是 runtime 纯状态，导入时也要恢复成可哈希的合法矩形。
+        self.iterm_connections = {_validate_rect(rect, "iterm connection") for rect in self.iterm_connections}
+        self.bterm_connections = {_validate_rect(rect, "bterm connection") for rect in self.bterm_connections}
 
     def getLayer(self) -> Any:
         return self.layer
@@ -211,6 +259,9 @@ class Shape:
 
     def setRect(self, rect: Rect) -> None:
         self.rect = _validate_rect(rect)
+
+    def setObstruction(self, rect: Optional[Rect]) -> None:
+        self.obstruction = _validate_optional_rect(rect, "shape obstruction")
 
     def getLength(self) -> int:
         lx, ly, ux, uy = self.rect
@@ -242,6 +293,12 @@ class Shape:
         if via in self.vias:
             self.vias.remove(via)
 
+    def addITermConnection(self, rect: Rect) -> None:
+        self.iterm_connections.add(_validate_rect(rect, "iterm connection"))
+
+    def addBTermConnection(self, rect: Rect) -> None:
+        self.bterm_connections.add(_validate_rect(rect, "bterm connection"))
+
     def generateObstruction(self) -> None:
         _not_implemented("Shape::generateObstruction")
 
@@ -259,6 +316,8 @@ class Shape:
             "wire_type": _name(self.wire_type) if self.wire_type is not None else None,
             "shape_type": self.shape_type.value,
             "locked": self.locked,
+            "obstruction": self.obstruction,
+            "iterm_connection_count": len(self.iterm_connections),
+            "bterm_connection_count": len(self.bterm_connections),
             "via_count": len(self.vias),
         }
-

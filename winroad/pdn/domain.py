@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
 from .grid import Grid
-from .types import PowerSwitchNetworkType, Rect, _name, _not_implemented
+from .types import PdnIssue, PowerSwitchNetworkType, Rect, _name, _not_implemented
 
 @dataclass
 class VoltageDomain:
@@ -96,14 +96,27 @@ class VoltageDomain:
         _not_implemented("VoltageDomain::getRows")
 
     def checkSetup(self) -> None:
+        issues = self.collectSetupIssues()
+        if issues:
+            raise ValueError("; ".join(f"{issue.path}: {issue.message}" for issue in issues))
+
+    def collectSetupIssues(self, path: str = "") -> List[PdnIssue]:
+        issues: List[PdnIssue] = []
+        base = path or f"domain:{self.name}"
         if self.power is None and self.switched_power is None:
-            raise ValueError(f"voltage domain {self.name!r} has no power net")
+            issues.append(PdnIssue(base, f"voltage domain {self.name!r} has no power net"))
         if self.ground is None:
-            raise ValueError(f"voltage domain {self.name!r} has no ground net")
-        for grid in self.grids:
+            issues.append(PdnIssue(base, f"voltage domain {self.name!r} has no ground net"))
+        seen_grids: Set[str] = set()
+        for index, grid in enumerate(self.grids):
+            grid_path = f"{base}/grid[{index}]/{grid.getLongName()}"
+            if grid.getLongName() in seen_grids:
+                issues.append(PdnIssue(grid_path, f"duplicate grid {grid.getLongName()!r} in voltage domain {self.name!r}"))
+            seen_grids.add(grid.getLongName())
             if grid.getDomain() is not self:
-                raise ValueError(f"grid {grid.getLongName()!r} is attached to the wrong voltage domain")
-            grid.checkSetup()
+                issues.append(PdnIssue(grid_path, f"grid {grid.getLongName()!r} is attached to the wrong voltage domain"))
+            issues.extend(grid.collectSetupIssues(grid_path))
+        return issues
 
     def report(self) -> Dict[str, Any]:
         return {

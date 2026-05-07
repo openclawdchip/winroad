@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional, Set
 
-from .common import RecoverPowerConfig, _json_value, _not_translated, _obj_key
+from .common import RecoverPowerConfig, RepairFlowState, _json_value, _not_translated, _obj_key
 
 
 class RecoverPower:
@@ -85,6 +85,21 @@ class RecoverPower:
     def config(self) -> RecoverPowerConfig:
         return self.config_
 
+    def importConfig(self, data: Dict[str, Any]) -> RecoverPowerConfig:
+        """导入 power recovery 配置，不执行 cell swap 或 size down。"""
+
+        config = RecoverPowerConfig.from_dict(data)
+        return self.configure(
+            recover_power_percent=config.recover_power_percent,
+            match_cell_footprint=config.match_cell_footprint,
+            verbose=config.verbose,
+            scene=config.scene,
+            setup_slack_margin=config.setup_slack_margin,
+        )
+
+    def exportConfig(self) -> Dict[str, Any]:
+        return self.reportConfig()
+
     def reportConfig(self) -> Dict[str, Any]:
         return self.config_.as_dict()
 
@@ -143,10 +158,32 @@ class RecoverPower:
         }
 
     def statistics(self) -> Dict[str, Any]:
-        data = self.reportCounters()
-        data["config"] = self.reportConfig()
-        data["bad_vertices_detail"] = _json_value(self.bad_vertices_)
-        return data
+        return self.reportState()
+
+    def reportState(self) -> Dict[str, Any]:
+        return RepairFlowState(
+            name="RecoverPower",
+            config=self.reportConfig(),
+            counters=self.reportCounters(),
+            details={"bad_vertices_detail": _json_value(self.bad_vertices_)},
+        ).as_dict()
+
+    def validateBatch(self, batch: Any) -> Dict[str, Any]:
+        """校验 recover_power 批处理配置列表。"""
+
+        errors = []
+        normalized = []
+        for index, item in enumerate(batch):
+            try:
+                config = RecoverPowerConfig.from_dict(item)
+                if config.recover_power_percent < 0.0:
+                    raise ValueError("recover_power_percent must be non-negative")
+                if config.setup_slack_margin < 0.0:
+                    raise ValueError("setup_slack_margin must be non-negative")
+                normalized.append(config.as_dict())
+            except Exception as exc:  # noqa: BLE001 - 批处理报告所有错误。
+                errors.append(f"batch[{index}]: {exc}")
+        return {"valid": not errors, "errors": errors, "items": normalized}
 
     def to_json(self, **json_kwargs: Any) -> str:
         kwargs = {"sort_keys": True}

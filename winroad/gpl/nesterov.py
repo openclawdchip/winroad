@@ -293,6 +293,25 @@ class GCell:
     def contains(self, db_inst: DbInst) -> bool:
         return any(inst.dbInst() is db_inst for inst in self.insts_)
 
+    def report(self) -> Dict[str, Any]:
+        """导出 gcell 纯状态；不包含电势/梯度求解结果。"""
+
+        return {
+            "name": self.getName(),
+            "is_instance": self.isInstance(),
+            "is_filler": self.isFiller(),
+            "is_macro": self.isMacroInstance(),
+            "location": (self.lx_, self.ly_, self.ux_, self.uy_),
+            "density_box": (self.dLx_, self.dLy_, self.dUx_, self.dUy_),
+            "area": self.area(),
+            "density_area": self.densityArea(),
+            "density_scale": self.densityScale_,
+            "gradient": (self.gradientX_, self.gradientY_),
+            "change": self.change_.value,
+            "gpins": len(self.gPins_),
+            "insts": len(self.insts_),
+        }
+
 
 @dataclass
 class GPin:
@@ -406,6 +425,20 @@ class GPin:
     def updateCoordi(self) -> None:
         self.updateLocation()
 
+    def report(self) -> Dict[str, Any]:
+        """导出 gpin 的对象关系和 WA 累计状态。"""
+
+        pb_pin = self.getPbPin()
+        return {
+            "pin": pb_pin.getName() if pb_pin is not None else None,
+            "gcell": self.gCell_.getName() if self.gCell_ is not None else None,
+            "gnet": self.gNet_.getName() if self.gNet_ is not None else None,
+            "center": (self.cx_, self.cy_),
+            "offset": (self.offsetCx_, self.offsetCy_),
+            "wa_has_max": (self.hasMaxExpSumX_, self.hasMaxExpSumY_),
+            "wa_has_min": (self.hasMinExpSumX_, self.hasMinExpSumY_),
+        }
+
 
 @dataclass
 class GNet:
@@ -441,6 +474,11 @@ class GNet:
 
     def getGPins(self) -> List[GPin]:
         return self.gPins_
+
+    def getName(self) -> str:
+        names = [getattr(net.getDbNet(), "name", None) for net in self.nets_]
+        names = [name for name in names if name is not None]
+        return ",".join(names) if names else "NET"
 
     def lx(self) -> int:
         return self.lx_
@@ -546,6 +584,23 @@ class GNet:
 
     def waYExpMaxSumY(self) -> float:
         return self.waYExpMaxSumY_
+
+    def report(self) -> Dict[str, Any]:
+        """导出 gnet 状态，供 timing/routability 报告复用。"""
+
+        self.updateBox()
+        return {
+            "name": self.getName(),
+            "pins": len(self.gPins_),
+            "bbox": (self.lx_, self.ly_, self.ux_, self.uy_),
+            "hpwl": max(0, self.ux_ - self.lx_) + max(0, self.uy_ - self.ly_),
+            "timing_weight": self.timingWeight_,
+            "custom_weight": self.customWeight_,
+            "total_weight": self.getTotalWeight(),
+            "dont_care": self.isDontCare_,
+            "wa_exp_min": (self.waExpMinSumX_, self.waExpMinSumY_),
+            "wa_exp_max": (self.waExpMaxSumX_, self.waExpMaxSumY_),
+        }
 
 
 @dataclass
@@ -943,6 +998,26 @@ class BinGrid:
             "non_place_area": self.getTotalNonPlaceArea(),
         }
 
+    def reportBins(self, sample_limit: int = 0) -> Dict[str, Any]:
+        """导出 bin grid 摘要；sample_limit>0 时返回前若干 bin。"""
+
+        report = self.reportStatus()
+        if sample_limit > 0:
+            report["sample_bins"] = [
+                {
+                    "index": (bin_obj.x(), bin_obj.y()),
+                    "box": (bin_obj.lx(), bin_obj.ly(), bin_obj.ux(), bin_obj.uy()),
+                    "density": bin_obj.getDensity(),
+                    "target_density": bin_obj.getTargetDensity(),
+                    "place_area": bin_obj.getPlaceArea(),
+                    "non_place_area": bin_obj.getNonPlaceArea(),
+                    "overflow_area": bin_obj.getOverflowArea(),
+                    "utilization": bin_obj.getUtilization(),
+                }
+                for bin_obj in self.bins_[:sample_limit]
+            ]
+        return report
+
 
 class NesterovBaseCommon:
     """对应 `gpl::NesterovBaseCommon`。"""
@@ -1072,9 +1147,18 @@ class NesterovBaseCommon:
         if gnet is not None:
             gnet.setTimingWeight(weight)
 
+    def setCustomNetWeight(self, net: Net, weight: float) -> None:
+        gnet = self.pbToNb(net)
+        if gnet is not None:
+            gnet.setCustomWeight(weight)
+
     def resetTimingNetWeights(self) -> None:
         for gnet in self.gNets_:
             gnet.setTimingWeight(1.0)
+
+    def resetCustomNetWeights(self) -> None:
+        for gnet in self.gNets_:
+            gnet.setCustomWeight(1.0)
 
     def addChangedGCell(self, gcell: GCell) -> None:
         if gcell not in self.changed_gcells_:
@@ -1138,6 +1222,14 @@ class NesterovBaseCommon:
                 gnets.remove(gnet)
         return gnet
 
+    def reportChangedGCells(self, sample_limit: int = 0) -> Dict[str, Any]:
+        """导出 DB callback 造成的 changed-gcell 队列。"""
+
+        report: Dict[str, Any] = {"changed_gcells": len(self.changed_gcells_)}
+        if sample_limit > 0:
+            report["sample_gcells"] = [gcell.report() for gcell in self.changed_gcells_[:sample_limit]]
+        return report
+
     def reportStatus(self) -> Dict[str, Any]:
         return {
             "gcells": len(self.nbc_gcells_),
@@ -1150,7 +1242,18 @@ class NesterovBaseCommon:
             "hpwl": self.getHpwl(),
             "timing_weighted_nets": sum(1 for gnet in self.gNets_ if gnet.getTimingWeight() != 1.0),
             "custom_weighted_nets": sum(1 for gnet in self.gNets_ if gnet.getCustomWeight() != 1.0),
+            "db_callback_attached": self.db_cbk_ is not None,
         }
+
+    def reportObjects(self, sample_limit: int = 0) -> Dict[str, Any]:
+        """导出 Nesterov common 对象关系摘要。"""
+
+        report = self.reportStatus()
+        if sample_limit > 0:
+            report["sample_gcells"] = [gcell.report() for gcell in self.nbc_gcells_[:sample_limit]]
+            report["sample_gnets"] = [gnet.report() for gnet in self.gNets_[:sample_limit]]
+            report["sample_gpins"] = [gpin.report() for gpin in self.gPins_[:sample_limit]]
+        return report
 
     def getNumThreads(self) -> int:
         return self.num_threads_
@@ -1530,6 +1633,13 @@ class NesterovBase:
             "iter": self.iter_,
             "converged": self.isConverged_,
             "diverged": self.isDiverged_,
+            "snapshot_gcells": len(self.snapshot_gcell_coordis_),
+            "prev_slp_coordis": len(self.prevSLPCoordi_),
+            "cur_slp_coordis": len(self.curSLPCoordi_),
+            "next_slp_coordis": len(self.nextSLPCoordi_),
+            "prev_gradients": len(self.prevSLPGradient_),
+            "cur_gradients": len(self.curSLPGradient_),
+            "next_gradients": len(self.nextSLPGradient_),
             "bin_grid": self.bg_.reportStatus(),
         }
 

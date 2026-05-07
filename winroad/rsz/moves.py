@@ -6,7 +6,16 @@ import json
 from math import inf
 from typing import Any, Dict, List, Optional, Sequence, Set
 
-from .common import MoveStateData, MoveStateType, PinInfo, RiseFallArray, _json_value, _not_translated, _obj_key
+from .common import (
+    MoveStateData,
+    MoveStateType,
+    MoveTrackerState,
+    PinInfo,
+    RiseFallArray,
+    _json_value,
+    _not_translated,
+    _obj_key,
+)
 
 
 class BaseMove:
@@ -382,19 +391,26 @@ class MoveTracker:
         }
 
     def as_dict(self, include_moves: bool = True) -> Dict[str, Any]:
-        data: Dict[str, Any] = {
-            "current_endpoint": _json_value(self.current_endpoint_),
-            "critical_pins": _json_value(self.critical_pins_),
-            "violators": _json_value(self.violators_),
-            "pin_infos": {str(_json_value(key)): self._pin_info_as_dict(info) for key, info in self.pin_infos_.items()},
-            "move_summary": self.moveSummary(),
-            "move_summary_by_type": self.moveSummaryByType(),
-            "pending_count": len(self.pending_moves_),
+        data: Dict[str, Any] = self.state().as_dict()
+        data["pin_infos"] = {
+            str(_json_value(key)): self._pin_info_as_dict(info) for key, info in self.pin_infos_.items()
         }
         if include_moves:
             data["moves"] = [self._move_as_dict(move) for move in self.moves_]
             data["pending_moves"] = [self._move_as_dict(move) for move in self.pending_moves_]
         return data
+
+    def state(self) -> MoveTrackerState:
+        """返回轻量状态对象；默认不展开完整 move 列表。"""
+
+        return MoveTrackerState(
+            current_endpoint=self.current_endpoint_,
+            critical_pins=list(self.critical_pins_),
+            violators=list(self.violators_),
+            move_summary=self.moveSummary(),
+            move_summary_by_type=self.moveSummaryByType(),
+            pending_count=len(self.pending_moves_),
+        )
 
     def to_json(self, include_moves: bool = True, **json_kwargs: Any) -> str:
         kwargs = {"sort_keys": True}

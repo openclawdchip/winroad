@@ -232,6 +232,24 @@ class Instance:
     def getPins(self) -> List["Pin"]:
         return self.pins_
 
+    def report(self) -> Dict[str, Any]:
+        """导出实例状态，便于上层报告对象关系而不直接暴露内部字段。"""
+
+        db_inst = self.dbInst()
+        return {
+            "name": getattr(db_inst, "name", "DUMMY") if db_inst is not None else "DUMMY",
+            "is_instance": self.isInstance(),
+            "is_place_instance": self.isPlaceInstance(),
+            "is_fixed": self.isFixed(),
+            "is_macro": self.isMacro(),
+            "is_locked": self.isLocked(),
+            "location": (self.lx_, self.ly_, self.ux_, self.uy_),
+            "center": (self.cx(), self.cy()),
+            "area": self.getArea(),
+            "ext_id": self.extId_,
+            "pins": len(self.pins_),
+        }
+
     def snapOutward(self, origin: Tuple[int, int], step_x: int, step_y: int) -> None:
         """对应 C++ snapOutward，按 site 网格向外扩展到合法坐标。"""
 
@@ -371,6 +389,23 @@ class Pin:
             self.term_ = term
         self.updateLocation()
 
+    def report(self) -> Dict[str, Any]:
+        """导出 pin 与 Instance/Net 的轻量关系。"""
+
+        inst = self.getInstance()
+        net = self.getNet()
+        db_inst = inst.dbInst() if inst is not None else None
+        db_net = net.getDbNet() if net is not None else None
+        return {
+            "name": self.getName(),
+            "is_iterm": self.isITerm(),
+            "is_bterm": self.isBTerm(),
+            "inst": getattr(db_inst, "name", None),
+            "net": getattr(db_net, "name", None),
+            "center": (self.cx_, self.cy_),
+            "offset": (self.offsetCx_, self.offsetCy_),
+        }
+
 
 @dataclass
 class Net:
@@ -429,6 +464,20 @@ class Net:
         if pin not in self.pins_:
             self.pins_.append(pin)
             pin.setNet(self)
+
+    def report(self) -> Dict[str, Any]:
+        """导出线网状态；HPWL 只使用已存在 pin 坐标，不做算法估算。"""
+
+        db_net = self.getDbNet()
+        self.updateBox(self.skipIoMode)
+        return {
+            "name": getattr(db_net, "name", None),
+            "sig_type": self.getSigType().value if hasattr(self.getSigType(), "value") else str(self.getSigType()),
+            "pins": len(self.pins_),
+            "bbox": (self.lx_, self.ly_, self.ux_, self.uy_),
+            "hpwl": max(0, self.ux_ - self.lx_) + max(0, self.uy_ - self.ly_),
+            "skip_io": self.skipIoMode,
+        }
 
 
 class PlacerBaseCommon:
@@ -534,6 +583,22 @@ class PlacerBaseCommon:
             pin.cx_, pin.cy_ = self._bterm_center(block, bterm, bpins)
             self.pinMap_[bterm_name] = pin
 
+    def rebuildPinRelationships(self) -> None:
+        """重新扫描当前 ODB 骨架里的 ITerm/BTerm，并同步反向关系。
+
+        C++ 里 DB callback 会在 term 变化后维护 GPL pin 关系；这里保留
+        同名层面的状态重建入口，不尝试推导缺失的真实 pin shape。
+        """
+
+        self.pinStor_.clear()
+        self.pins_.clear()
+        self.pinMap_.clear()
+        for inst in self.insts_:
+            inst.pins_.clear()
+        for net in self.nets_:
+            net.pins_.clear()
+        self._init_pins(_get_block(self.db_))
+
     def _bterm_center(self, block: Any, bterm: Any, bpins: Any) -> Tuple[int, int]:
         for bpin_name in getattr(bterm, "bpins", []):
             bpin = bpins.get(bpin_name) if isinstance(bpins, dict) else None
@@ -593,9 +658,14 @@ class PlacerBaseCommon:
         inst = self.instMap_.pop(id(db_inst), None)
         if inst is None:
             return None
-        for pins in (self.insts_, self.placeInsts_, self.instStor_):
-            if inst in pins:
-                pins.remove(inst)
+        # DB 删除实例时，先断开 pin 的实例端；net 端是否还存在由后续 ITerm
+        # callback/rebuild 决定，避免留下指向已删除 Instance 的反向关系。
+        for pin in list(inst.getPins()):
+            pin.inst_ = None
+        inst.pins_.clear()
+        for insts in (self.insts_, self.placeInsts_, self.instStor_):
+            if inst in insts:
+                insts.remove(inst)
         if inst.isMacro():
             self.macroInstsArea_ = max(0, self.macroInstsArea_ - inst.getArea())
         return inst
@@ -614,6 +684,10 @@ class PlacerBaseCommon:
         net = self.netMap_.pop(id(db_net), None)
         if net is None:
             return None
+        # 删除 net 时同步 pin 的 net 端，保持 Python 对象图没有悬挂 net。
+        for pin in list(net.getPins()):
+            pin.net_ = None
+        net.pins_.clear()
         for nets in (self.nets_, self.netStor_):
             if net in nets:
                 nets.remove(net)
@@ -644,6 +718,27 @@ class PlacerBaseCommon:
             "pins": len(self.pins_),
             "nets": len(self.nets_),
         }
+
+    def reportConnectivity(self, sample_limit: int = 0) -> Dict[str, Any]:
+        """汇总 Instance/Pin/Net 关系，sample_limit>0 时附带少量对象样本。"""
+
+        dangling_inst_pins = sum(1 for pin in self.pins_ if pin.isITerm() and pin.getInstance() is None)
+        dangling_net_pins = sum(1 for pin in self.pins_ if pin.getNet() is None)
+        report: Dict[str, Any] = {
+            "insts": len(self.insts_),
+            "place_insts": len(self.placeInsts_),
+            "pins": len(self.pins_),
+            "nets": len(self.nets_),
+            "dangling_inst_pins": dangling_inst_pins,
+            "dangling_net_pins": dangling_net_pins,
+            "hpwl": self.getHpwl(),
+            "macro_area": self.macroInstsArea_,
+        }
+        if sample_limit > 0:
+            report["sample_insts"] = [inst.report() for inst in self.insts_[:sample_limit]]
+            report["sample_nets"] = [net.report() for net in self.nets_[:sample_limit]]
+            report["sample_pins"] = [pin.report() for pin in self.pins_[:sample_limit]]
+        return report
 
     def getMacroInstsArea(self) -> int:
         return self.macroInstsArea_
@@ -755,6 +850,24 @@ class PlacerBase:
             "placeInsts": len(self.placeInsts_),
             "fixedInsts": len(self.fixedInsts_),
             "dummyInsts": len(self.dummyInsts_),
+        }
+
+    def reportStatus(self) -> Dict[str, Any]:
+        """导出 region 级 PlacerBase 状态。"""
+
+        return {
+            "insts": len(self.pb_insts_),
+            "place_insts": len(self.placeInsts_),
+            "fixed_insts": len(self.fixedInsts_),
+            "dummy_insts": len(self.dummyInsts_),
+            "non_place_insts": len(self.nonPlaceInsts_),
+            "region_area": self.region_area_,
+            "region_bbox": self.region_bbox_,
+            "place_area": self.placeInstsArea_,
+            "non_place_area": self.nonPlaceInstsArea_,
+            "macro_area": self.macroInstsArea_,
+            "std_area": self.stdInstsArea_,
+            "hpwl": self.getHpwl(),
         }
 
     def placeInstsArea(self) -> int:

@@ -51,6 +51,9 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
     `violationCounters()`、`reportViolationCounters()`、
     `reportLimits()`、`insertedBufferCount()`、`resizedDriverCount()`、
     `repairedNetCount()`、`setDebugGraphics()`、`getSlewRCFactor()` 等入口已建立。
+  - 第七轮补齐 `importConfig()`、`exportConfig()`、`reportState()`、
+    `statistics()`、`validateBatch()`；这些接口只处理状态/校验，不执行真实
+    STA 查询、buffer insertion 或 DB mutation。
 
 - `OptoParams`、`RepairSetup`
   - 对应 `src/rsz/src/RepairSetup.hh`。
@@ -68,6 +71,9 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
     `resetCounters()`、`reportCounters()`、
     `endpointRepairCount()`、`recordRejectedMove()`、`rejectedMovesForPin()`、
     `reportMoveSummary()` 补齐 endpoint / move tracker / report 边界。
+  - 第七轮补齐 `importConfig()`、`exportConfig()`、`reportState()`、
+    `statistics()`、`to_json()`、`validateBatch()`，可用于批处理配置预检和
+    JSON-safe 报告导出。
 
 - `RepairHold`
   - 对应 `src/rsz/src/RepairHold.hh`。
@@ -81,6 +87,8 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
     `recordClonedGate()`、`resetCounters()`、`reportHoldBuffer()`、
     `reportCounters()`、`statistics()`、`to_json()` 补齐 hold buffer 选择、
     计数和 JSON-safe 导出边界；真实 hold buffer 插入仍未翻译。
+  - 第七轮补齐 `importConfig()`、`exportConfig()`、`reportState()`、
+    `validateBatch()`，用于配置导入导出和批处理校验。
 
 - `RecoverPower`
   - 对应 `src/rsz/src/RecoverPower.hh`。
@@ -94,6 +102,8 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
     `isBadVertex()`、`recoveredPower()`、`sizeDownCount()`、`reportCounters()`、
     `statistics()`、`to_json()` 补齐 swap / size down / bad vertex 统计和
     JSON-safe 导出边界；真实 cell swap/size down mutation 仍未翻译。
+  - 第七轮补齐 `importConfig()`、`exportConfig()`、`reportState()`、
+    `validateBatch()`，保持配置和统计入口与其他 Repair* 类一致。
 
 - `PreChecks`
   - 对应 `src/rsz/src/PreChecks.hh`。
@@ -123,6 +133,12 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
     `pendingMoves()`、`trackMoveAttempt()`、`trackMoveCommit()`、
     `trackMoveReject()`、`clearPendingMoves()`、`moveSummary()`、
     `moveSummaryByType()`、`as_dict()`、`to_json()`、`report()` 提供只读报告面。
+  - 第七轮新增 `MoveTrackerState` 和 `state()`，把 endpoint、critical pins、
+    violator、pending count 和 move summary 作为轻量状态对象导出。
+
+- `RepairFlowState`、`BufferedNetState`、`MoveTrackerState`
+  - 第七轮新增的状态对象。它们把配置、计数器、树形指标和 move summary
+    统一压成 JSON-safe dict，方便上层 Tcl/Python report 和 smoke test 使用。
 
 - `SwapArithModules`
   - 对应 `src/rsz/src/SwapArithModules.hh` 的抽象接口。
@@ -168,6 +184,15 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
   `reportCounters()` 和 `Resizer.configureRecoverPower()` /
   `reportRecoverPowerConfig()` / `reportRecoverPowerCounters()` /
   `reportRecoverPowerStats()` / `resetRecoverPowerConfig()`
+- 配置导入导出和批处理校验：
+  `Resizer.importRepairDesignConfig()` / `exportRepairDesignConfig()` /
+  `validateRepairDesignBatch()` / `reportRepairDesignState()`，
+  `importRepairSetupConfig()` / `exportRepairSetupConfig()` /
+  `validateRepairSetupBatch()` / `reportRepairSetupState()`，
+  `importRepairHoldConfig()` / `exportRepairHoldConfig()` /
+  `validateRepairHoldBatch()` / `reportRepairHoldState()`，
+  `importRecoverPowerConfig()` / `exportRecoverPowerConfig()` /
+  `validateRecoverPowerBatch()` / `reportRecoverPowerState()`
 - `MoveTracker.trackCriticalPins()` / `trackViolator()` /
   `trackViolatorWithInfo()` / `trackMove()` / `commitMoves()` / `rejectMoves()` /
   `moveSummary()` / `moveSummaryByType()` / `as_dict()` / `to_json()` / `report()`
@@ -209,7 +234,7 @@ OpenDB netlist mutation、estimated parasitics、global router 或 OpenDP，不�
 4. `BaseMove` 派生类建议按 C++ 文件逐个翻译：buffer、unbuffer、size up/down、
    clone、split load、pin swap、VT swap。
 
-## 第六轮验证命令
+## 第七轮验证命令
 
 ```powershell
 python -m py_compile D:\winroad_py\winroad\rsz\__init__.py D:\winroad_py\winroad\rsz\buffered_net.py D:\winroad_py\winroad\rsz\common.py D:\winroad_py\winroad\rsz\moves.py D:\winroad_py\winroad\rsz\repair_design.py D:\winroad_py\winroad\rsz\repair_setup.py D:\winroad_py\winroad\rsz\repair_hold.py D:\winroad_py\winroad\rsz\recover_power.py D:\winroad_py\winroad\rsz\resizer.py

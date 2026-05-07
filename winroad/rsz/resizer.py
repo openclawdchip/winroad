@@ -216,6 +216,18 @@ class Resizer:
     def reportRepairSetupCounters(self) -> Dict[str, Any]:
         return self.repair_setup_.reportCounters()
 
+    def importRepairSetupConfig(self, data: Dict[str, Any]) -> Any:
+        return self.repair_setup_.importConfig(data)
+
+    def exportRepairSetupConfig(self) -> Dict[str, Any]:
+        return self.repair_setup_.exportConfig()
+
+    def validateRepairSetupBatch(self, batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        return self.repair_setup_.validateBatch(batch)
+
+    def reportRepairSetupState(self) -> Dict[str, Any]:
+        return self.repair_setup_.reportState()
+
     def rebufferNet(self, drvr_pin: Any) -> None:
         _not_translated("Resizer::rebufferNet")
 
@@ -240,6 +252,18 @@ class Resizer:
     def reportRepairHoldStats(self) -> Dict[str, Any]:
         return self.repair_hold_.statistics()
 
+    def importRepairHoldConfig(self, data: Dict[str, Any]) -> Any:
+        return self.repair_hold_.importConfig(data)
+
+    def exportRepairHoldConfig(self) -> Dict[str, Any]:
+        return self.repair_hold_.exportConfig()
+
+    def validateRepairHoldBatch(self, batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        return self.repair_hold_.validateBatch(batch)
+
+    def reportRepairHoldState(self) -> Dict[str, Any]:
+        return self.repair_hold_.reportState()
+
     def recoverPower(self, recover_power_percent: float, match_cell_footprint: bool = False, verbose: bool = False) -> bool:
         return self.recover_power_.recoverPower(recover_power_percent, match_cell_footprint, verbose)
 
@@ -257,6 +281,18 @@ class Resizer:
 
     def reportRecoverPowerStats(self) -> Dict[str, Any]:
         return self.recover_power_.statistics()
+
+    def importRecoverPowerConfig(self, data: Dict[str, Any]) -> Any:
+        return self.recover_power_.importConfig(data)
+
+    def exportRecoverPowerConfig(self) -> Dict[str, Any]:
+        return self.recover_power_.exportConfig()
+
+    def validateRecoverPowerBatch(self, batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        return self.recover_power_.validateBatch(batch)
+
+    def reportRecoverPowerState(self) -> Dict[str, Any]:
+        return self.recover_power_.reportState()
 
     def swapArithModules(self, path_count: int, target: str, slack_margin: float) -> None:
         _not_translated("Resizer::swapArithModules")
@@ -311,6 +347,18 @@ class Resizer:
 
     def reportRepairDesignLimits(self) -> Dict[str, Any]:
         return self.repair_design_.reportLimits()
+
+    def importRepairDesignConfig(self, data: Dict[str, Any]) -> Any:
+        return self.repair_design_.importConfig(data)
+
+    def exportRepairDesignConfig(self) -> Dict[str, Any]:
+        return self.repair_design_.exportConfig()
+
+    def validateRepairDesignBatch(self, batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        return self.repair_design_.validateBatch(batch)
+
+    def reportRepairDesignState(self) -> Dict[str, Any]:
+        return self.repair_design_.reportState()
 
     def repairNet(self, *args: Any, **kwargs: Any) -> None:
         self.repair_design_.repairNet(*args, **kwargs)

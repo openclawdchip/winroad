@@ -66,6 +66,33 @@
 
 ## 已实现轻量行为
 
+### 第七轮补充
+
+- `frLayer` / `frViaDef` / `frVia` / `frShape` / `frGuide` / `frMarker` /
+  `frNode` / `frNet` / `frTechObject` / `frBlock` / `frDesign`：
+  - 新增 `to_dict()` / `snapshot()` 状态导出，便于对照 OpenROAD C++ 对象边界做 smoke 和报告。
+  - 补充 owner/name/topology/status 访问器，例如 net owner、GR shape/via、root node、
+    initial routing、special、abutment、jumper、absolute priority、marker owner、guide layer
+    range、via def tech/default 等。
+  - `frRegionQuery.snapshot()` 只汇总当前线性索引和 layer 数量，不构建 R-tree，也不运行 DRC。
+- `FlexDR`：
+  - 新增 `FlexDRViaData.to_dict()`、`FlexDRSearchRepairArgs.to_dict()`。
+  - 新增 iteration、violation list、distributed state、guide coverage rows 和 `snapshot()`。
+  - `reportGuideCoverage()` 继续只统计已有 net guide，不生成、不修补、不评估真实覆盖。
+- `FlexGR` / `FlexPA` / `FlexGCWorker`：
+  - 新增阶段级 `snapshot()`。
+  - `FlexGR.setCMap()` 仅保存 congestion map 指针；不计算拥塞。
+  - `FlexPA` 补 target instance、graphics、distributed state 查询。
+  - `FlexGCWorker` 补 ext/drc box、target objs、marker 容器访问；`addMarker()` 只记录外部已有 marker。
+- `FlexGridGraph`：
+  - 新增 node `to_dict()`、单坐标 getter 和 `snapshot()` 汇总维度、bbox、edge/block/grid cost/special via 数量。
+  - maze search、cost propagation、traceback 入口仍保持未实现。
+- `TritonRoute`：
+  - 新增 `updateRouterConfiguration()`、`getDebugSettingsState()`、`getDistributedState()`。
+  - 新增 `ensureDR()`、`ensurePA()`、`makeGR()` 轻量阶段对象创建入口；这些入口不调用阶段 `init()` 或 `main()`。
+  - 新增 `collectMarkers()`、`getMarkerSummary()`、`getRouteGuideSummary()`、`reportMarkers()`。
+  - 新增 `snapshot()` 与 `writeSnapshot()`，输出 Python 接口层 JSON 状态；不写 DEF/ODB。
+
 - `TritonRoute`：
   - `init()` 建立空 `frDesign`，保存 logger/dist/stt/graphics 指针。
   - `setParams()` 将 `ParamStruct` 写入 `RouterConfiguration`。
@@ -165,4 +192,7 @@
 - 真实 detailed routing、DRC、search/maze、worker 并行、分布式通信、
   guide/DEF/ODB 读写均未实现，避免伪造布线结果。已实现的 DRC/guide report 只汇总
   传入或已有对象，不创建 marker、不判定违规、不修改布线。
+- 第七轮新增的 snapshot/report/config 接口只服务 Python 边界可观测性；所有真实详细布线搜索、
+  DRC 修复、ODB/DEF 写回仍必须沿同名入口继续抛 `NotImplementedError`，直到逐文件翻译
+  OpenROAD C++ 实现。
 - 后续轮次可沿 `NotImplementedError` 的入口逐文件翻译 C++ 实现。

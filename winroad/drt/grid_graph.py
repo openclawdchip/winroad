@@ -51,6 +51,22 @@ class FlexGridGraphNode:
     has_grid_cost_up: bool = False
     has_special_via: bool = False
 
+    def to_dict(self) -> dict[str, bool]:
+        """返回节点三方向状态；W/S/D 由相邻节点映射得到。"""
+
+        return {
+            "has_east_edge": self.has_east_edge,
+            "has_north_edge": self.has_north_edge,
+            "has_up_edge": self.has_up_edge,
+            "is_blocked_east": self.is_blocked_east,
+            "is_blocked_north": self.is_blocked_north,
+            "is_blocked_up": self.is_blocked_up,
+            "has_grid_cost_east": self.has_grid_cost_east,
+            "has_grid_cost_north": self.has_grid_cost_north,
+            "has_grid_cost_up": self.has_grid_cost_up,
+            "has_special_via": self.has_special_via,
+        }
+
     def has_edge(self, direction: frDirEnum) -> bool:
         if direction == frDirEnum.E:
             return self.has_east_edge
@@ -172,6 +188,15 @@ class FlexGridGraph:
     def getNode(self, x: frMIdx, y: frMIdx, z: frMIdx) -> FlexGridGraphNode:
         return self.nodes_[self.getIdx(x, y, z)]
 
+    def getXCoord(self, x: frMIdx) -> frCoord:
+        return self.xCoords_[x]
+
+    def getYCoord(self, y: frMIdx) -> frCoord:
+        return self.yCoords_[y]
+
+    def getZCoord(self, z: frMIdx) -> frLayerNum:
+        return self.zCoords_[z]
+
     def getDim(self) -> Tuple[frMIdx, frMIdx, frMIdx]:
         return (len(self.xCoords_), len(self.yCoords_), len(self.zCoords_))
 
@@ -285,6 +310,23 @@ class FlexGridGraph:
         self.zHeights_.clear()
         self.layerRouteDirections_.clear()
         self.nodes_.clear()
+
+    def snapshot(self) -> dict[str, Any]:
+        """返回 grid graph 状态摘要；不执行 maze search 或 cost propagation。"""
+
+        edge_count = sum(int(node.has_east_edge) + int(node.has_north_edge) + int(node.has_up_edge) for node in self.nodes_)
+        blocked_count = sum(int(node.is_blocked_east) + int(node.is_blocked_north) + int(node.is_blocked_up) for node in self.nodes_)
+        grid_cost_count = sum(int(node.has_grid_cost_east) + int(node.has_grid_cost_north) + int(node.has_grid_cost_up) for node in self.nodes_)
+        return {
+            "dim": self.getDim(),
+            "bbox": self.getBBox(),
+            "min_layer_num": self.getMinLayerNum(),
+            "max_layer_num": self.getMaxLayerNum(),
+            "edges": edge_count,
+            "blocked_edges": blocked_count,
+            "grid_cost_edges": grid_cost_count,
+            "special_vias": sum(int(node.has_special_via) for node in self.nodes_),
+        }
 
     def isValidIdx(self, x: frMIdx, y: frMIdx, z: frMIdx) -> bool:
         x_dim, y_dim, z_dim = self.getDim()

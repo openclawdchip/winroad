@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
-from .common import RepairHoldConfig, _json_value, _not_translated
+from .common import RepairFlowState, RepairHoldConfig, _json_value, _not_translated
 
 
 class RepairHold:
@@ -82,6 +82,21 @@ class RepairHold:
     def config(self) -> RepairHoldConfig:
         return self.config_
 
+    def importConfig(self, data: Dict[str, Any]) -> RepairHoldConfig:
+        """导入 hold 配置；不插 buffer、不查询 STA。"""
+
+        config = RepairHoldConfig.from_dict(data)
+        return self.configure(
+            buffer_cell=config.buffer_cell,
+            max_passes=config.max_passes,
+            max_repairs_per_pass=config.max_repairs_per_pass,
+            allow_setup_violations=config.allow_setup_violations,
+            setup_slack_margin=config.setup_slack_margin,
+        )
+
+    def exportConfig(self) -> Dict[str, Any]:
+        return self.reportConfig()
+
     def reportConfig(self) -> Dict[str, Any]:
         return self.config_.as_dict()
 
@@ -123,9 +138,34 @@ class RepairHold:
         }
 
     def statistics(self) -> Dict[str, Any]:
-        data = self.reportCounters()
-        data["config"] = self.reportConfig()
-        return data
+        return self.reportState()
+
+    def reportState(self) -> Dict[str, Any]:
+        return RepairFlowState(
+            name="RepairHold",
+            config=self.reportConfig(),
+            counters=self.reportCounters(),
+            details={"hold_buffer": _json_value(self.buffer_cell_)},
+        ).as_dict()
+
+    def validateBatch(self, batch: Any) -> Dict[str, Any]:
+        """校验 hold 批处理配置列表。"""
+
+        errors = []
+        normalized = []
+        for index, item in enumerate(batch):
+            try:
+                config = RepairHoldConfig.from_dict(item)
+                if config.max_passes < 0:
+                    raise ValueError("max_passes must be non-negative")
+                if config.max_repairs_per_pass < 0:
+                    raise ValueError("max_repairs_per_pass must be non-negative")
+                if config.setup_slack_margin < 0.0:
+                    raise ValueError("setup_slack_margin must be non-negative")
+                normalized.append(config.as_dict())
+            except Exception as exc:  # noqa: BLE001 - 批处理报告所有错误。
+                errors.append(f"batch[{index}]: {exc}")
+        return {"valid": not errors, "errors": errors, "items": normalized}
 
     def to_json(self, **json_kwargs: Any) -> str:
         kwargs = {"sort_keys": True}

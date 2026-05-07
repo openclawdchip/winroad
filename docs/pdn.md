@@ -241,3 +241,37 @@
 
 - `python -m py_compile` 已覆盖 `winroad/pdn/*.py`。
 - smoke 覆盖 config/state export-import round trip、shape/via/failure 恢复、summary、via failure report、sroute summary、renderer selection snapshot，并确认 `buildGrids()` 仍抛 `NotImplementedError`。
+
+## 第七轮补充重点
+
+- 错误聚合
+  - 新增 `PdnIssue`，保存 setup/report 阶段的 `path`、`message`、`severity`。
+  - `PdnGen.collectSetupIssues()`、`VoltageDomain.collectSetupIssues()`、`Grid.collectSetupIssues()`、`GridComponent.collectSetupIssues()` 会聚合接口层错误；`checkSetup()` 仍保持原语义，在存在错误时抛 `ValueError`。
+  - 新增 `report_pdn_setup_issues()`，可直接取得纯 Python setup 问题列表，不触发真实 PDN 生成。
+  - `PdnGen.report()` 增加 `setup_issues`，`reportSummary()` 增加 `setup_issue_count`。
+
+- 几何参数校验
+  - 新增 `_validate_optional_rect()`，用于 shape obstruction 等可空几何字段。
+  - `Shape` 现在校验 obstruction、iterm/bterm runtime connection 矩形，并在 report 中给出 connection 计数。
+  - repair channel 的 `area`、`available_area`、`obs_check_area` 在导入配置时重新走矩形校验，避免绕过 dataclass 初始化检查。
+  - `Grid.findShapeContainingRect()` 只查询已存在 runtime shape，不生成几何。
+
+- via/connect 状态
+  - 新增 `_normalize_failed_via_reason()`，兼容枚举、导出字符串和 Tcl 风格字符串。
+  - `Via.markFailed()` 与 `Connect.addFailedVia()` 统一归一化失败原因。
+  - `Connect.failedViaReport()` 同时聚合显式 `failed_vias` 和 runtime `Via.failed`，便于导入状态后保持失败统计一致。
+  - `Connect.addVia()` 会补齐 shape 回链；`Grid.resetShapes()`/state import 前清理旧 runtime，避免重复导入产生悬挂或重复 via 关系。
+
+- 导入导出
+  - config/state 导入增加版本检查，当前只接受 version 1。
+  - config 导入检查重复 voltage domain 和多个 core domain。
+  - state 导入恢复 shape obstruction、iterm/bterm connections、via failed reason、failed via 明细，并全部走基础几何校验。
+  - repair channel 导入恢复 target strap 索引。
+
+- 真实算法边界
+  - `buildGrids()`、`writeToDb()`、`repairVias()`、`createSrouteWires()`、renderer `redraw()`、真实 shape/via/db 构造、ODB 写回、DRC/repair 算法继续显式抛 `NotImplementedError`。
+
+## 第七轮验证
+
+- `python -m py_compile` 已覆盖 `winroad/pdn.py` 和 `winroad/pdn/*.py`。
+- smoke 覆盖 core domain/grid/ring/strap/connect 构建、shape obstruction 与 iterm connection state round trip、via failed reason 聚合、explicit failed via 聚合、sroute 参数保存、renderer selection snapshot、setup issue 聚合，并确认 `buildGrids()`、`writeToDb()`、`repairVias()` 仍抛 `NotImplementedError`。

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict, List, Optional, Sequence, Set
 
-from .common import MoveType, OptoParams, RepairSetupConfig, _json_value, _not_translated, _obj_key
+from .common import MoveType, OptoParams, RepairFlowState, RepairSetupConfig, _json_value, _not_translated, _obj_key
 from .moves import (
     BaseMove,
     BufferMove,
@@ -195,6 +196,29 @@ class RepairSetup:
     def config(self) -> RepairSetupConfig:
         return self.config_
 
+    def importConfig(self, data: Dict[str, Any]) -> RepairSetupConfig:
+        """导入 setup repair 配置，不触发 STA 查询或 move 执行。"""
+
+        config = RepairSetupConfig.from_dict(data)
+        return self.configure(
+            setup_slack_margin=config.setup_slack_margin,
+            verbose=config.verbose,
+            skip_pin_swap=config.skip_pin_swap,
+            skip_gate_cloning=config.skip_gate_cloning,
+            skip_size_down=config.skip_size_down,
+            skip_buffering=config.skip_buffering,
+            skip_buffer_removal=config.skip_buffer_removal,
+            skip_vt_swap=config.skip_vt_swap,
+            max_repairs_per_pass=config.max_repairs_per_pass,
+            max_end_repairs=config.max_end_repairs,
+            move_sequence=config.move_sequence,
+        )
+
+    def exportConfig(self) -> Dict[str, Any]:
+        """导出 JSON-safe 配置快照。"""
+
+        return self.reportConfig()
+
     def reportConfig(self) -> Dict[str, Any]:
         return self.config_.as_dict()
 
@@ -279,6 +303,66 @@ class RepairSetup:
             "tracker": self.move_tracker_.report() if self.move_tracker_ is not None else None,
             "config": self.reportConfig(),
         }
+
+    def validateBatch(self, batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+        """校验一组 setup 配置，供批处理入口先行 fail-fast。
+
+        这里只检查 Python 接口层能保证的边界：数值非负、move 名称可解析、skip 后
+        至少保留一个动作。真实 violator 收集和 STA slack 查询仍由未翻译入口负责。
+        """
+
+        errors: List[str] = []
+        normalized: List[Dict[str, Any]] = []
+        for index, item in enumerate(batch):
+            try:
+                config = RepairSetupConfig.from_dict(item)
+                if config.max_repairs_per_pass < 0:
+                    raise ValueError("max_repairs_per_pass must be non-negative")
+                if config.max_end_repairs < -1:
+                    raise ValueError("max_end_repairs must be -1 or non-negative")
+                if config.setup_slack_margin < 0.0:
+                    raise ValueError("setup_slack_margin must be non-negative")
+                probe = RepairSetupConfig.from_dict(config.as_dict())
+                self._validateMoveSequenceNotEmpty(probe)
+                normalized.append(config.as_dict())
+            except Exception as exc:  # noqa: BLE001 - 批处理需要收集所有配置错误。
+                errors.append(f"batch[{index}]: {exc}")
+        return {"valid": not errors, "errors": errors, "items": normalized}
+
+    def _validateMoveSequenceNotEmpty(self, config: RepairSetupConfig) -> None:
+        skipped = set()
+        if config.skip_pin_swap:
+            skipped.add(MoveType.SWAP)
+        if config.skip_gate_cloning:
+            skipped.add(MoveType.CLONE)
+        if config.skip_size_down:
+            skipped.add(MoveType.SIZEDOWN)
+        if config.skip_buffering:
+            skipped.update({MoveType.BUFFER, MoveType.SPLIT})
+        if config.skip_buffer_removal:
+            skipped.add(MoveType.UNBUFFER)
+        if config.skip_vt_swap:
+            skipped.add(MoveType.VTSWAP_SPEED)
+        if config.move_sequence and not [move for move in config.move_sequence if move not in skipped]:
+            raise ValueError("move_sequence is empty after applying skip flags")
+
+    def reportState(self) -> Dict[str, Any]:
+        """返回 setup flow 的配置、计数器和 tracker 快照。"""
+
+        return RepairFlowState(
+            name="RepairSetup",
+            config=self.reportConfig(),
+            counters=self.reportCounters(),
+            details=self.reportMoveSummary(),
+        ).as_dict()
+
+    def statistics(self) -> Dict[str, Any]:
+        return self.reportState()
+
+    def to_json(self, **json_kwargs: Any) -> str:
+        kwargs = {"sort_keys": True}
+        kwargs.update(json_kwargs)
+        return json.dumps(self.statistics(), **kwargs)
 
     def repairSetup(self, *_args: Any, **_kwargs: Any) -> bool:
         _not_translated("RepairSetup::repairSetup")

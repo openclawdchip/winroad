@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from math import inf
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from .common import BufferedNetType, Point, _json_value, _not_translated
+from .common import BufferedNetState, BufferedNetType, Point, _json_value, _not_translated
 
 
 @dataclass(frozen=True)
@@ -367,11 +367,16 @@ class BufferedNet:
         return "\n".join(lines)
 
     def report(self) -> Dict[str, Any]:
-        return {
-            "tree": self.serialize(True),
-            "metrics": self.metrics().as_dict(),
-            "text": self.reportTree(),
-        }
+        return self.state().as_dict()
+
+    def state(self) -> BufferedNetState:
+        """返回树结构和关键指标的状态对象。"""
+
+        return BufferedNetState(
+            tree=self.serialize(True),
+            metrics=self.metrics().as_dict(),
+            text=self.reportTree(),
+        )
 
 def visitTree(func: Callable[..., Any], *args: Any) -> Any:
     """C++ ``visitTree`` 递归 lambda 辅助器的 Python 版本。"""
