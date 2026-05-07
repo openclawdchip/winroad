@@ -22,6 +22,7 @@
 - `PlaceOptions`
   - 对应 OpenROAD `gpl::PlaceOptions`
   - 保留默认参数、`skipIo()`、`validate()`
+  - 第四轮补充更完整的参数范围校验与 `report()` 状态导出
 
 - 顶层入口 `Replace`
   - 对应 OpenROAD `gpl::Replace`
@@ -87,12 +88,13 @@
   - `isValidSigType()`
   - `make_replace()`
   - 第三轮补充 `Replace` 的 `getInitialPlace()`、`getNesterovPlace()`、`getRouteBase()`、`getTimingBase()` 与分项/总览 `report*()` 入口
+  - 第四轮补充入口统一配置校验、reset 总数清理、cluster 拷贝保存、总览报告中的 base/common 状态
 
 ## 未实现
 
 - `InitialPlace::createSparseMatrix()` 的 B2B 模型、稀疏矩阵构建、BiCGSTAB 求解；坐标容器与回写入口已建立
 - `NesterovBaseCommon` 的 weighted-average wirelength force / gradient / preconditioner
-- `NesterovBase` 的 FFT 电势场、density gradient、Nesterov 坐标更新、收敛/发散判定；snapshot/revert 容器已建，真实 min-overflow 选择逻辑未译
+- `NesterovBase` 的 FFT 电势场、density gradient、Nesterov 坐标更新、收敛/发散判定；snapshot/revert 与 bin 状态容器已建，真实 min-overflow 选择逻辑未译
 - `NesterovPlace::doNesterovPlace()` 主循环、backtracking、wirelength coefficient 更新、timing/routability 迭代调度
 - `RouteBase` 的 RUDY tile 计算、FastRoute/global router 结果读取、routability-driven inflation/revert
 - `TimingBase::executeTimingDriven()` 的 STA slack 读取、关键网权重更新、resizer journal 交互
@@ -104,3 +106,22 @@
 - 当前翻译目标是建立 OpenROAD gpl 的核心对象、入口类和关键函数边界。
 - 未翻译算法不会用估算 demo 代替，相关函数显式抛出 `NotImplementedError`。
 - 字段名尽量贴近 C++ 成员名，保留尾部 `_`，方便后续逐文件继续对照源码翻译。
+
+## 第四轮补充
+
+- 配置验证
+  - `PlaceOptions.validate()` 现在覆盖初始布局、Nesterov、timing/routability、bin grid、pad 等关键参数范围。
+  - `Replace` 的主要入口与 C++ 风格 setter 会调用校验，避免把非法状态带入后续对象。
+
+- PlacerBase 关系状态
+  - `PlacerBaseCommon` 会从当前 ODB 骨架的 `iterms`、`bterms`、`bpins` 关系创建可验证的 `Pin`，并同步 Instance/Net 反向关系。
+  - 新增 `addDbInst()` / `removeDbInst()` / `addDbNet()` / `removeDbNet()`，供 package 内 DB callback 状态更新使用。
+
+- Nesterov 状态层
+  - `NesterovBaseCommon` 补齐 `GNet` 映射、`GPin` 构建、`rebuildPinRelationships()`、gcell/gnet 增删和 `reportStatus()`。
+  - `NesterovPlace` 的 create/destroy/move/resize callback 现在更新 package 内对象关系、面积 delta、changed gcell、pin/net box，并在 snapshot revert 后回写 DB。
+  - `BinGrid` 补充 bin index 范围计算、non-place 面积统计、gcell/filler density 面积统计与 overflow 状态刷新；这只是状态/报告数据，不替代 FFT/solver。
+
+- Route/Timing 状态层
+  - `RouteBase.initRouteBase()` 可从 Nesterov bin grid 建立 tile grid，`revertGCellSizeToMinRc()` 恢复 target density 并记录 revert 次数，拥塞报告包含历史序列。
+  - `TimingBase` 补齐 `Sequence` 类型导入，保持 timing-driven 核心重权重仍显式未实现。

@@ -193,6 +193,75 @@ class RepairDesignViolationCounters:
         }
 
 @dataclass
+class RepairSetupConfig:
+    """RepairSetup 一轮优化使用的轻量配置。"""
+
+    setup_slack_margin: float = 0.0
+    verbose: bool = False
+    skip_pin_swap: bool = False
+    skip_gate_cloning: bool = False
+    skip_size_down: bool = False
+    skip_buffering: bool = False
+    skip_buffer_removal: bool = False
+    skip_vt_swap: bool = False
+    max_repairs_per_pass: int = 1
+    max_end_repairs: int = -1
+    move_sequence: List[MoveType] = field(default_factory=list)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "setup_slack_margin": self.setup_slack_margin,
+            "verbose": self.verbose,
+            "skip_pin_swap": self.skip_pin_swap,
+            "skip_gate_cloning": self.skip_gate_cloning,
+            "skip_size_down": self.skip_size_down,
+            "skip_buffering": self.skip_buffering,
+            "skip_buffer_removal": self.skip_buffer_removal,
+            "skip_vt_swap": self.skip_vt_swap,
+            "max_repairs_per_pass": self.max_repairs_per_pass,
+            "max_end_repairs": self.max_end_repairs,
+            "move_sequence": [move.value for move in self.move_sequence],
+        }
+
+@dataclass
+class RepairHoldConfig:
+    """RepairHold 的 pass limit、buffer 和 setup 保护配置。"""
+
+    buffer_cell: Any = None
+    max_passes: int = 0
+    max_repairs_per_pass: int = 0
+    allow_setup_violations: bool = False
+    setup_slack_margin: float = 0.0
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "buffer_cell": self.buffer_cell,
+            "max_passes": self.max_passes,
+            "max_repairs_per_pass": self.max_repairs_per_pass,
+            "allow_setup_violations": self.allow_setup_violations,
+            "setup_slack_margin": self.setup_slack_margin,
+        }
+
+@dataclass
+class RecoverPowerConfig:
+    """RecoverPower 的轻量配置，不触发 cell swap / size-down。"""
+
+    recover_power_percent: float = 0.0
+    match_cell_footprint: bool = False
+    verbose: bool = False
+    scene: Any = None
+    setup_slack_margin: float = 1e-11
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "recover_power_percent": self.recover_power_percent,
+            "match_cell_footprint": self.match_cell_footprint,
+            "verbose": self.verbose,
+            "scene": self.scene,
+            "setup_slack_margin": self.setup_slack_margin,
+        }
+
+@dataclass
 class SlackEstimatorParams:
     """BaseMove 估算 move slack 时传递的上下文。"""
 

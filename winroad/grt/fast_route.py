@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
-from .congestion import RegionAdjustment, TileCongestion, TileInformation
+from .congestion import CongestionInformation, RegionAdjustment, TileCongestion, TileInformation
 from .guide import GSegment
 from .types import CapacityReductionData, NetRouteMap, NetsPerCongestedArea, TileSet, _unsupported
 
@@ -112,6 +113,21 @@ class FastRouteCore:
     incremental_grt: bool = False
     debug: DebugSetting = field(default_factory=DebugSetting)
 
+    @staticmethod
+    def _edge_key(x1: int, y1: int, x2: int, y2: int, layer: int) -> Tuple[int, int, int, int, int]:
+        """返回无向 grid edge 的稳定 key。"""
+
+        p1 = (int(x1), int(y1))
+        p2 = (int(x2), int(y2))
+        if p2 < p1:
+            p1, p2 = p2, p1
+        return (p1[0], p1[1], p2[0], p2[1], int(layer))
+
+    @staticmethod
+    def _edge_to_dict(key: Tuple[int, int, int, int, int], value: int) -> Dict[str, int]:
+        x1, y1, x2, y2, layer = key
+        return {"x1": x1, "y1": y1, "x2": x2, "y2": y2, "layer": layer, "value": value}
+
     def clear(self) -> None:
         """对应 C++ ``clear()``，清理运行态数据。"""
 
@@ -134,9 +150,17 @@ class FastRouteCore:
         self.has_2d_overflow = False
 
     def saveCongestion(self, iter: int = -1) -> None:
-        """拥塞快照输出入口，待移植文件格式。"""
+        """保存当前拥塞摘要。
 
-        _unsupported("FastRouteCore::saveCongestion")
+        真实 FastRoute 迭代文件格式尚未移植；这里写出 JSON 状态报告，供测试和
+        上层工具落盘检查。
+        """
+
+        report = self.createCongestionReport()
+        report["iteration"] = iter
+        self._last_congestion_report = report
+        if self.congestion_file_name:
+            self.writeCongestionMap(self.congestion_file_name)
 
     def setGridsAndLayers(self, x: int, y: int, nLayers: int) -> None:
         """对应 C++ ``setGridsAndLayers()``。"""
@@ -294,6 +318,16 @@ class FastRouteCore:
 
         self.adjustments.append((x1, y1, x2, y2, layer, reducedCap, isReduce))
 
+    def getAdjustments(self) -> List[Tuple[int, int, int, int, int, int, bool]]:
+        """返回已登记的 capacity adjustments。"""
+
+        return list(self.adjustments)
+
+    def clearAdjustments(self) -> None:
+        """清空 capacity adjustments。"""
+
+        self.adjustments.clear()
+
     def releaseResourcesOnInterval(self, *args: Any, **kwargs: Any) -> None:
         _unsupported("FastRouteCore::releaseResourcesOnInterval")
 
@@ -320,12 +354,34 @@ class FastRouteCore:
             "max_vertical_overflows": list(self.max_v_overflow),
             "edge_capacities": dict(self.edge_capacities),
             "edge_usage": dict(self.edge_usage),
+            "edge_capacity_records": [
+                self._edge_to_dict(key, value) for key, value in sorted(self.edge_capacities.items())
+            ],
+            "edge_usage_records": [
+                self._edge_to_dict(key, value) for key, value in sorted(self.edge_usage.items())
+            ],
         }
 
     def getResourceSnapshot(self) -> Dict[str, Any]:
         """返回最近一次保存的 resource snapshot。"""
 
         return dict(self.resource_snapshot)
+
+    @staticmethod
+    def _json_safe_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """移除 tuple-key dict，保留 records 形式，便于 json.dump。"""
+
+        safe = dict(snapshot)
+        safe.pop("edge_capacities", None)
+        safe.pop("edge_usage", None)
+        return safe
+
+    def writeResourceReport(self, filename: str) -> None:
+        """写出 JSON resource snapshot。"""
+
+        with open(filename, "w", encoding="utf-8") as out:
+            json.dump(self._json_safe_snapshot(self.createResourceSnapshot()), out, indent=2)
+            out.write("\n")
 
     def computeSuggestedAdjustment(self) -> int:
         _unsupported("FastRouteCore::computeSuggestedAdjustment")
@@ -344,17 +400,17 @@ class FastRouteCore:
         self.overflow_per_layer = [0 for _ in range(len(self.usage_per_layer))]
 
     def setEdgeCapacity(self, x1: int, y1: int, x2: int, y2: int, layer: int, capacity: int) -> None:
-        self.edge_capacities[(x1, y1, x2, y2, layer)] = capacity
+        self.edge_capacities[self._edge_key(x1, y1, x2, y2, layer)] = capacity
 
     def getEdgeCapacity(self, x1: int, y1: int, x2: int, y2: int, layer: int) -> int:
-        return self.edge_capacities.get((x1, y1, x2, y2, layer), 0)
+        return self.edge_capacities.get(self._edge_key(x1, y1, x2, y2, layer), 0)
 
     def getAvailableResources(self, x1: int, y1: int, x2: int, y2: int, layer: int) -> int:
-        key = (x1, y1, x2, y2, layer)
+        key = self._edge_key(x1, y1, x2, y2, layer)
         return self.edge_capacities.get(key, 0) - self.edge_usage.get(key, 0)
 
     def incrementEdge3DUsage(self, x1: int, y1: int, x2: int, y2: int, layer: int) -> None:
-        key = (x1, y1, x2, y2, layer)
+        key = self._edge_key(x1, y1, x2, y2, layer)
         self.edge_usage[key] = self.edge_usage.get(key, 0) + 1
 
     def updateEdge2DAnd3DUsage(
@@ -367,7 +423,7 @@ class FastRouteCore:
         used: int,
         db_net: Any,
     ) -> None:
-        key = (x1, y1, x2, y2, layer)
+        key = self._edge_key(x1, y1, x2, y2, layer)
         self.edge_usage[key] = self.edge_usage.get(key, 0) + used
         while len(self.usage_per_layer) <= layer:
             self.usage_per_layer.append(0)
@@ -495,7 +551,26 @@ class FastRouteCore:
             "congested_tile_count": len(congested_tiles),
             "total_tile_count": len(tiles),
             "congestion_nets": set(self.congestion_nets),
+            "congestion_net_names": [str(net) for net in self.congestion_nets],
         }
+
+    def createCongestionReport(self) -> Dict[str, Any]:
+        """返回 JSON 安全的拥塞报告。"""
+
+        summary = self.reportCongestionSummary()
+        summary["congestion_nets"] = [str(net) for net in self.congestion_nets]
+        summary["tiles"] = [
+            {
+                "x": x,
+                "y": y,
+                "layer": layer,
+                "capacity": info.congestion.capacity,
+                "usage": info.congestion.usage,
+                "nets": [str(net) for net in info.nets],
+            }
+            for (x, y, layer), info in sorted(self.buildTileCongestion().items())
+        ]
+        return summary
 
     def getSnapshotBatchCount(self) -> int:
         return self.snapshot_batch_count
@@ -675,8 +750,10 @@ class FastRouteCore:
         self.incremental_grt = is_incremental
 
     def writeCongestionMap(self, filename: str) -> None:
-        """拥塞图写出入口，待移植。"""
+        """写出 JSON congestion map。"""
 
-        _unsupported("FastRouteCore::writeCongestionMap")
+        with open(filename, "w", encoding="utf-8") as out:
+            json.dump(self.createCongestionReport(), out, indent=2)
+            out.write("\n")
 
 

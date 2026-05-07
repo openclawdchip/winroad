@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..odb import DbDatabase
-from .nesterov import GCell, NesterovBase, NesterovBaseCommon
+from .common import _area
+from .nesterov import GCell, GCellChange, NesterovBase, NesterovBaseCommon
 from .options import PlaceOptions
 
 @dataclass
@@ -201,7 +202,19 @@ class RouteBase:
         self.nbVec_ = list(nbVec)
 
     def initRouteBase(self) -> None:
-        raise NotImplementedError("OpenROAD RouteBase initialization has not been translated yet")
+        self.tg_.tileStor_.clear()
+        self.tg_.tiles_.clear()
+        if not self.nbVec_:
+            return
+        nb = self.nbVec_[0]
+        bg = nb.getBinGrid()
+        self.tg_.setLx(bg.lx())
+        self.tg_.setLy(bg.ly())
+        self.tg_.setTileCnt(max(1, bg.getBinCntX()), max(1, bg.getBinCntY()))
+        self.tg_.setTileSize(max(1, int(round(bg.getBinSizeX()))), max(1, int(round(bg.getBinSizeY()))))
+        self.tg_.initTiles(self.rbVars_.useRudy)
+        self.inflatedAreaDelta_ = [0 for _ in self.nbVec_]
+        self.accumulatedInflatedAreaDelta_ = [0 for _ in self.nbVec_]
 
     def updateGrtRoute(self) -> None:
         raise NotImplementedError("OpenROAD GR route update has not been translated yet")
@@ -270,6 +283,10 @@ class RouteBase:
                 dx, dy = saved
                 gcell.setSize(dx, dy, GCellChange.kRoutability)
             nb.updateAreas()
+        if self.minRcTargetDensity_:
+            for nb, target_density in zip(self.nbVec_, self.minRcTargetDensity_):
+                nb.setTargetDensity(target_density)
+        self.revert_count_ += 1
 
     def saveMinRc(self) -> None:
         self.minRcTargetDensity_ = [nb.getTargetDensity() for nb in self.nbVec_]
@@ -326,6 +343,7 @@ class RouteBase:
         return {
             "use_rudy": self.rbVars_.useRudy,
             "rc": self.final_average_rc_,
+            "min_rc": self.minRc_,
             "target_rc": self.rbVars_.targetRC,
             "overflowed_tiles": self.overflowed_tiles_count_,
             "total_tiles": self.getTotalTilesCount(),
@@ -333,6 +351,9 @@ class RouteBase:
             "total_inflation": self.getTotalInflation(),
             "revert_count": self.revert_count_,
             "is_min_rc": self.is_min_rc_,
+            "rc_history": list(self.rc_metric_),
+            "overflow_history": list(self.route_overflow_),
+            "utilization_history": list(self.route_utilization_),
         }
 
 

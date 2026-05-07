@@ -71,9 +71,10 @@ class Replace:
         self.nbVec_.clear()
         self.tb_ = None
         self.rb_ = None
+        self.total_placeable_insts_ = 0
 
     def addPlacementCluster(self, cluster: Cluster) -> None:
-        self.clusters_.append(cluster)
+        self.clusters_.append(list(cluster))
 
     def clearPlacementClusters(self) -> None:
         self.clusters_.clear()
@@ -102,6 +103,7 @@ class Replace:
 
     def doIncrementalPlace(self, threads: int, options: Optional[PlaceOptions] = None) -> None:
         options = options or PlaceOptions()
+        options.validate(self.log_)
         self.checkHasCoreRows()
         if self.pbc_ is None:
             self.pbc_ = PlacerBaseCommon(self.db_, options, self.log_)  # type: ignore[arg-type]
@@ -123,11 +125,13 @@ class Replace:
 
     def doPlace(self, threads: int, options: Optional[PlaceOptions] = None) -> None:
         options = options or PlaceOptions()
+        options.validate(self.log_)
         self.doInitialPlace(threads, options)
         self.doNesterovPlace(threads, options)
 
     def doInitialPlace(self, threads: int, options: Optional[PlaceOptions] = None) -> None:
         options = options or PlaceOptions()
+        options.validate(self.log_)
         self.checkHasCoreRows()
         if self.pbc_ is None:
             self.pbc_ = PlacerBaseCommon(self.db_, options, self.log_)  # type: ignore[arg-type]
@@ -141,6 +145,7 @@ class Replace:
 
     def doNesterovPlace(self, threads: int, options: Optional[PlaceOptions] = None, start_iter: int = 0) -> int:
         options = options or PlaceOptions()
+        options.validate(self.log_)
         self.checkHasCoreRows()
         if not self.initNesterovPlace(options, threads, True):
             return 0
@@ -194,21 +199,28 @@ class Replace:
             "nesterov_place": self.reportNesterovPlace(),
             "routability": self.reportRoutability(),
             "timing": self.reportTimingDriven(),
+            "base_common": self.pbc_.printInfo() if self.pbc_ is not None else {},
+            "nesterov_base_common": self.nbc_.reportStatus() if self.nbc_ is not None else {},
         }
 
     def setInitialPlaceMaxIter(self, options: PlaceOptions, max_iter: int) -> None:
         options.initialPlaceMaxIter = max_iter
+        options.validate(self.log_)
 
     def setNesterovPlaceMaxIter(self, options: PlaceOptions, max_iter: int) -> None:
         options.nesterovPlaceMaxIter = max_iter
+        options.validate(self.log_)
 
     def setTargetDensity(self, options: PlaceOptions, density: float) -> None:
         options.density = density
+        options.validate(self.log_)
 
     def setTargetOverflow(self, options: PlaceOptions, overflow: float) -> None:
         options.overflow = overflow
+        options.validate(self.log_)
 
     def initNesterovPlace(self, options: PlaceOptions, threads: int, check_density: bool) -> bool:
+        options.validate(self.log_)
         if self.pbc_ is None:
             self.pbc_ = PlacerBaseCommon(self.db_, options, self.log_)  # type: ignore[arg-type]
             self.pbVec_.append(PlacerBase(self.db_, self.pbc_, self.log_, check_density))

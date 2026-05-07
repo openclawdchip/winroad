@@ -31,7 +31,10 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
   - 保留 femtosecond 定点 delay、buffer tree 节点类型、cap/fanout/slew/slack/
     arrival delay 注解。
   - 已实现树形统计：`length()`、`maxLoadWireLength()`、`bufferCount()`、
-    `loadCount()`、`metrics()`、`fitsEnvelope()`、`reportTree()`。
+    `loadCount()`、`nodeCount()`、`totalWireLength()`、`depth()`、`metrics()`、
+    `fitsEnvelope()`、`reportTree()`。
+  - 纯数据树行为补齐：`children()`、`setRef()`、`setRef2()`、`setRefs()`、
+    `childLength()`、`preorder()`、`postorder()`、`as_dict()`；不访问 STA/DB。
 
 - `LoadRegion`
   - 对应 `RepairDesign.hh` 中 fanout pin 分区区域。
@@ -44,16 +47,21 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
     long wire / max slew / max cap / max fanout 修复边界参数和统计。
   - `configureLimits()`、`limits()`、`recordRepair()`、`resetViolationCounters()`、
     `violationCounters()`、`reportViolationCounters()`、
-    `insertedBufferCount()`、`setDebugGraphics()`、`getSlewRCFactor()` 等入口已建立。
+    `reportLimits()`、`insertedBufferCount()`、`resizedDriverCount()`、
+    `repairedNetCount()`、`setDebugGraphics()`、`getSlewRCFactor()` 等入口已建立。
 
 - `OptoParams`、`RepairSetup`
   - 对应 `src/rsz/src/RepairSetup.hh`。
   - 保存 move sequence、endpoint pass 计数、rejected move、violator/move tracker
     等状态。
+  - 新增 `RepairSetupConfig`，用于保存 setup slack margin、skip flags、pass
+    repair limit 和筛选后的 move sequence。
   - `setupMoveSequence()` 已按 skip flag 过滤 move 枚举，并映射到 Python 的
     `BaseMove` 派生对象序列；真实 move 算法仍保留同名入口并抛
     `NotImplementedError`。
-  - `makeMoveTracker()`、`setMoveTracker()`、`beginEndpointRepair()`、
+  - `configure()`、`config()`、`reportConfig()`、`makeMoveTracker()`、
+    `setMoveTracker()`、`beginEndpointRepair()`、`recordRemovedBuffer()`、
+    `resetCounters()`、`reportCounters()`、
     `endpointRepairCount()`、`recordRejectedMove()`、`rejectedMovesForPin()`、
     `reportMoveSummary()` 补齐 endpoint / move tracker / report 边界。
 
@@ -61,15 +69,22 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
   - 对应 `src/rsz/src/RepairHold.hh`。
   - 保存 hold buffer / resize / cloned gate、setup margin、pass limit、
     buffer cell 等状态和入口边界。
-  - `setHoldBuffer()`、`holdBuffer()`、`recordInsertedBuffer()`、`recordResize()`、
-    `recordClonedGate()`、`reportHoldBuffer()`、`reportCounters()` 补齐 hold
-    buffer 选择和计数边界；真实 hold buffer 插入仍未翻译。
+  - 新增 `RepairHoldConfig`，保存 hold buffer、pass limit、每 pass repair
+    limit、是否允许 setup violation 和 setup slack margin。
+  - `configure()`、`config()`、`reportConfig()`、`setHoldBuffer()`、
+    `holdBuffer()`、`recordInsertedBuffer()`、`recordResize()`、
+    `recordClonedGate()`、`resetCounters()`、`reportHoldBuffer()`、
+    `reportCounters()` 补齐 hold buffer 选择和计数边界；真实 hold buffer
+    插入仍未翻译。
 
 - `RecoverPower`
   - 对应 `src/rsz/src/RecoverPower.hh`。
   - 保存 power recovery 的场景、bad vertices、面积、match-footprint 标志、
     swapped cell / recovered power 计数和迭代常量。
-  - `configure()`、`recordSwap()`、`recordSizeDown()`、`markBadVertex()`、
+  - 新增 `RecoverPowerConfig`，保存 recover power percent、match footprint、
+    verbose、scene 和 setup slack margin。
+  - `configure()`、`config()`、`reportConfig()`、`recordSwap()`、
+    `recordSizeDown()`、`recordResize()`、`resetCounters()`、`markBadVertex()`、
     `isBadVertex()`、`recoveredPower()`、`sizeDownCount()`、`reportCounters()`
     补齐 swap / size down / bad vertex 统计边界；真实 cell swap/size down
     mutation 仍未翻译。
@@ -99,7 +114,9 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
   - 对应 `src/rsz/src/MoveTracker.hh`。
   - 已实现 critical pin、violator、attempt/commit/reject move 的记录容器。
   - `currentEndpoint()`、`criticalPins()`、`violators()`、`pinInfo()`、`moves()`、
-    `pendingMoves()`、`moveSummary()` 提供只读报告面。
+    `pendingMoves()`、`trackMoveAttempt()`、`trackMoveCommit()`、
+    `trackMoveReject()`、`clearPendingMoves()`、`moveSummary()`、
+    `moveSummaryByType()`、`report()` 提供只读报告面。
 
 - `SwapArithModules`
   - 对应 `src/rsz/src/SwapArithModules.hh` 的抽象接口。
@@ -124,20 +141,27 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
 - `Resizer.parseMove()` / `parseMoveSequence()`
 - `Resizer.resizeSlackPreamble()` / `resizeWorstSlackNets()` / `resizeNetSlack()`
 - `BaseMove.countMove()` / `commitMoves()` / `undoMoves()` and counters
+- `BaseMove.moveCounters()`
 - `RepairSetup.setupMoveSequence()` / `allMoves()` 建立 move 类型到派生对象的
   C++ 边界映射
 - `RepairDesign.configureLimits()` / `recordRepair()` /
-  `reportViolationCounters()` 和 `Resizer.repairDesignViolationCounters()`
+  `reportViolationCounters()` / `reportLimits()` 和
+  `Resizer.configureRepairDesign()` / `repairDesignViolationCounters()` /
+  `reportRepairDesignLimits()`
 - `RepairSetup.makeMoveTracker()` / `beginEndpointRepair()` /
-  `reportMoveSummary()` 和 `Resizer.reportSetupMoves()`
+  `recordRemovedBuffer()` / `reportCounters()` / `reportMoveSummary()` 和
+  `Resizer.configureRepairSetup()` / `reportRepairSetupConfig()` /
+  `reportRepairSetupCounters()` / `reportSetupMoves()`
 - `RepairHold.setHoldBuffer()` / `recordInsertedBuffer()` / `resizeCount()` /
-  `clonedGateCount()` / `reportCounters()` 和 `Resizer.reportHoldCounters()`
+  `clonedGateCount()` / `reportCounters()` 和 `Resizer.configureRepairHold()` /
+  `reportRepairHoldConfig()` / `reportHoldCounters()`
 - `RecoverPower.configure()` / `recordSwap()` / `recordSizeDown()` /
   `resizeCount()` / `swappedCellCount()` / `sizeDownCount()` /
-  `reportCounters()` 和 `Resizer.reportRecoverPowerCounters()`
+  `reportCounters()` 和 `Resizer.configureRecoverPower()` /
+  `reportRecoverPowerConfig()` / `reportRecoverPowerCounters()`
 - `MoveTracker.trackCriticalPins()` / `trackViolator()` /
   `trackViolatorWithInfo()` / `trackMove()` / `commitMoves()` / `rejectMoves()` /
-  `moveSummary()`
+  `moveSummary()` / `moveSummaryByType()` / `report()`
 
 ## 未翻译的真实算法
 

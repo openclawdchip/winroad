@@ -83,17 +83,28 @@ class CtsOptions:
     def setClockNets(self, clock_nets: str) -> None:
         self.clock_nets = clock_nets
 
+    def resetClockNets(self) -> None:
+        self.clock_nets = ""
+
     def getClockNets(self) -> str:
         return self.clock_nets
 
     def setRootBuffer(self, buffer: str) -> None:
         self.root_buffer = buffer
 
+    def resetRootBuffer(self) -> None:
+        self.root_buffer = ""
+        self.root_buffer_inferred = False
+
     def getRootBuffer(self) -> str:
         return self.root_buffer
 
     def setSinkBuffer(self, buffer: str) -> None:
         self.sink_buffer = buffer
+
+    def resetSinkBuffer(self) -> None:
+        self.sink_buffer = ""
+        self.sink_buffer_inferred = False
 
     def getSinkBuffer(self) -> str:
         return self.sink_buffer
@@ -151,6 +162,12 @@ class CtsOptions:
 
     def getSinkClustering(self) -> bool:
         return self.sink_clustering_enable
+
+    def setSinkClusteringUseMaxCap(self, enable: bool) -> None:
+        self.sink_clustering_use_max_cap = enable
+
+    def getSinkClusteringUseMaxCap(self) -> bool:
+        return self.sink_clustering_use_max_cap
 
     def setNumMaxLeafSinks(self, num_sinks: int) -> None:
         self.num_max_leaf_sinks = num_sinks
@@ -230,8 +247,14 @@ class CtsOptions:
     def getClockNetsObjs(self) -> List[Any]:
         return list(self.clock_nets_objs)
 
+    def resetClockNetsObjs(self) -> None:
+        self.clock_nets_objs.clear()
+
     def setSkipNets(self, net: Any) -> None:
         self.skip_nets.append(net)
+
+    def addSkipNet(self, net: Any) -> None:
+        self.setSkipNets(net)
 
     def getSkipNets(self) -> List[Any]:
         return list(self.skip_nets)
@@ -412,6 +435,12 @@ class CtsOptions:
     def resetNumStaticLayers(self) -> None:
         self.num_static_layers = 0
 
+    def setBalanceLevels(self, balance: bool) -> None:
+        self.balance_levels = balance
+
+    def getBalanceLevels(self) -> bool:
+        return self.balance_levels
+
     def setSinkBufferInputCap(self, cap: float) -> None:
         self.sink_buffer_input_cap = cap
 
@@ -483,6 +512,12 @@ class CtsOptions:
     def getDummyLoadPrefix(self) -> str:
         return self.dummyload_prefix
 
+    def setDummyLoadPrefix(self, prefix: str) -> None:
+        self.dummyload_prefix = prefix
+
+    def resetDummyLoadPrefix(self) -> None:
+        self.dummyload_prefix = "clkload"
+
     def setCtsLibrary(self, name: str) -> None:
         self.cts_library = name
 
@@ -522,6 +557,14 @@ class CtsOptions:
 
     def getDummyCount(self) -> Dict[Any, int]:
         return dict(self.dummy_count)
+
+    def resetCounts(self) -> None:
+        self.clock_roots = 0
+        self.clock_subnets = 0
+        self.buffers_inserted = 0
+        self.sinks = 0
+        self.buffer_count.clear()
+        self.dummy_count.clear()
 
     def getType(self, inst: Any) -> MasterType:
         master = getattr(inst, "master", None)

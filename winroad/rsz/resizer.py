@@ -11,6 +11,7 @@ from .common import (
     LibraryAnalysisData,
     MoveType,
     RiseFallArray,
+    VTCategory,
     _name_of,
     _not_translated,
     _obj_key,
@@ -203,6 +204,15 @@ class Resizer:
     def reportSetupMoves(self) -> Dict[str, Any]:
         return self.repair_setup_.reportMoveSummary()
 
+    def configureRepairSetup(self, *args: Any, **kwargs: Any) -> Any:
+        return self.repair_setup_.configure(*args, **kwargs)
+
+    def reportRepairSetupConfig(self) -> Dict[str, Any]:
+        return self.repair_setup_.reportConfig()
+
+    def reportRepairSetupCounters(self) -> Dict[str, Any]:
+        return self.repair_setup_.reportCounters()
+
     def rebufferNet(self, drvr_pin: Any) -> None:
         _not_translated("Resizer::rebufferNet")
 
@@ -212,14 +222,26 @@ class Resizer:
     def holdBufferCount(self) -> int:
         return self.repair_hold_.holdBufferCount()
 
-    def reportHoldCounters(self) -> Dict[str, int]:
+    def reportHoldCounters(self) -> Dict[str, Any]:
         return self.repair_hold_.reportCounters()
+
+    def configureRepairHold(self, *args: Any, **kwargs: Any) -> Any:
+        return self.repair_hold_.configure(*args, **kwargs)
+
+    def reportRepairHoldConfig(self) -> Dict[str, Any]:
+        return self.repair_hold_.reportConfig()
 
     def recoverPower(self, recover_power_percent: float, match_cell_footprint: bool = False, verbose: bool = False) -> bool:
         return self.recover_power_.recoverPower(recover_power_percent, match_cell_footprint, verbose)
 
     def reportRecoverPowerCounters(self) -> Dict[str, Any]:
         return self.recover_power_.reportCounters()
+
+    def configureRecoverPower(self, *args: Any, **kwargs: Any) -> Any:
+        return self.recover_power_.configure(*args, **kwargs)
+
+    def reportRecoverPowerConfig(self) -> Dict[str, Any]:
+        return self.recover_power_.reportConfig()
 
     def swapArithModules(self, path_count: int, target: str, slack_margin: float) -> None:
         _not_translated("Resizer::swapArithModules")
@@ -265,6 +287,12 @@ class Resizer:
 
     def repairDesignViolationCounters(self) -> Dict[str, int]:
         return self.repair_design_.reportViolationCounters()
+
+    def configureRepairDesign(self, *args: Any, **kwargs: Any) -> Any:
+        return self.repair_design_.configureLimits(*args, **kwargs)
+
+    def reportRepairDesignLimits(self) -> Dict[str, Any]:
+        return self.repair_design_.reportLimits()
 
     def repairNet(self, *args: Any, **kwargs: Any) -> None:
         self.repair_design_.repairNet(*args, **kwargs)

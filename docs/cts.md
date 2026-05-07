@@ -15,7 +15,7 @@
   - `triton_cts.py`：`TritonCTS`、`initTritonCts`。
   - `__init__.py`：聚合导出原 `winroad.cts` 对外 API。
 - 第二轮继续按 OpenROAD `src/cts` 当前源码边界深化，范围仍限 CTS 顶层 Python 骨架，不翻译/引入 `odb` 实现。
-- 第三轮继续深化 OpenROAD `src/cts` 边界，重点覆盖 TritonCTS clock root/tree init、DB write/report、NDR、dummy load、repair clock nets、latency balance；TreeBuilder legality/blockage APIs；TechChar compile/report LUT。
+- 第四轮继续深化纯 Python 状态层，重点覆盖 CtsOptions set/get/reset、Clock/SubNet 遍历、TechChar LUT 容器查询、TreeBuilder blockage/legalization 状态、TritonCTS report/clock bookkeeping；真实 CTS/STA/DB 写回仍保留 `NotImplementedError`。
 - 翻译 `Util.h` 基础几何工具：
   - `fuzzyEqual`
   - `fuzzyEqualOrGreater`
@@ -28,6 +28,7 @@
   - `ClockSubNet`
   - `Clock`
   - sink region、sink/buffer/subnet 遍历、driver/net/pin 关联接口
+  - 第四轮补齐 `ClockSubNet` driver/sink/inst 列表访问、`forEachInst`、迭代器，以及 `Clock` sink/buffer/subnet 列表访问和 `forEachClockBuffer`、`forEachSink`、`forEachSubNet`
 - 翻译 `CtsOptions.h` 参数入口：
   - `NdrStrategy`
   - `MasterType`
@@ -35,6 +36,7 @@
   - clock nets、buffer list、root/sink/tree buffer、DBU、聚类、特征化、dummy load、NDR、repair clock nets 等 set/get/reset 边界
   - 对齐 C++ 默认值：sink clustering、max slew、leaf sinks、characterization steps、fake LUT、leaf buffer、buffer distance ratio、obstruction aware、insertion delay、dummy load、NDR half 等默认状态
   - 补齐 skip nets、observer、metrics、fanout、diameter/cluster size、macro cluster、static layers、inferred flags、sink buffer max-cap derate、delay buffer derate、CTS library、buffer/dummy count 等接口
+  - 第四轮补齐 clock/root/sink buffer reset、clock net object reset、sink clustering max-cap、balance levels、dummy load prefix 和统计 count reset 等状态接口
 - 翻译 `TechChar.h` 特征化表核心容器：
   - `WireSegment`
   - `TechChar`
@@ -45,6 +47,7 @@
   - 补齐 `compileLut` 的容器索引路径：接收已求得的 characterization 结果，建立 `delay_lut`、`slew_lut`、`solution_map`、`key_to_wire_segments`
   - 补齐 `report`、`reportSegment`、`reportSegments`、`printCharacterization`、`printSolution` 的 Python 快照返回
   - 补齐 bounds/report 边界：`reportCharacterizationBounds`、`checkCharacterizationBounds`、`initCharacterization`
+  - 第四轮补齐 `addLutEntry`、`hasLutEntry`、`getDelayLut`、`getSlewLut`、`getDelay`、`getSlew`、`getSegmentsForKey`，并在 segment 写入时维护 bounds 快照
   - 补齐后续算法入口：`finalizeRootSinkBuffers`、`getMaxCapLimit`、`collectSlewsLoadsFromTableAxis`、`reduceOrExpand`、`smallestDiffIter`、`largestDiffIter`、`createPatterns`、`createStaInstance`、`setParasitics`、`computeTopologyResults`、`updateBufferTopologies`、`cellNameToID`、`getCurrConfig`、`getNextConfig`、`getMasterFromConfig`、`swapTopologyBuffer`
   - `WireSegment` 补齐 input cap/input slew/length/load/output slew 查询接口
 - 翻译 `TreeBuilder.h` 树构建器边界：
@@ -53,6 +56,7 @@
   - 子树关系、buffer 标记集合、blockage/合法化入口、insertion delay、top buffer/top input net/driving net 等字段接口
   - 补齐 leaf tree 判断、tree buffer level、first/second sink driver、tree-level buffer、bbox 判断、occupied loc commit/uncommit、sink insertion delay map、DB/logger/TechChar/top net/top buffer 字段入口
   - 第三轮补齐 `getTechChar`、`getLogger`、`addBlockage`、`getBlockages`、`clearBlockages`、`setBufferSize`、`getLegalizationCandidates`、`getOccupiedLocs`、`clearOccupiedLocs`
+  - 第四轮补齐纯几何/状态版 `mergeBlockages`、`findBlockage`、`checkLegalityLoc`、`legalizeOneBuffer`、`resetLegalizationState`、`reportLegalizationState`
 - 翻译 `HTreeBuilder.h` H-tree 入口：
   - `LevelTopology`
   - `SegmentBuilder`
@@ -92,12 +96,13 @@
   - 补齐 clock root/tree init 同名入口：`initClockRoot`、`initClockTree`、`createRootBuffer`、`createTreeBuffer`
   - 补齐 dummy/repair/balance 边界：`nextDummyLoadName`、`repairClockNet`、`balanceLatency`
   - 补齐 `clear`，用于释放 builders、clock roots、net/builder 索引、DB/NDR 标记和统计计数
+  - 第四轮补齐 `report`、bookkeeping metrics、`setupCharacterization` 状态挂接、`getAllClockTreeLevels` 状态查询、clock net/fixed net/inst/subnet 注册和 `clearClockBookkeeping`
 
 ## 未实现
 
 - `TechChar.cpp` 中真实 STA/Liberty/寄生参数特征化流程。
 - `TechChar.cpp` 中 topology 枚举、Liberty 表轴采集、parasitics 设置、buffer topology 更新、root/sink buffer finalize 等真实 characterization 算法。
-- `TreeBuilder.cpp` 中 blockage 初始化、merge、合法化检查与查找。
+- `TreeBuilder.cpp` 中 blockage 初始化仍未翻译；当前只实现 Python 容器内的 blockage 合并、查找和简单位置合法性状态，不调用 DB placement。
 - `HTreeBuilder.cpp` 中 H-tree 拓扑构建、segment 插 buffer、聚类细化、legalize、plot。
 - `SinkClustering.cpp` 中 theta 归一化、matching、容量/直径约束搜索。
 - `LatencyBalancer.cpp` 中 STA 初始化、graph 构建、delay buffer 插入与传播。

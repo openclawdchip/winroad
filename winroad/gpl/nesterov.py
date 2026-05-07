@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from ..odb import DbInst, DbNet
 from .common import Cluster, Clusters, _area
 from .options import PlaceOptions
 from .placer_base import Instance, Net, Pin, PlacerBase, PlacerBaseCommon
@@ -734,7 +735,47 @@ class BinGrid:
                 self.bins_.append(Bin(x, y, lx, ly, ux, uy, targetDensity_=self.targetDensity_))
 
     def updateBinsGCellDensityArea(self, cells: Sequence[GCell]) -> None:
-        raise NotImplementedError("OpenROAD bin density-area accumulation has not been translated yet")
+        for bin_obj in self.bins_:
+            bin_obj.setInstPlacedArea(0)
+            bin_obj.setInstPlacedAreaUnscaled(0)
+            bin_obj.setFillerArea(0)
+            bin_obj.setDensity(0.0)
+        for gcell in cells:
+            min_x, max_x = self.getDensityMinMaxIdxX(gcell)
+            min_y, max_y = self.getDensityMinMaxIdxY(gcell)
+            for y in range(min_y, max_y + 1):
+                for x in range(min_x, max_x + 1):
+                    bin_obj = self.bins_[y * self.binCntX_ + x]
+                    overlap = self._overlap_area(
+                        (gcell.dLx(), gcell.dLy(), gcell.dUx(), gcell.dUy()),
+                        (bin_obj.lx(), bin_obj.ly(), bin_obj.ux(), bin_obj.uy()),
+                    )
+                    if overlap <= 0:
+                        continue
+                    if gcell.isFiller():
+                        bin_obj.addFillerArea(overlap)
+                    else:
+                        bin_obj.addInstPlacedArea(overlap)
+                        bin_obj.addInstPlacedAreaUnscaled(overlap)
+        self.sumOverflowArea_ = 0
+        self.sumOverflowAreaUnscaled_ = 0
+        for bin_obj in self.bins_:
+            bin_area = max(1, bin_obj.getBinArea())
+            place_area = bin_obj.instPlacedArea() + bin_obj.getFillerArea()
+            density = place_area / bin_area
+            bin_obj.setDensity(density)
+            allowed = int(round(bin_area * bin_obj.getTargetDensity()))
+            overflow = max(0, place_area + bin_obj.getNonPlaceArea() - allowed)
+            overflow_unscaled = max(0, bin_obj.getInstPlacedAreaUnscaled() + bin_obj.getNonPlaceAreaUnscaled() - allowed)
+            self.sumOverflowArea_ += overflow
+            self.sumOverflowAreaUnscaled_ += overflow_unscaled
+
+    def _overlap_area(self, lhs: Tuple[int, int, int, int], rhs: Tuple[int, int, int, int]) -> int:
+        lx = max(lhs[0], rhs[0])
+        ly = max(lhs[1], rhs[1])
+        ux = min(lhs[2], rhs[2])
+        uy = min(lhs[3], rhs[3])
+        return _area((lx, ly, ux, uy))
 
     def lx(self) -> int:
         return self.lx_
@@ -779,16 +820,25 @@ class BinGrid:
         return self.sumOverflowAreaUnscaled_
 
     def getDensityMinMaxIdxX(self, gcell: GCell) -> Tuple[int, int]:
-        raise NotImplementedError("OpenROAD density bin X range calculation has not been translated yet")
+        return self._range_to_bin_idx(gcell.dLx(), gcell.dUx(), self.lx_, self.binSizeX_, self.binCntX_)
 
     def getDensityMinMaxIdxY(self, gcell: GCell) -> Tuple[int, int]:
-        raise NotImplementedError("OpenROAD density bin Y range calculation has not been translated yet")
+        return self._range_to_bin_idx(gcell.dLy(), gcell.dUy(), self.ly_, self.binSizeY_, self.binCntY_)
 
     def getMinMaxIdxX(self, inst: Instance) -> Tuple[int, int]:
-        raise NotImplementedError("OpenROAD instance bin X range calculation has not been translated yet")
+        return self._range_to_bin_idx(inst.lx(), inst.ux(), self.lx_, self.binSizeX_, self.binCntX_)
 
     def getMinMaxIdxY(self, inst: Instance) -> Tuple[int, int]:
-        raise NotImplementedError("OpenROAD instance bin Y range calculation has not been translated yet")
+        return self._range_to_bin_idx(inst.ly(), inst.uy(), self.ly_, self.binSizeY_, self.binCntY_)
+
+    def _range_to_bin_idx(self, low: int, high: int, origin: int, size: float, count: int) -> Tuple[int, int]:
+        if count <= 0 or size <= 0:
+            return (0, 0)
+        min_idx = int((low - origin) // size)
+        max_idx = int(((high - origin) - 1) // size) if high > low else min_idx
+        min_idx = min(max(min_idx, 0), count - 1)
+        max_idx = min(max(max_idx, 0), count - 1)
+        return (min_idx, max_idx)
 
     def getBins(self) -> List[Bin]:
         return self.bins_
@@ -797,7 +847,21 @@ class BinGrid:
         return self.bins_
 
     def updateBinsNonPlaceArea(self) -> None:
-        raise NotImplementedError("OpenROAD non-place bin area update has not been translated yet")
+        for bin_obj in self.bins_:
+            bin_obj.setNonPlaceArea(0)
+            bin_obj.setNonPlaceAreaUnscaled(0)
+        if self.pb_ is None:
+            return
+        for inst in self.pb_.nonPlaceInsts():
+            min_x, max_x = self.getMinMaxIdxX(inst)
+            min_y, max_y = self.getMinMaxIdxY(inst)
+            inst_rect = (inst.lx(), inst.ly(), inst.ux(), inst.uy())
+            for y in range(min_y, max_y + 1):
+                for x in range(min_x, max_x + 1):
+                    bin_obj = self.bins_[y * self.binCntX_ + x]
+                    overlap = self._overlap_area(inst_rect, (bin_obj.lx(), bin_obj.ly(), bin_obj.ux(), bin_obj.uy()))
+                    bin_obj.addNonPlaceArea(overlap)
+                    bin_obj.addNonPlaceAreaUnscaled(overlap)
 
 
 class NesterovBaseCommon:
@@ -846,6 +910,30 @@ class NesterovBaseCommon:
             gnet = GNet.from_net(net)
             self.gNetStor_.append(gnet)
             self.gNets_.append(gnet)
+            self.gNetMap_[id(net)] = gnet
+        self.rebuildPinRelationships()
+
+    def rebuildPinRelationships(self) -> None:
+        self.gPinStor_.clear()
+        self.gPins_.clear()
+        self.gPinMap_.clear()
+        for gcell in self.nbc_gcells_:
+            gcell.clearGPins()
+        for gnet in self.gNets_:
+            gnet.clearGPins()
+        for pin in self.pbc_.getPins():
+            gpin = GPin.from_pin(pin)
+            inst = pin.getInstance()
+            net = pin.getNet()
+            gcell = self.pbToNb(inst) if inst is not None else None
+            gnet = self.pbToNb(net) if net is not None else None
+            if gcell is not None:
+                gcell.addGPin(gpin)
+            if gnet is not None:
+                gnet.addGPin(gpin)
+            self.gPinStor_.append(gpin)
+            self.gPins_.append(gpin)
+            self.gPinMap_[id(pin)] = gpin
 
     def reportInstanceExtensionByPinDensity(self) -> None:
         return None
@@ -926,6 +1014,61 @@ class NesterovBaseCommon:
             gcell.updateLocations()
             for inst in gcell.insts():
                 inst.dbSetLocation()
+
+    def addGCellForInstance(self, inst: Instance) -> GCell:
+        existing = self.gCellMap_.get(id(inst))
+        if existing is not None:
+            return existing
+        gcell = GCell.from_instance(inst)
+        self.gCellStor_.append(gcell)
+        self.nbc_gcells_.append(gcell)
+        self.gCellMap_[id(inst)] = gcell
+        self.new_gcells_count_ += 1
+        self.delta_area_ += gcell.dx() * gcell.dy()
+        self.addChangedGCell(gcell)
+        return gcell
+
+    def removeGCellForInstance(self, inst: Instance) -> Optional[GCell]:
+        gcell = self.gCellMap_.pop(id(inst), None)
+        if gcell is None:
+            return None
+        for gcells in (self.nbc_gcells_, self.gCellStor_):
+            if gcell in gcells:
+                gcells.remove(gcell)
+        self.deleted_gcells_count_ += 1
+        self.delta_area_ -= gcell.dx() * gcell.dy()
+        return gcell
+
+    def addGNetForNet(self, net: Net) -> GNet:
+        existing = self.gNetMap_.get(id(net))
+        if existing is not None:
+            return existing
+        gnet = GNet.from_net(net)
+        self.gNetStor_.append(gnet)
+        self.gNets_.append(gnet)
+        self.gNetMap_[id(net)] = gnet
+        return gnet
+
+    def removeGNetForNet(self, net: Net) -> Optional[GNet]:
+        gnet = self.gNetMap_.pop(id(net), None)
+        if gnet is None:
+            return None
+        for gnets in (self.gNets_, self.gNetStor_):
+            if gnet in gnets:
+                gnets.remove(gnet)
+        return gnet
+
+    def reportStatus(self) -> Dict[str, Any]:
+        return {
+            "gcells": len(self.nbc_gcells_),
+            "gnets": len(self.gNets_),
+            "gpins": len(self.gPins_),
+            "changed_gcells": len(self.changed_gcells_),
+            "delta_area": self.delta_area_,
+            "new_gcells": self.new_gcells_count_,
+            "deleted_gcells": self.deleted_gcells_count_,
+            "hpwl": self.getHpwl(),
+        }
 
     def getNumThreads(self) -> int:
         return self.num_threads_
@@ -1098,6 +1241,7 @@ class NesterovBase:
     def updateAreas(self) -> None:
         self.movableArea_ = sum(cell.dx() * cell.dy() for cell in self.nb_gcells_ if cell.isInstance())
         self.totalFillerArea_ = sum(cell.dx() * cell.dy() for cell in self.fillerStor_)
+        self.whiteSpaceArea_ = max(0, self.pb_.getRegionArea() - self.pb_.nonPlaceInstsArea())
 
     def initFillerGCells(self) -> None:
         raise NotImplementedError("OpenROAD filler creation and placement has not been translated yet")
@@ -1176,7 +1320,9 @@ class NesterovBase:
         self.nbc_.updateWireLengthForceWAInit(wlCoeffX, wlCoeffY)
 
     def updateGCellDensityCenterLocation(self) -> None:
-        raise NotImplementedError("OpenROAD density-center clamping update has not been translated yet")
+        for gcell in self.nb_gcells_:
+            gcell.setDensityCenterLocation(gcell.cx(), gcell.cy())
+            self.updateDensityCoordiLayoutInside(gcell)
 
     def updateInitialPrevSLPCoordi(self) -> None:
         self.prevSLPCoordi_ = [FloatPoint(cell.cx(), cell.cy()) for cell in self.nb_gcells_]
@@ -1202,6 +1348,13 @@ class NesterovBase:
     def updateDensityCenterCoordiLayoutInside(self) -> None:
         for gcell in self.nb_gcells_:
             self.updateDensityCoordiLayoutInside(gcell)
+
+    def refreshDensityMetrics(self) -> None:
+        self.bg_.updateBinsNonPlaceArea()
+        self.bg_.updateBinsGCellDensityArea(self.nb_gcells_)
+        area = max(1, self.pb_.getRegionArea())
+        self.sum_overflow_ = self.bg_.getOverflowArea() / area
+        self.sum_overflow_unscaled_ = self.bg_.getOverflowAreaUnscaled() / area
 
     def getBinGrid(self) -> BinGrid:
         return self.bg_
@@ -1253,7 +1406,10 @@ class NesterovBase:
         if not self.snapshot_gcell_coordis_:
             return False
         self.updateGCellCenterLocation(self.snapshot_gcell_coordis_)
-        self.updateGCellDensityCenterLocation(self.snapshot_density_coordis_)
+        for gcell, coord in zip(self.nb_gcells_, self.snapshot_density_coordis_):
+            gcell.setDensityCenterLocation(int(round(coord.x)), int(round(coord.y)))
+        self.nbc_.updatePinLocation()
+        self.nbc_.updateGNetBox()
         return True
 
     def resetMinSumOverflow(self) -> None:
@@ -1412,6 +1568,8 @@ class NesterovPlace:
         return self.num_region_diverged_ > 0
 
     def updateOverflow(self) -> None:
+        for nb in self.nbVec_:
+            nb.refreshDensityMetrics()
         self.total_sum_overflow_ = sum(nb.getSumOverflow() for nb in self.nbVec_)
         self.total_sum_overflow_unscaled_ = sum(nb.getSumOverflowUnscaled() for nb in self.nbVec_)
         count = max(1, len(self.nbVec_))
@@ -1474,6 +1632,7 @@ class NesterovPlace:
             "diverge_snapshot_iter": self.diverge_snapshot_iter_,
             "diverge_code": self.divergeCode_,
             "diverge_message": self.divergeMsg_,
+            "base_common": self.nbc_.reportStatus() if self.nbc_ is not None else {},
         }
         return self.last_report_
 
@@ -1481,28 +1640,79 @@ class NesterovPlace:
         return self.last_report_
 
     def resizeGCell(self, inst: DbInst) -> None:
-        raise NotImplementedError("OpenROAD resize callback has not been translated yet")
+        if self.pbc_ is None or self.nbc_ is None:
+            return
+        pb_inst = self.pbc_.dbToPb(inst)
+        gcell = self.nbc_.pbToNb(pb_inst)
+        if pb_inst is None or gcell is None:
+            return
+        old_area = gcell.dx() * gcell.dy()
+        pb_inst.copyDbLocation(self.pbc_)
+        gcell.setAllLocations(pb_inst.lx(), pb_inst.ly(), pb_inst.ux(), pb_inst.uy())
+        gcell.setDensitySize(gcell.dx(), gcell.dy())
+        self.nbc_.delta_area_ += gcell.dx() * gcell.dy() - old_area
+        self.nbc_.addChangedGCell(gcell)
+        for nb in self.nbVec_:
+            nb.updateAreas()
 
     def moveGCell(self, inst: DbInst) -> None:
-        raise NotImplementedError("OpenROAD move callback has not been translated yet")
+        if self.pbc_ is None or self.nbc_ is None:
+            return
+        pb_inst = self.pbc_.dbToPb(inst)
+        gcell = self.nbc_.pbToNb(pb_inst)
+        if pb_inst is None or gcell is None:
+            return
+        pb_inst.copyDbLocation(self.pbc_)
+        gcell.setAllLocations(pb_inst.lx(), pb_inst.ly(), pb_inst.ux(), pb_inst.uy())
+        gcell.setDensityCenterLocation(gcell.cx(), gcell.cy())
+        self.nbc_.addChangedGCell(gcell)
+        self.nbc_.updatePinLocation()
+        self.nbc_.updateGNetBox()
 
     def createCbkGCell(self, inst: DbInst) -> None:
-        raise NotImplementedError("OpenROAD dbInst create callback has not been translated yet")
+        if self.pbc_ is None or self.nbc_ is None:
+            return
+        pb_inst = self.pbc_.addDbInst(inst)
+        gcell = self.nbc_.addGCellForInstance(pb_inst)
+        for nb in self.nbVec_:
+            if gcell not in nb.nb_gcells_:
+                nb.nb_gcells_.append(gcell)
+                nb.updateAreas()
 
     def createGNet(self, net: DbNet) -> None:
-        raise NotImplementedError("OpenROAD dbNet create callback has not been translated yet")
+        if self.pbc_ is None or self.nbc_ is None:
+            return
+        pb_net = self.pbc_.addDbNet(net)
+        self.nbc_.addGNetForNet(pb_net)
 
     def createCbkITerm(self, iterm: Any) -> None:
-        raise NotImplementedError("OpenROAD dbITerm create callback has not been translated yet")
+        if self.nbc_ is not None:
+            self.nbc_.rebuildPinRelationships()
 
     def destroyCbkGCell(self, inst: DbInst) -> None:
-        raise NotImplementedError("OpenROAD dbInst destroy callback has not been translated yet")
+        if self.pbc_ is None or self.nbc_ is None:
+            return
+        pb_inst = self.pbc_.removeDbInst(inst)
+        if pb_inst is None:
+            return
+        gcell = self.nbc_.removeGCellForInstance(pb_inst)
+        if gcell is None:
+            return
+        for nb in self.nbVec_:
+            if gcell in nb.nb_gcells_:
+                nb.nb_gcells_.remove(gcell)
+                nb.updateAreas()
 
     def destroyCbkGNet(self, net: DbNet) -> None:
-        raise NotImplementedError("OpenROAD dbNet destroy callback has not been translated yet")
+        if self.pbc_ is None or self.nbc_ is None:
+            return
+        pb_net = self.pbc_.removeDbNet(net)
+        if pb_net is not None:
+            self.nbc_.removeGNetForNet(pb_net)
 
     def destroyCbkITerm(self, iterm: Any) -> None:
-        raise NotImplementedError("OpenROAD dbITerm destroy callback has not been translated yet")
+        if self.nbc_ is not None:
+            self.nbc_.rebuildPinRelationships()
 
 
 class nesterovDbCbk:

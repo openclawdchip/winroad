@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any, List, Optional, Sequence, Tuple
 
 from .flex_dr import FlexDR, FlexDRViaData
@@ -50,6 +51,9 @@ class TritonRoute:
 
     def getRouterConfiguration(self) -> RouterConfiguration:
         return self.router_cfg_
+
+    def getRouterConfigurationState(self) -> dict[str, Any]:
+        return self.router_cfg_.to_dict()
 
     def getDb(self) -> Any:
         return self.db_
@@ -254,10 +258,43 @@ class TritonRoute:
         marker_name: str,
         drcBox: Rect = (0, 0, 0, 0),
     ) -> None:
-        _unsupported("TritonRoute::reportDRC")
+        lines = [
+            f"# DRC report: {marker_name}",
+            f"# box: {drcBox[0]} {drcBox[1]} {drcBox[2]} {drcBox[3]}",
+            f"# markers: {len(markers)}",
+        ]
+        for idx, marker in enumerate(markers, start=1):
+            bbox = marker.getBBox()
+            constraint = marker.getConstraint()
+            constraint_name = getattr(constraint, "name", None) or getattr(constraint, "getName", lambda: "")()
+            lines.append(
+                " ".join(
+                    [
+                        str(idx),
+                        marker_name,
+                        f"layer={marker.getLayerNum()}",
+                        f"bbox={bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}",
+                        f"constraint={constraint_name}",
+                        f"sources={len(marker.getSrcs())}",
+                    ]
+                )
+            )
+        report = "\n".join(lines) + "\n"
+        target = file_name or self.router_cfg_.DRC_RPT_FILE
+        if target:
+            Path(target).write_text(report, encoding="utf-8")
+        elif self.logger_ is not None and hasattr(self.logger_, "info"):
+            self.logger_.info(report.rstrip())
 
     def reportConstraints(self) -> None:
-        _unsupported("TritonRoute::reportConstraints")
+        if self.design_ is None:
+            return
+        lines: List[str] = ["# drt constraints"]
+        for layer in self.design_.getTech().getLayers():
+            lines.append(f"{layer.getName()} {layer.getLayerNum()} constraints={len(layer.getConstraints())}")
+        report = "\n".join(lines)
+        if self.logger_ is not None and hasattr(self.logger_, "info"):
+            self.logger_.info(report)
 
     def routeLayerLengths(self, wire: Any) -> List[int]:
         _unsupported("TritonRoute::routeLayerLengths")

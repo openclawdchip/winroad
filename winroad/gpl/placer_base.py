@@ -225,7 +225,9 @@ class Instance:
         return self.extId_
 
     def addPin(self, pin: "Pin") -> None:
-        self.pins_.append(pin)
+        if pin not in self.pins_:
+            self.pins_.append(pin)
+            pin.setInstance(self)
 
     def getPins(self) -> List["Pin"]:
         return self.pins_
@@ -424,8 +426,9 @@ class Net:
         return self.net_.sig_type if self.net_ is not None else SigType.OTHER
 
     def addPin(self, pin: Pin) -> None:
-        self.pins_.append(pin)
-        pin.setNet(self)
+        if pin not in self.pins_:
+            self.pins_.append(pin)
+            pin.setNet(self)
 
 
 class PlacerBaseCommon:
@@ -474,6 +477,74 @@ class PlacerBaseCommon:
             self.netStor_.append(net)
             self.nets_.append(net)
             self.netMap_[id(db_net)] = net
+        self._init_pins(block)
+
+    def _resolve_inst(self, name_or_inst: Any) -> Optional[Instance]:
+        if isinstance(name_or_inst, DbInst):
+            return self.instMap_.get(id(name_or_inst))
+        for inst in self.insts_:
+            db_inst = inst.dbInst()
+            if db_inst is not None and db_inst.name == name_or_inst:
+                return inst
+        return None
+
+    def _resolve_net(self, name_or_net: Any) -> Optional[Net]:
+        if isinstance(name_or_net, DbNet):
+            return self.netMap_.get(id(name_or_net))
+        for net in self.nets_:
+            db_net = net.getDbNet()
+            if db_net is not None and db_net.name == name_or_net:
+                return net
+        return None
+
+    def _add_pin(self, term: Any, inst: Optional[Instance], net: Optional[Net], is_bterm: bool = False) -> Pin:
+        pin = self.pinMap_.get(id(term))
+        if pin is None:
+            pin = Pin(term_=term, inst_=inst, net_=net)
+            if is_bterm:
+                pin.setBTerm()
+            else:
+                pin.setITerm()
+            self.pinStor_.append(pin)
+            self.pins_.append(pin)
+            self.pinMap_[id(term)] = pin
+        if inst is not None:
+            inst.addPin(pin)
+            pin.updateLocation(inst)
+        if net is not None:
+            net.addPin(pin)
+        return pin
+
+    def _init_pins(self, block: Any) -> None:
+        db = self.db_
+        iterms = getattr(db, "iterms", {}) if db is not None else {}
+        for term_name, term in getattr(iterms, "items", lambda: [])():
+            inst = self._resolve_inst(getattr(term, "inst", None))
+            net = self._resolve_net(getattr(term, "net", None))
+            if inst is not None or net is not None:
+                self._add_pin(term, inst, net, False)
+                self.pinMap_[term_name] = self.pinMap_[id(term)]
+        if block is None:
+            return
+        bterms = getattr(block, "bterms", {})
+        bpins = getattr(block, "bpins", {})
+        for bterm_name, bterm in getattr(bterms, "items", lambda: [])():
+            net = self._resolve_net(getattr(bterm, "net", None))
+            pin = self._add_pin(bterm, None, net, True)
+            pin.cx_, pin.cy_ = self._bterm_center(block, bterm, bpins)
+            self.pinMap_[bterm_name] = pin
+
+    def _bterm_center(self, block: Any, bterm: Any, bpins: Any) -> Tuple[int, int]:
+        for bpin_name in getattr(bterm, "bpins", []):
+            bpin = bpins.get(bpin_name) if isinstance(bpins, dict) else None
+            for box in getattr(bpin, "boxes", []) if bpin is not None else []:
+                rect = getattr(box, "rect", None)
+                if rect is not None:
+                    return _center(rect)
+        region = getattr(bterm, "constraint_region", None)
+        if region is not None:
+            return _center(region)
+        return self.die_.coreCx(), self.die_.coreCy()
 
     def reset(self) -> None:
         self.__init__(self.db_, self.pbVars_, self.log_)
@@ -498,7 +569,55 @@ class PlacerBaseCommon:
             return self.instMap_.get(id(obj))
         if isinstance(obj, DbNet):
             return self.netMap_.get(id(obj))
-        return self.pinMap_.get(obj)
+        try:
+            pin = self.pinMap_.get(obj)
+        except TypeError:
+            pin = None
+        return pin or self.pinMap_.get(id(obj))
+
+    def addDbInst(self, db_inst: DbInst) -> Instance:
+        existing = self.instMap_.get(id(db_inst))
+        if existing is not None:
+            return existing
+        inst = Instance.from_db(db_inst)
+        self.instStor_.append(inst)
+        self.insts_.append(inst)
+        self.instMap_[id(db_inst)] = inst
+        if inst.isPlaceInstance():
+            self.placeInsts_.append(inst)
+        if inst.isMacro():
+            self.macroInstsArea_ += inst.getArea()
+        return inst
+
+    def removeDbInst(self, db_inst: DbInst) -> Optional[Instance]:
+        inst = self.instMap_.pop(id(db_inst), None)
+        if inst is None:
+            return None
+        for pins in (self.insts_, self.placeInsts_, self.instStor_):
+            if inst in pins:
+                pins.remove(inst)
+        if inst.isMacro():
+            self.macroInstsArea_ = max(0, self.macroInstsArea_ - inst.getArea())
+        return inst
+
+    def addDbNet(self, db_net: DbNet) -> Net:
+        existing = self.netMap_.get(id(db_net))
+        if existing is not None:
+            return existing
+        net = Net(db_net, skipIoMode=self.pbVars_.skipIoMode)
+        self.netStor_.append(net)
+        self.nets_.append(net)
+        self.netMap_[id(db_net)] = net
+        return net
+
+    def removeDbNet(self, db_net: DbNet) -> Optional[Net]:
+        net = self.netMap_.pop(id(db_net), None)
+        if net is None:
+            return None
+        for nets in (self.nets_, self.netStor_):
+            if net in nets:
+                nets.remove(net)
+        return net
 
     def siteSizeX(self) -> int:
         return self.siteSizeX_
@@ -591,6 +710,12 @@ class PlacerBase:
         self.fixedInsts_.clear()
         self.dummyInsts_.clear()
         self.nonPlaceInsts_.clear()
+        self.placeInstsArea_ = 0
+        self.nonPlaceInstsArea_ = 0
+        self.macroInstsArea_ = 0
+        self.stdInstsArea_ = 0
+        if self.pbCommon_ is not None:
+            self.init(True)
 
     def getInsts(self) -> List[Instance]:
         return self.pb_insts_

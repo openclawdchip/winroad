@@ -35,6 +35,8 @@ class PdnGen:
         self.core_domain = None
         self.domains.clear()
         self.switched_power_cells.clear()
+        self.sroute = SRoute(self) if self.db is not None else None
+        self.debug_renderer = None
 
     def resetShapes(self) -> None:
         for domain in self.getDomains():
@@ -45,6 +47,8 @@ class PdnGen:
             "domains": [domain.report() for domain in self.getDomains()],
             "switched_power_cells": [cell.report() for cell in self.switched_power_cells],
             "allow_repair_channels": self.allow_repair_channels,
+            "domain_count": len(self.getDomains()),
+            "grid_count": sum(len(domain.getGrids()) for domain in self.getDomains()),
             "sroute_connects": self.sroute.getSrouteConnects() if self.sroute is not None else [],
             "debug_renderer": self.debug_renderer.report() if self.debug_renderer is not None else None,
         }
@@ -53,7 +57,11 @@ class PdnGen:
         return next((cell for cell in self.switched_power_cells if cell.getName() == name), None)
 
     def makeSwitchedPowerCell(self, master: Any, control: Any, acknowledge: Any, switched_power: Any, alwayson_power: Any, ground: Any) -> PowerCell:
+        if master is None:
+            raise ValueError("power switch cell master is required")
         cell = PowerCell(self.logger, master, control, acknowledge, switched_power, alwayson_power, ground)
+        if self.findSwitchedPowerCell(cell.getName()) is not None:
+            raise ValueError(f"power switch cell {cell.getName()!r} already exists")
         self.switched_power_cells.append(cell)
         return cell
 
@@ -68,6 +76,8 @@ class PdnGen:
         return next((domain for domain in self.getDomains() if domain.getName() == name), None)
 
     def setCoreDomain(self, power: Any, switched_power: Any, ground: Any, secondary: Sequence[Any] = ()) -> VoltageDomain:
+        if any(domain.getName() == "Core" for domain in self.domains):
+            raise ValueError("region voltage domain named 'Core' conflicts with core domain")
         domain = VoltageDomain(
             pdngen=self,
             name="Core",
@@ -82,6 +92,8 @@ class PdnGen:
         return domain
 
     def makeRegionVoltageDomain(self, name: str, power: Any, switched_power: Any, ground: Any, secondary_nets: Sequence[Any], region: Any) -> VoltageDomain:
+        if self.findDomain(name) is not None:
+            raise ValueError(f"voltage domain {name!r} already exists")
         domain = VoltageDomain(
             pdngen=self,
             name=name,
@@ -178,6 +190,8 @@ class PdnGen:
         return grid
 
     def makeExistingGrid(self, name: str, generate_obstructions: Sequence[Any] = ()) -> ExistingGrid:
+        if self.getGridByName(name) is not None:
+            raise ValueError(f"grid {name!r} already exists")
         domain = VoltageDomain(self, f"{name}_domain", self._get_block(), logger=self.logger)
         grid = ExistingGrid(domain, name, True, list(generate_obstructions), pdngen=self, block=self._get_block(), logger=self.logger)
         domain.addGrid(grid)
@@ -201,6 +215,8 @@ class PdnGen:
         nets: Sequence[Any] = (),
         allow_out_of_die: bool = False,
     ) -> Rings:
+        if grid is None:
+            raise ValueError("ring grid is required")
         ring = Rings(
             grid=grid,
             starts_with_power=_starts_with_power(starts_with),
@@ -217,6 +233,8 @@ class PdnGen:
         return ring
 
     def makeFollowpin(self, grid: Grid, layer: Any, width: int = 0, extend: ExtensionMode = ExtensionMode.CORE) -> FollowPins:
+        if grid is None:
+            raise ValueError("followpin grid is required")
         followpin = FollowPins(grid=grid, layer=layer, width=width, pitch=0, extend_mode=extend)
         grid.addStrap(followpin)
         return followpin
@@ -235,6 +253,8 @@ class PdnGen:
         extend: ExtensionMode,
         nets: Sequence[Any] = (),
     ) -> Straps:
+        if grid is None:
+            raise ValueError("strap grid is required")
         strap = Straps(
             grid=grid,
             starts_with_power=_starts_with_power(starts_with),
@@ -263,10 +283,12 @@ class PdnGen:
         max_rows: int = 0,
         max_columns: int = 0,
         ongrid: Sequence[Any] = (),
-        split_cuts: Mapping[Any, Any] = {},
+        split_cuts: Optional[Mapping[Any, Any]] = None,
         dont_use_vias: str = "",
     ) -> Connect:
-        connect = Connect(grid, layer0, layer1, list(vias), list(techvias), cut_pitch_x, cut_pitch_y, max_rows, max_columns, set(ongrid), dict(split_cuts))
+        if grid is None:
+            raise ValueError("connect grid is required")
+        connect = Connect(grid, layer0, layer1, list(vias), list(techvias), cut_pitch_x, cut_pitch_y, max_rows, max_columns, set(ongrid), dict(split_cuts or {}))
         grid.addConnect(connect)
         if dont_use_vias:
             connect.filterVias(dont_use_vias)
@@ -303,10 +325,10 @@ class PdnGen:
     def checkSetup(self) -> None:
         if self.db is None:
             raise ValueError("PdnGen has not been initialized with db")
+        if not self.getDomains():
+            raise ValueError("PdnGen has no voltage domains")
         for domain in self.getDomains():
             domain.checkSetup()
-            for grid in domain.getGrids():
-                grid.checkSetup()
 
     def repairVias(self, nets: Set[Any]) -> None:
         self.checkSetup()

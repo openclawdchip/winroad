@@ -9,7 +9,15 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from .clock import Clock, ClockInst, ClockSubNet
 from .options import CtsOptions
 from .tech_char import TechChar
-from .types import Box, Point, TreeType, _not_translated, fuzzyEqual
+from .types import (
+    Box,
+    Point,
+    TreeType,
+    _not_translated,
+    fuzzyEqual,
+    fuzzyEqualOrGreater,
+    fuzzyEqualOrSmaller,
+)
 
 
 @dataclass
@@ -48,7 +56,20 @@ class TreeBuilder:
         _not_translated("TreeBuilder::run")
 
     def mergeBlockages(self) -> None:
-        _not_translated("TreeBuilder::mergeBlockages")
+        merged: List[Box] = []
+        for blockage in sorted(self.blockages, key=lambda box: (box.x_min, box.y_min, box.x_max, box.y_max)):
+            for idx, existing in enumerate(merged):
+                if self._boxesOverlapOrTouch(existing, blockage):
+                    merged[idx] = Box(
+                        min(existing.x_min, blockage.x_min),
+                        min(existing.y_min, blockage.y_min),
+                        max(existing.x_max, blockage.x_max),
+                        max(existing.y_max, blockage.y_max),
+                    )
+                    break
+            else:
+                merged.append(blockage)
+        self.blockages = merged
 
     def initBlockages(self) -> None:
         _not_translated("TreeBuilder::initBlockages")
@@ -149,10 +170,19 @@ class TreeBuilder:
     def findBlockage(
         self, buffer_loc: Point, scaling_unit: float
     ) -> Optional[Tuple[float, float, float, float]]:
-        _not_translated("TreeBuilder::findBlockage")
+        buffer_box = self._bufferBox(buffer_loc, scaling_unit)
+        for blockage in self.blockages:
+            if self._boxesOverlap(buffer_box, blockage):
+                return (blockage.x_min, blockage.y_min, blockage.x_max, blockage.y_max)
+        return None
 
     def legalizeOneBuffer(self, buffer_loc: Point, buffer_name: str) -> Point:
-        _not_translated("TreeBuilder::legalizeOneBuffer")
+        scaling_factor = max(1, int(round(max(self.buffer_width, self.buffer_height, 1.0))))
+        for candidate in self.getLegalizationCandidates(buffer_loc, scaling_factor):
+            if self.checkLegalityLoc(candidate, scaling_factor):
+                self.commitLoc(candidate)
+                return candidate
+        raise ValueError(f"无法为 {buffer_name} 找到合法位置")
 
     def getLegalizationCandidates(
         self, buffer_loc: Point, scaling_factor: int
@@ -169,7 +199,9 @@ class TreeBuilder:
     def addCandidatePoint(
         self, x: float, y: float, point: Point, candidates: List[Point]
     ) -> None:
-        candidates.append(Point(x, y))
+        candidate = Point(x, y)
+        if candidate not in candidates:
+            candidates.append(candidate)
 
     def getBufferWidth(self) -> float:
         return self.buffer_width
@@ -178,7 +210,9 @@ class TreeBuilder:
         return self.buffer_height
 
     def checkLegalityLoc(self, buffer_loc: Point, scaling_factor: int) -> bool:
-        _not_translated("TreeBuilder::checkLegalityLoc")
+        if self.isOccupiedLoc(buffer_loc):
+            return False
+        return self.findBlockage(buffer_loc, float(scaling_factor)) is None
 
     def isOccupiedLoc(self, buffer_loc: Point) -> bool:
         return buffer_loc in self.occupied_locations
@@ -199,6 +233,19 @@ class TreeBuilder:
         self.uncommitLoc(old_loc)
         self.commitLoc(new_loc)
 
+    def resetLegalizationState(self) -> None:
+        self.clearOccupiedLocs()
+        self.sink_insertion_delays.clear()
+
+    def reportLegalizationState(self) -> Dict[str, Any]:
+        return {
+            "num_blockages": len(self.blockages),
+            "num_occupied_locations": len(self.occupied_locations),
+            "buffer_width": self.buffer_width,
+            "buffer_height": self.buffer_height,
+            "num_sink_insertion_delays": len(self.sink_insertion_delays),
+        }
+
     def sinkHasInsertionDelay(self, sink: Point) -> bool:
         return sink in self.sink_insertion_delays
 
@@ -210,6 +257,27 @@ class TreeBuilder:
 
     def computeDist(self, x: Point, y: Point) -> float:
         return x.computeDist(y)
+
+    def _bufferBox(self, loc: Point, scaling_unit: float) -> Box:
+        half_width = (self.buffer_width or scaling_unit) / 2.0
+        half_height = (self.buffer_height or scaling_unit) / 2.0
+        return Box(loc.x - half_width, loc.y - half_height, loc.x + half_width, loc.y + half_height)
+
+    def _boxesOverlap(self, lhs: Box, rhs: Box) -> bool:
+        return not (
+            fuzzyEqualOrSmaller(lhs.x_max, rhs.x_min)
+            or fuzzyEqualOrGreater(lhs.x_min, rhs.x_max)
+            or fuzzyEqualOrSmaller(lhs.y_max, rhs.y_min)
+            or fuzzyEqualOrGreater(lhs.y_min, rhs.y_max)
+        )
+
+    def _boxesOverlapOrTouch(self, lhs: Box, rhs: Box) -> bool:
+        return not (
+            lhs.x_max < rhs.x_min
+            or lhs.x_min > rhs.x_max
+            or lhs.y_max < rhs.y_min
+            or lhs.y_min > rhs.y_max
+        )
 
     def getTreeType(self) -> TreeType:
         return self.type

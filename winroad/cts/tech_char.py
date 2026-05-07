@@ -100,6 +100,10 @@ class TechChar:
             "min_slew": self.min_slew,
             "max_slew": self.max_slew,
             "length_unit": self.length_unit,
+            "num_delay_lut_keys": len(self.delay_lut),
+            "num_slew_lut_keys": len(self.slew_lut),
+            "num_results": len(self.result_data),
+            "num_solutions": len(self.solution_data),
         }
 
     def reportSegment(self, key: Any) -> List[Dict[str, Any]]:
@@ -125,6 +129,7 @@ class TechChar:
         idx = len(self.wire_segments)
         self.wire_segments.append(segment)
         self.key_to_wire_segments.setdefault(key, []).append(idx)
+        self._updateBoundsFromSegment(key, segment)
         return idx
 
     def forEachWireSegment(self, func: Callable[..., None]) -> None:
@@ -230,6 +235,50 @@ class TechChar:
             self.delay_lut.setdefault(key, []).append(segment.getDelay())
             self.slew_lut.setdefault(key, []).append(slew_key)
             self.solution_map.setdefault(TechCharKey(result.load, result.wirelength, result.pin_slew, result.totalcap), []).append(result)
+
+    def addLutEntry(
+        self,
+        length: int,
+        load: int,
+        output_slew: int,
+        delay: int,
+        slew: Optional[int] = None,
+        segment: Optional["WireSegment"] = None,
+    ) -> int:
+        """Add one precomputed characterization entry to the LUT containers."""
+
+        key = self.makeKey(length, load, output_slew)
+        stored = segment or WireSegment(
+            length=length,
+            segment_delay=delay,
+            load=load,
+            output_slew=output_slew,
+            slew=float(output_slew if slew is None else slew),
+        )
+        idx = self.addWireSegment(key, stored)
+        self.delay_lut.setdefault(key, []).append(delay)
+        self.slew_lut.setdefault(key, []).append(output_slew if slew is None else slew)
+        return idx
+
+    def hasLutEntry(self, length: int, load: int, output_slew: int) -> bool:
+        key = self.makeKey(length, load, output_slew)
+        return key in self.delay_lut or key in self.slew_lut or key in self.key_to_wire_segments
+
+    def getDelayLut(self) -> Dict[Tuple[int, int, int], List[int]]:
+        return {key: list(values) for key, values in self.delay_lut.items()}
+
+    def getSlewLut(self) -> Dict[Tuple[int, int, int], List[int]]:
+        return {key: list(values) for key, values in self.slew_lut.items()}
+
+    def getDelay(self, length: int, load: int, output_slew: int, idx: int = 0) -> int:
+        return self.delay_lut[self.makeKey(length, load, output_slew)][idx]
+
+    def getSlew(self, length: int, load: int, output_slew: int, idx: int = 0) -> int:
+        return self.slew_lut[self.makeKey(length, load, output_slew)][idx]
+
+    def getSegmentsForKey(self, length: int, load: int, output_slew: int) -> List["WireSegment"]:
+        key = self.makeKey(length, load, output_slew)
+        return [self.wire_segments[idx] for idx in self.key_to_wire_segments.get(key, [])]
 
     def computeKey(self, length: int, load: int, output_slew: int) -> int:
         return (length << 20) | (load << 10) | output_slew
@@ -346,6 +395,25 @@ class TechChar:
             "buffer_masters": segment.getBufferMasters(),
             "buffer_locations": segment.getBufferLocations(),
         }
+
+    def _updateBoundsFromSegment(self, key: Tuple[int, int, int], segment: "WireSegment") -> None:
+        length, load, output_slew = key
+        values = {
+            "min_segment_length": length,
+            "max_segment_length": length,
+            "min_capacitance": load,
+            "max_capacitance": load,
+            "min_slew": output_slew,
+            "max_slew": output_slew,
+        }
+        for attr, value in values.items():
+            current = getattr(self, attr)
+            if current == 0 and len(self.wire_segments) == 1:
+                setattr(self, attr, value)
+            elif attr.startswith("min_"):
+                setattr(self, attr, min(current, value))
+            else:
+                setattr(self, attr, max(current, value))
 
 
 @dataclass

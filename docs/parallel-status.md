@@ -100,3 +100,27 @@
 - `cts`：拆为 `types/clock/options/tech_char/tree_builder/clustering/latency/triton_cts`。
 - `pdn`：拆为 `types/via/component/grid/domain/sroute/renderer/pdngen`。
 - `drt`：拆为 `types/fr/grid_graph/flex_dr/flex_gr/flex_pa/gc/triton_route`。
+
+## 2026-05-07 第五轮
+
+本轮继续 6 线程并行。非 ODB 模块已经拆成 package，本轮开始在 package 内继续补可落地功能：
+状态管理、report、snapshot/revert、lookup、参数校验和纯数据关系。真实 EDA 核心算法仍保持
+同名入口并抛 `NotImplementedError`。
+
+| 模块 | 线程 id | 昵称 | 状态 | 负责范围 |
+| --- | --- | --- | --- | --- |
+| `gpl` | `019e0286-8f94-79d1-b87c-ddc3a5b7d625` | Godel | 已完成 | `winroad/gpl/*`, `docs/gpl.md` |
+| `grt` | `019e0286-8fce-7221-a0cc-cd687b087ae9` | Hypatia | 已完成 | `winroad/grt/*`, `docs/grt.md` |
+| `rsz` | `019e0286-8ffc-7941-9a9a-f2c4cafb4a4c` | Archimedes | 已完成 | `winroad/rsz/*`, `docs/rsz.md` |
+| `cts` | `019e0286-9035-7382-901a-a3eadc2fb2e8` | Hume | 已完成 | `winroad/cts/*`, `docs/cts.md` |
+| `pdn` | `019e0286-907e-74e1-841e-01c0b496b226` | Hegel | 已完成 | `winroad/pdn/*`, `docs/pdn.md` |
+| `drt` | `019e0286-90a7-7882-b67c-51796c34993c` | Harvey | 已完成 | `winroad/drt/*`, `docs/drt.md` |
+
+### 第五轮已完成摘要
+
+- `gpl`：补配置校验、report、ODB 骨架 pin/net/inst 关系同步、Nesterov 状态回调、bin overflow、snapshot/revert。
+- `grt`：补 guide JSON/text round-trip、congestion/resource report、adjustment 管理、状态保存恢复。
+- `rsz`：补 RepairDesign/Setup/Hold/RecoverPower 配置计数报告、MoveTracker、BufferedNet 纯数据树行为。
+- `cts`：补 Clock/SubNet 遍历、CtsOptions reset/set/get、TechChar LUT、TreeBuilder blockage/legalization、TritonCTS bookkeeping。
+- `pdn`：补 domain/grid/component/connect/via/sroute/renderer 参数校验、lookup、report、状态 reset。
+- `drt`：补 frDesign/frBlock/frNet/frVia/frLayer 关系、FlexGridGraph 容器、RouterConfiguration、DRC/guide report。

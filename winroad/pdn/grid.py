@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
 
 from .component import GridComponent, RepairChannelStraps, Rings, Straps
-from .types import GridComponentType, GridType, Halo, Rect, Shape, _name, _not_implemented
+from .types import GridComponentType, GridType, Halo, Rect, Shape, _name, _not_implemented, _validate_halo
 from .via import Connect, Via
 
 @dataclass
@@ -25,6 +25,12 @@ class Grid:
     vias: List[Via] = field(default_factory=list)
     switched_power_cell: Optional["GridSwitchedPower"] = None
 
+    def __post_init__(self) -> None:
+        if self.domain is None:
+            raise ValueError("grid requires a voltage domain")
+        if not self.name:
+            raise ValueError("grid name is required")
+
     def getName(self) -> str:
         return self.name
 
@@ -35,6 +41,8 @@ class Grid:
         return self.domain
 
     def setDomain(self, domain: "VoltageDomain") -> None:
+        if domain is None:
+            raise ValueError("grid domain is required")
         self.domain = domain
 
     def type(self) -> GridType:
@@ -42,15 +50,18 @@ class Grid:
 
     def addRing(self, ring: Rings) -> None:
         ring.setGrid(self)
-        self.rings.append(ring)
+        if ring not in self.rings:
+            self.rings.append(ring)
 
     def addStrap(self, strap: Straps) -> None:
         strap.setGrid(self)
-        self.straps.append(strap)
+        if strap not in self.straps:
+            self.straps.append(strap)
 
     def addConnect(self, connect: Connect) -> None:
         connect.setGrid(self)
-        self.connect.append(connect)
+        if connect not in self.connect:
+            self.connect.append(connect)
 
     def removeStrap(self, strap: Straps) -> None:
         if strap in self.straps:
@@ -84,7 +95,12 @@ class Grid:
         return [shape for component in self.getGridComponents() for shape in component.getShapes()]
 
     def getVias(self) -> List[Via]:
-        return [via for connect in self.connect for via in connect.getVias()]
+        vias = list(self.vias)
+        for connect in self.connect:
+            for via in connect.getVias():
+                if via not in vias:
+                    vias.append(via)
+        return vias
 
     def findComponent(self, component_type: Optional[GridComponentType] = None, layer: Any = None) -> List[GridComponent]:
         components = self.getGridComponents()
@@ -143,6 +159,8 @@ class Grid:
         for connect in self.connect:
             if connect.getGrid() is not self:
                 raise ValueError(f"connect {_name(connect.layer0)}->{_name(connect.layer1)} is attached to the wrong grid")
+            if connect.layer0 is None or connect.layer1 is None:
+                raise ValueError("connect requires both lower and upper layers")
 
     def report(self) -> Dict[str, Any]:
         return {
@@ -182,6 +200,10 @@ class InstanceGrid(Grid):
     grid_to_boundary: bool = False
     replaceable: bool = False
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.halos = _validate_halo(self.halos, "instance grid halo")
+
     def getLongName(self) -> str:
         return f"{self.name}:{_name(self.inst)}"
 
@@ -192,7 +214,7 @@ class InstanceGrid(Grid):
         return self.inst
 
     def addHalo(self, halos: Halo) -> None:
-        self.halos = tuple(halos)  # type: ignore[assignment]
+        self.halos = _validate_halo(halos, "instance grid halo")
 
     def setGridToBoundary(self, value: bool) -> None:
         self.grid_to_boundary = value
@@ -205,6 +227,19 @@ class InstanceGrid(Grid):
 
     def isValid(self) -> bool:
         return self.inst is not None
+
+    def report(self) -> Dict[str, Any]:
+        data = super().report()
+        data.update(
+            {
+                "instance": _name(self.inst) if self.inst is not None else None,
+                "halo": self.halos,
+                "grid_to_boundary": self.grid_to_boundary,
+                "replaceable": self.replaceable,
+                "valid": self.isValid(),
+            }
+        )
+        return data
 
 
 @dataclass
@@ -230,4 +265,11 @@ class ExistingGrid(Grid):
     def populate(self) -> None:
         _not_implemented("ExistingGrid::populate")
 
+    def getShapes(self) -> List[Shape]:
+        return [*self.shapes, *super().getShapes()]
+
+    def report(self) -> Dict[str, Any]:
+        data = super().report()
+        data.update({"existing_shape_count": len(self.shapes)})
+        return data
 

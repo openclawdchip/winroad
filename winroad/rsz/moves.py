@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from math import inf
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 from .common import MoveStateData, MoveStateType, PinInfo, RiseFallArray, _not_translated, _obj_key
 
@@ -52,6 +52,8 @@ class BaseMove:
         self.opendp_ = self.resizer_.opendp_
 
     def countMove(self, inst: Any, count: int = 1) -> None:
+        if count < 0:
+            raise ValueError("move count must be non-negative")
         key = _obj_key(inst)
         self.all_inst_set_.add(key)
         self.pending_inst_set_.add(key)
@@ -87,6 +89,17 @@ class BaseMove:
 
     def numMoves(self) -> int:
         return self.all_count_
+
+    def moveCounters(self) -> Dict[str, int]:
+        return {
+            "all": self.all_count_,
+            "pending": self.pending_count_,
+            "accepted": self.accepted_count_,
+            "rejected": self.rejected_count_,
+            "unique_insts": len(self.all_inst_set_),
+            "pending_insts": len(self.pending_inst_set_),
+            "accepted_insts": len(self.accepted_inst_set_),
+        }
 
 class BufferMove(BaseMove):
     """对应 ``BufferMove``，setup repair 的重缓冲动作边界。"""
@@ -298,6 +311,15 @@ class MoveTracker:
         if state is MoveStateType.ATTEMPT:
             self.pending_moves_.append(data)
 
+    def trackMoveAttempt(self, pin: Any, move_type: str) -> None:
+        self.trackMove(pin, move_type, MoveStateType.ATTEMPT)
+
+    def trackMoveCommit(self, pin: Any, move_type: str) -> None:
+        self.trackMove(pin, move_type, MoveStateType.ATTEMPT_COMMIT)
+
+    def trackMoveReject(self, pin: Any, move_type: str) -> None:
+        self.trackMove(pin, move_type, MoveStateType.ATTEMPT_REJECT)
+
     def moves(self) -> List[MoveStateData]:
         return list(self.moves_)
 
@@ -318,9 +340,33 @@ class MoveTracker:
             )
         self.pending_moves_.clear()
 
+    def clearPendingMoves(self) -> None:
+        self.pending_moves_.clear()
+
     def moveSummary(self) -> Dict[str, int]:
         summary = {state.name.lower(): 0 for state in MoveStateType}
         for move in self.moves_:
             summary[move.state.name.lower()] += 1
         summary["pending"] = len(self.pending_moves_)
         return summary
+
+    def moveSummaryByType(self) -> Dict[str, Dict[str, int]]:
+        summary: Dict[str, Dict[str, int]] = {}
+        for move in self.moves_:
+            bucket = summary.setdefault(move.move_type, {state.name.lower(): 0 for state in MoveStateType})
+            bucket[move.state.name.lower()] += 1
+        for bucket in summary.values():
+            bucket["pending"] = 0
+        for move in self.pending_moves_:
+            summary.setdefault(move.move_type, {state.name.lower(): 0 for state in MoveStateType})
+            summary[move.move_type]["pending"] += 1
+        return summary
+
+    def report(self) -> Dict[str, Any]:
+        return {
+            "current_endpoint": self.current_endpoint_,
+            "critical_pins": list(self.critical_pins_),
+            "violators": list(self.violators_),
+            "move_summary": self.moveSummary(),
+            "move_summary_by_type": self.moveSummaryByType(),
+        }

@@ -181,7 +181,7 @@
   - `PdnGen.repairVias()` 先执行 setup 检查，再保留同名算法入口并抛 `NotImplementedError`。
   - `Connect` 增加 failed via 清理和 split cut pitch/stagger 查询。
 - sroute
-  - `PdnGen.addSrouteConnect()` 和 `SRoute.addSrouteConnect()` 只记录 Tcl 参数映射，`createSrouteWires()` 不生成线。
+- `PdnGen.addSrouteConnect()` 和 `SRoute.addSrouteConnect()` 只记录 Tcl 参数映射，`createSrouteWires()` 不生成线。
 - renderer
   - `PDNRenderer` 增加状态保存和报告，`redraw()` 不绘制。
 - domain/grid lookup
@@ -190,3 +190,23 @@
   - ring report 包含 layer width/spacing、offset、pad offset、extend、allow out-of-die。
   - strap report 包含 layer、width、pitch、spacing、count、offset、snap、extend、start/end、direction。
   - connect report 包含 fixed vias、tech vias、cut pitch、max rows/columns、ongrid、split cuts、via/failure count。
+
+## 第三轮补充重点
+
+- 参数校验
+  - 新增共享 rect/halo/正数/非负数校验 helper；`Shape`、ring offset、instance halo、repair channel area、via area、failed via rect 会做基础合法性检查。
+  - ring layer 要求真实 layer 下 width 为正、spacing 非负；strap/followpin/connect 会检查 layer、width、pitch、spacing、cut pitch、max rows/columns 等纯参数。
+  - domain/grid/cell/sroute 增加空对象、空名、重复 grid/domain/power switch cell、空 sroute 参数等检查。
+- 状态管理
+  - component、shape、via、connect 之间维护纯数据回链；重复 add 会去重，clear/reset 会断开 shape/via 关系。
+  - grid/domain 添加对象时会校正归属关系并避免重复插入；`PdnGen.reset()` 同步清理 renderer 并按初始化状态重建 sroute 容器。
+  - `Connect.filterVias()` 现在只在已指定固定 via 列表中按名称过滤，不触发真实 via 构造。
+- report / lookup
+  - `PdnGen.report()` 增加 domain/grid 计数；component report 展开 shape report；connect report 展开 via report；renderer report 展开 selected 名称。
+  - `InstanceGrid.report()` 展开 instance、halo、boundary、replaceable、valid；`ExistingGrid.report()` 展开已有 shape 计数。
+  - `Shape.report()`、`Via.report()`、`SRoute.report()` 提供纯数据报告。
+
+## 验证
+
+- `python -m py_compile` 已覆盖 `winroad/pdn.py` 和 `winroad/pdn/*.py`。
+- smoke 覆盖 `PdnGen -> VoltageDomain -> CoreGrid -> Ring/Strap/Connect -> Shape/Via` 对象树、lookup、report、sroute 参数保存、renderer 状态，并确认 `buildGrids()` 仍抛 `NotImplementedError`。

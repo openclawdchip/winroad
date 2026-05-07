@@ -80,6 +80,24 @@ class TritonCTS:
             "num_db_written_builders": len(self.db_written_builders),
             "num_ndr_applied_builders": len(self.ndr_applied_builders),
             "dummy_load_index": self.dummy_load_index,
+            "num_sta_clock_nets": len(self.sta_clock_nets),
+            "num_visited_clock_nets": len(self.visited_clock_nets),
+            "num_inst_clock_buffers": len(self.inst2clkbuf),
+            "num_driver_subnets": len(self.driver2subnet),
+        }
+
+    def report(self) -> Dict[str, Any]:
+        return {
+            "metrics": self.reportCtsMetrics(),
+            "options": {
+                "clock_nets": self.options.getClockNets(),
+                "buffer_list": self.options.getBufferList(),
+                "root_buffer": self.options.getRootBuffer(),
+                "sink_buffer": self.options.getSinkBuffer(),
+                "ndr_strategy": self.options.getApplyNdrName(),
+            },
+            "clock_roots": list(self.clock_roots),
+            "builders": [self.reportClockNetwork(builder.getClock()) for builder in self.builders],
         }
 
     def getParms(self) -> CtsOptions:
@@ -164,6 +182,7 @@ class TritonCTS:
         self.builders.append(builder)
         if top_input_net is not None:
             self.net2builder[top_input_net] = builder
+        self.options.setNumClockSubnets(sum(len(b.getClock().sub_nets) for b in self.builders))
         return builder
 
     def forEachBuilder(self, func: Callable[[TreeBuilder], None]) -> None:
@@ -177,7 +196,11 @@ class TritonCTS:
         return self.net2builder.get(net)
 
     def setupCharacterization(self) -> None:
-        _not_translated("TritonCTS::setupCharacterization")
+        self.tech_char.options = self.options
+        self.tech_char.db = self.db
+        self.tech_char.db_network = self.network
+        self.tech_char.open_sta = self.open_sta
+        self.tech_char.initCharacterization()
 
     def checkCharacterization(self) -> None:
         _not_translated("TritonCTS::checkCharacterization")
@@ -210,7 +233,13 @@ class TritonCTS:
         return list(self.db_written_builders)
 
     def getAllClockTreeLevels(self, clock_net: Clock) -> List[int]:
-        _not_translated("TritonCTS::getAllClockTreeLevels")
+        levels: Set[int] = set()
+        for builder in self.builders:
+            if builder.getClock() is clock_net:
+                levels.add(builder.getTreeBufLevels())
+                for child in builder.getChildren():
+                    levels.add(child.getTreeBufLevels())
+        return sorted(levels)
 
     def applyNDRToClockLevels(
         self, clock_net: Clock, clock_ndr: Any, target_levels: List[int]
@@ -243,6 +272,26 @@ class TritonCTS:
     def populateTritonCTS(self) -> None:
         _not_translated("TritonCTS::populateTritonCTS")
 
+    def addClockNet(self, net: Any, sta_clock: bool = False) -> None:
+        self.visited_clock_nets.add(net)
+        if sta_clock:
+            self.sta_clock_nets.add(net)
+        self.num_clk_nets = len(self.visited_clock_nets)
+
+    def addFixedNet(self, net: Any) -> None:
+        self.num_fixed_nets += 1
+        self.visited_clock_nets.add(net)
+
+    def registerClockInst(self, inst: Any, clock_inst: ClockInst) -> None:
+        self.inst2clkbuf[inst] = clock_inst
+
+    def registerDriverSubNet(self, driver: ClockInst, subnet: ClockSubNet) -> None:
+        self.driver2subnet[driver] = subnet
+        self.options.setNumClockSubnets(len(self.driver2subnet))
+
+    def getSubNetForDriver(self, driver: ClockInst) -> Optional[ClockSubNet]:
+        return self.driver2subnet.get(driver)
+
     def destroyClockModNet(self, pin_driver: Any) -> None:
         _not_translated("TritonCTS::destroyClockModNet")
 
@@ -261,6 +310,9 @@ class TritonCTS:
     def incrementNumClocks(self) -> None:
         self.number_of_clocks += 1
 
+    def setNumClocks(self, num_clocks: int) -> None:
+        self.number_of_clocks = num_clocks
+
     def clearNumClocks(self) -> None:
         self.number_of_clocks = 0
 
@@ -272,6 +324,17 @@ class TritonCTS:
 
     def getNumFixedNets(self) -> int:
         return self.num_fixed_nets
+
+    def clearClockBookkeeping(self) -> None:
+        self.sta_clock_nets.clear()
+        self.visited_clock_nets.clear()
+        self.inst2clkbuf.clear()
+        self.driver2subnet.clear()
+        self.net2builder.clear()
+        self.number_of_clocks = 0
+        self.num_clk_nets = 0
+        self.num_fixed_nets = 0
+        self.options.setNumClockSubnets(0)
 
     def cloneClockGaters(self, *args: Any, **kwargs: Any) -> None:
         _not_translated("TritonCTS::cloneClockGaters")

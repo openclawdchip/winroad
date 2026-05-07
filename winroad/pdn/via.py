@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
-from .types import FailedViaReason, Rect, Shape, SplitCut, _name, _not_implemented
+from .types import FailedViaReason, Rect, Shape, SplitCut, _name, _not_implemented, _validate_non_negative, _validate_rect
 
 @dataclass
 class Via:
@@ -18,6 +18,15 @@ class Via:
     upper: Optional[Shape]
     failed: bool = False
     failed_reason: Optional[FailedViaReason] = None
+
+    def __post_init__(self) -> None:
+        if self.connect is None:
+            raise ValueError("via requires a connect")
+        self.area = _validate_rect(self.area, "via area")
+        if self.lower is not None:
+            self.lower.addVia(self)
+        if self.upper is not None:
+            self.upper.addVia(self)
 
     def getNet(self) -> Any:
         return self.net
@@ -40,6 +49,19 @@ class Via:
     def markFailed(self, reason: FailedViaReason) -> None:
         self.failed = True
         self.failed_reason = reason
+
+    def report(self) -> Dict[str, Any]:
+        return {
+            "grid": self.getGrid().getLongName(),
+            "net": _name(self.net) if self.net is not None else None,
+            "area": self.area,
+            "layers": [
+                _name(self.lower.layer) if self.lower is not None else None,
+                _name(self.upper.layer) if self.upper is not None else None,
+            ],
+            "failed": self.failed,
+            "failed_reason": self.failed_reason.value if self.failed_reason is not None else None,
+        }
 
     def writeToDb(self, wire: Any, block: Any, obstructions: Any) -> None:
         _not_implemented("Via::writeToDb")
@@ -92,6 +114,7 @@ class DbBaseVia(DbVia):
         return self.count
 
     def incrementCount(self, count: int = 1) -> None:
+        count = _validate_non_negative(count, "via count increment")
         self.count += count
 
     def getViaReport(self) -> Dict[str, int]:
@@ -256,22 +279,27 @@ class Connect:
 
     def __post_init__(self) -> None:
         self.setSplitCuts(self.split_cuts)
+        self.setCutPitch(self.cut_pitch_x, self.cut_pitch_y)
+        self.setMaxRows(self.max_rows)
+        self.setMaxColumns(self.max_columns)
 
     def addFixedVia(self, via: Any) -> None:
-        self.fixed_generate_vias.append(via)
+        if via not in self.fixed_generate_vias:
+            self.fixed_generate_vias.append(via)
 
     def addFixedTechVia(self, via: Any) -> None:
-        self.fixed_tech_vias.append(via)
+        if via not in self.fixed_tech_vias:
+            self.fixed_tech_vias.append(via)
 
     def setCutPitch(self, x: int, y: int) -> None:
-        self.cut_pitch_x = x
-        self.cut_pitch_y = y
+        self.cut_pitch_x = _validate_non_negative(x, "cut_pitch_x")
+        self.cut_pitch_y = _validate_non_negative(y, "cut_pitch_y")
 
     def setMaxRows(self, rows: int) -> None:
-        self.max_rows = rows
+        self.max_rows = _validate_non_negative(rows, "max_rows")
 
     def setMaxColumns(self, cols: int) -> None:
-        self.max_columns = cols
+        self.max_columns = _validate_non_negative(cols, "max_columns")
 
     def setOnGrid(self, layers: Sequence[Any]) -> None:
         self.ongrid = set(layers)
@@ -304,28 +332,44 @@ class Connect:
         return self.cut_pitch_x != 0 or self.cut_pitch_y != 0
 
     def setGrid(self, grid: "Grid") -> None:
+        if grid is None:
+            raise ValueError("connect requires a grid")
         self.grid = grid
 
     def getGrid(self) -> "Grid":
         return self.grid
 
     def clearShapes(self) -> None:
+        for via in self.vias:
+            if via.lower is not None:
+                via.lower.removeVia(via)
+            if via.upper is not None:
+                via.upper.removeVia(via)
         self.vias.clear()
 
     def getVias(self) -> List[Via]:
         return list(self.vias)
 
     def addVia(self, via: Via) -> None:
-        self.vias.append(via)
+        if via.connect is not self:
+            raise ValueError("via is attached to a different connect")
+        if via not in self.vias:
+            self.vias.append(via)
 
     def makeVia(self, wire: Any, lower: Shape, upper: Shape, wire_type: Any, via_shapes: Any) -> None:
         _not_implemented("Connect::makeVia")
 
     def filterVias(self, filter_text: str) -> None:
-        _not_implemented("Connect::filterVias")
+        if not filter_text:
+            return
+        blocked = {token.strip() for token in filter_text.replace(",", " ").split() if token.strip()}
+        self.fixed_generate_vias = [via for via in self.fixed_generate_vias if _name(via) not in blocked]
+        self.fixed_tech_vias = [via for via in self.fixed_tech_vias if _name(via) not in blocked]
 
     def addFailedVia(self, reason: FailedViaReason, rect: Rect, net: Any) -> None:
-        self.failed_vias.setdefault(reason, []).append((net, rect))
+        if not isinstance(reason, FailedViaReason):
+            reason = FailedViaReason[str(reason).upper()]
+        self.failed_vias.setdefault(reason, []).append((net, _validate_rect(rect, "failed via rect")))
 
     def clearFailedVias(self) -> None:
         self.failed_vias.clear()
@@ -348,6 +392,7 @@ class Connect:
                 for layer, split in self.split_cuts.items()
             },
             "via_count": len(self.vias),
+            "vias": [via.report() for via in self.vias],
             "failed_vias": self.printViaReport(),
         }
 
@@ -356,11 +401,9 @@ class Connect:
         if isinstance(value, SplitCut):
             return value
         if isinstance(value, Mapping):
-            return SplitCut(int(value.get("pitch", 0)), bool(value.get("stagger", False)))
+            return SplitCut(_validate_non_negative(int(value.get("pitch", 0)), "split cut pitch"), bool(value.get("stagger", False)))
         if isinstance(value, tuple):
             pitch = int(value[0]) if len(value) > 0 else 0
             stagger = bool(value[1]) if len(value) > 1 else False
-            return SplitCut(pitch, stagger)
-        return SplitCut(int(value), False)
-
-
+            return SplitCut(_validate_non_negative(pitch, "split cut pitch"), stagger)
+        return SplitCut(_validate_non_negative(int(value), "split cut pitch"), False)

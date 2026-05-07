@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import inf
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from .common import BufferedNetType, Point, _not_translated
 
@@ -81,6 +81,22 @@ class BufferedNetMetrics:
     def withCap(self, cap: float) -> "BufferedNetMetrics":
         return BufferedNetMetrics(self.max_load_wl, self.slack, cap, self.max_load_slew, self.fanout)
 
+    def withMaxLoadSlew(self, max_load_slew: float) -> "BufferedNetMetrics":
+        return BufferedNetMetrics(self.max_load_wl, self.slack, self.cap, max_load_slew, self.fanout)
+
+    def withFanout(self, fanout: float) -> "BufferedNetMetrics":
+        return BufferedNetMetrics(self.max_load_wl, self.slack, self.cap, self.max_load_slew, fanout)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "max_load_wl": self.max_load_wl,
+            "slack_fs": self.slack.value_fs,
+            "slack": self.slack.toSeconds(),
+            "cap": self.cap,
+            "max_load_slew": self.max_load_slew,
+            "fanout": self.fanout,
+        }
+
 @dataclass
 class BufferedNet:
     """修复/重缓冲阶段使用的二叉 routing tree 节点。
@@ -137,6 +153,27 @@ class BufferedNet:
     def loadPin(self) -> Any:
         return self.load_pin_
 
+    def isLeaf(self) -> bool:
+        return self.ref_ is None and self.ref2_ is None
+
+    def children(self) -> List["BufferedNet"]:
+        children = []
+        if self.ref_ is not None:
+            children.append(self.ref_)
+        if self.ref2_ is not None:
+            children.append(self.ref2_)
+        return children
+
+    def setRef(self, ref: Optional["BufferedNet"]) -> None:
+        self.ref_ = ref
+
+    def setRef2(self, ref2: Optional["BufferedNet"]) -> None:
+        self.ref2_ = ref2
+
+    def setRefs(self, ref: Optional["BufferedNet"], ref2: Optional["BufferedNet"] = None) -> None:
+        self.ref_ = ref
+        self.ref2_ = ref2
+
     def length(self) -> int:
         """返回本 wire 到 ref 节点的 Manhattan 长度。"""
 
@@ -167,16 +204,19 @@ class BufferedNet:
     def ref2(self) -> Optional["BufferedNet"]:
         return self.ref2_
 
+    def childLength(self, child: "BufferedNet") -> int:
+        x1, y1 = self.location_
+        x2, y2 = child.location()
+        return abs(x1 - x2) + abs(y1 - y2)
+
     def maxLoadWireLength(self) -> int:
         """返回从该节点向下到任一 load 的最大 wire 长度。"""
 
         child_lengths = []
         if self.ref_ is not None:
-            child_lengths.append(self.length() + self.ref_.maxLoadWireLength())
+            child_lengths.append(self.childLength(self.ref_) + self.ref_.maxLoadWireLength())
         if self.ref2_ is not None:
-            x1, y1 = self.location_
-            x2, y2 = self.ref2_.location()
-            child_lengths.append(abs(x1 - x2) + abs(y1 - y2) + self.ref2_.maxLoadWireLength())
+            child_lengths.append(self.childLength(self.ref2_) + self.ref2_.maxLoadWireLength())
         return max(child_lengths, default=0)
 
     def slackTransition(self) -> Any:
@@ -221,6 +261,25 @@ class BufferedNet:
             count += self.ref2_.loadCount()
         return count
 
+    def nodeCount(self) -> int:
+        return 1 + sum(child.nodeCount() for child in self.children())
+
+    def totalWireLength(self) -> int:
+        return sum(self.childLength(child) + child.totalWireLength() for child in self.children())
+
+    def depth(self) -> int:
+        return 1 + max((child.depth() for child in self.children()), default=0)
+
+    def preorder(self) -> Iterator["BufferedNet"]:
+        yield self
+        for child in self.children():
+            yield from child.preorder()
+
+    def postorder(self) -> Iterator["BufferedNet"]:
+        for child in self.children():
+            yield from child.postorder()
+        yield self
+
     def area(self) -> float:
         return self.area_
 
@@ -244,6 +303,31 @@ class BufferedNet:
 
     def corner(self) -> Any:
         return self.corner_
+
+    def as_dict(self, include_children: bool = True) -> Dict[str, Any]:
+        data = {
+            "type": self.type_.value,
+            "location": self.location_,
+            "load_pin": self.load_pin_,
+            "buffer_cell": self.buffer_cell_,
+            "layer": self.layer_,
+            "ref_layer": self.ref_layer_,
+            "cap": self.cap_,
+            "fanout": self.fanout_,
+            "max_load_slew": self.max_load_slew_,
+            "area": self.area_,
+            "slack_fs": self.slack_.value_fs,
+            "delay_fs": self.delay_.value_fs,
+            "arrival_delay_fs": self.arrival_delay_.value_fs,
+            "buffer_count": self.bufferCount(),
+            "load_count": self.loadCount(),
+            "node_count": self.nodeCount(),
+            "total_wire_length": self.totalWireLength(),
+            "max_load_wire_length": self.maxLoadWireLength(),
+        }
+        if include_children:
+            data["children"] = [child.as_dict(True) for child in self.children()]
+        return data
 
     def to_string(self, _resizer: Optional["Resizer"] = None) -> str:
         return f"{self.type_.value}@{self.location_}"

@@ -8,8 +8,8 @@ from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 from .congestion import RegionAdjustment
 from .fast_route import FastRouteCore
-from .grid import Grid, Net, Pin, PinGridLocation
-from .guide import GSegment
+from .grid import Grid, Net, Pin, PinGridLocation, RoutingTracks
+from .guide import GSegment, GuideFile, routes_to_guide_file
 from .types import CapacityReductionData, GRoute, NetRouteMap, Point, Rect, RoutePt, _object_name, _unsupported
 
 
@@ -97,26 +97,16 @@ class GlobalRouter:
 
         route_map = self.routes
         selected_nets = list(nets) if nets is not None else list(route_map)
-        return {
-            "format": "winroad-grt-routes",
-            "version": 1,
-            "routes": [
-                {
-                    "net": _object_name(db_net),
-                    "segments": [segment.toDict() for segment in route_map.get(db_net, [])],
-                }
-                for db_net in selected_nets
-                if db_net in route_map
-            ],
-        }
+        selected_routes = {db_net: route_map[db_net] for db_net in selected_nets if db_net in route_map}
+        return routes_to_guide_file(selected_routes, _object_name).toDict()
 
     def _load_route_payload(self, payload: Dict[str, Any]) -> None:
         """从 ``_route_payload`` 的 JSON 载荷恢复 routes。"""
 
         loaded: NetRouteMap = {}
-        for net_payload in payload.get("routes", []):
-            db_net = self._net_key_from_name(str(net_payload.get("net", "")))
-            loaded[db_net] = [GSegment.fromDict(segment) for segment in net_payload.get("segments", [])]
+        for guide in GuideFile.fromDict(payload).guides:
+            db_net = self._net_key_from_name(guide.net)
+            loaded[db_net] = list(guide.segments)
         self.routes.update(loaded)
         self.fastroute_core.routes.update(loaded)
 
@@ -132,29 +122,21 @@ class GlobalRouter:
 
         with open(file_name, "r", encoding="utf-8") as src:
             text = src.read()
-        stripped = text.strip()
-        if not stripped:
-            return
-        if stripped[0] == "{":
-            self._load_route_payload(json.loads(stripped))
-            return
         loaded: NetRouteMap = {}
-        current_net: Any = None
-        for line_no, line in enumerate(stripped.splitlines(), 1):
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if line.endswith(":"):
-                current_net = self._net_key_from_name(line[:-1].strip())
-                loaded.setdefault(current_net, [])
-                continue
-            net_name, segment = GSegment.fromGuideTokens(line.split())
-            db_net = self._net_key_from_name(net_name) if net_name is not None else current_net
-            if db_net is None:
-                raise ValueError(f"{file_name}:{line_no}: guide 行缺少 net 名")
-            loaded.setdefault(db_net, []).append(segment)
+        for guide in GuideFile.fromText(text).guides:
+            db_net = self._net_key_from_name(guide.net)
+            loaded[db_net] = list(guide.segments)
         self.routes.update(loaded)
         self.fastroute_core.routes.update(loaded)
+
+    def _write_route_guide_text(self, file_name: str, nets: Optional[Sequence[Any]] = None) -> None:
+        """写出 OpenROAD guide 风格的轻量文本。"""
+
+        route_map = self.routes
+        selected_nets = list(nets) if nets is not None else list(route_map)
+        selected_routes = {db_net: route_map[db_net] for db_net in selected_nets if db_net in route_map}
+        with open(file_name, "w", encoding="utf-8") as out:
+            out.write(routes_to_guide_file(selected_routes, _object_name).toGuideText())
 
     def getRegionAdjustments(self) -> List[RegionAdjustment]:
         """返回用户配置的 region/layer adjustments。"""
@@ -169,6 +151,48 @@ class GlobalRouter:
             for adjustment in self.region_adjustments
             if adjustment.region == (0, 0, 0, 0)
         }
+
+    def clearAdjustments(self) -> None:
+        """清空 GlobalRouter/FastRouteCore 中的 capacity adjustments。"""
+
+        self.region_adjustments.clear()
+        self.fastroute_core.clearAdjustments()
+
+    def removeLayerAdjustment(self, layer: int) -> None:
+        """删除指定 layer-only adjustment。"""
+
+        self.region_adjustments = [
+            adjustment
+            for adjustment in self.region_adjustments
+            if not (adjustment.region == (0, 0, 0, 0) and adjustment.layer == layer)
+        ]
+        self._syncFastRouteAdjustments()
+
+    def removeRegionAdjustment(self, min_x: int, min_y: int, max_x: int, max_y: int, layer: int) -> None:
+        """删除指定 region/layer adjustment。"""
+
+        target = (min_x, min_y, max_x, max_y)
+        self.region_adjustments = [
+            adjustment
+            for adjustment in self.region_adjustments
+            if not (adjustment.region == target and adjustment.layer == layer)
+        ]
+        self._syncFastRouteAdjustments()
+
+    def _syncFastRouteAdjustments(self) -> None:
+        """把 GlobalRouter adjustment 列表同步到 FastRouteCore。"""
+
+        self.fastroute_core.clearAdjustments()
+        for adjustment in self.region_adjustments:
+            self.fastroute_core.addAdjustment(
+                adjustment.min_x,
+                adjustment.min_y,
+                adjustment.max_x,
+                adjustment.max_y,
+                adjustment.layer,
+                int(adjustment.adjustment),
+                True,
+            )
 
     def initGui(self, routing_congestion_data_source: Any, routing_congestion_data_source_rudy: Any) -> None:
         self.heatmap = routing_congestion_data_source
@@ -309,6 +333,26 @@ class GlobalRouter:
         """读取 WinRoad 轻量 guide 文件到当前 routes。"""
 
         self._read_route_text(file_name)
+
+    def writeGuides(
+        self,
+        file_name: str,
+        nets: Optional[Sequence[Any]] = None,
+        *,
+        format: str = "json",
+    ) -> None:
+        """写出当前 routes。
+
+        ``format="json"`` 保留完整 segment flags；``format="guide"`` 写出
+        OpenROAD guide 风格文本，便于人工查看。
+        """
+
+        if format == "json":
+            self._write_route_text(file_name, nets)
+        elif format in {"guide", "text"}:
+            self._write_route_guide_text(file_name, nets)
+        else:
+            raise ValueError("format 必须是 'json'、'guide' 或 'text'")
 
     def loadGuidesFromDB(self) -> None:
         """从 block.guides 恢复 guide，不直接访问 OpenDB。"""
@@ -499,6 +543,32 @@ class GlobalRouter:
     def getRoutes(self) -> NetRouteMap:
         return self.routes
 
+    def setRoute(self, db_net: Any, route: Sequence[GSegment]) -> None:
+        """设置单 net route，并同步 FastRouteCore。"""
+
+        self.routes[db_net] = list(route)
+        self.fastroute_core.routes[db_net] = self.routes[db_net]
+
+    def getRoute(self, db_net: Any) -> GRoute:
+        """返回单 net route 副本。"""
+
+        return list(self.routes.get(db_net, []))
+
+    def clearRoute(self, db_net: Any) -> None:
+        """清空单 net route。"""
+
+        self.routes.pop(db_net, None)
+        self.partial_routes.pop(db_net, None)
+        self.fastroute_core.clearNetRoute(db_net)
+
+    def clearRoutes(self) -> None:
+        """清空所有 route，但保留 grid/config 状态。"""
+
+        self.routes.clear()
+        self.partial_routes.clear()
+        self.fastroute_core.routes.clear()
+        self.fastroute_core.planar_routes.clear()
+
     def getPartialRoutes(self) -> NetRouteMap:
         return self.partial_routes
 
@@ -562,7 +632,29 @@ class GlobalRouter:
         new_layer_level: int,
         db_net: Any,
     ) -> None:
-        _unsupported("GlobalRouter::updateFastRouteGridsLayer")
+        """更新已保存 route/core route 中精确匹配 segment 的层号。"""
+
+        for route in (self.routes.get(db_net, []), self.partial_routes.get(db_net, [])):
+            for segment in route:
+                if (
+                    segment.init_x,
+                    segment.init_y,
+                    segment.final_x,
+                    segment.final_y,
+                    segment.init_layer,
+                    segment.final_layer,
+                ) == (init_x, init_y, final_x, final_y, layer_level, layer_level):
+                    segment.init_layer = new_layer_level
+                    segment.final_layer = new_layer_level
+        self.fastroute_core.updateRouteGridsLayer(
+            init_x,
+            init_y,
+            final_x,
+            final_y,
+            layer_level,
+            new_layer_level,
+            db_net,
+        )
 
     def addDirtyNet(self, net: Any) -> None:
         self.dirty_nets.add(net)
@@ -781,10 +873,30 @@ class GlobalRouter:
 
         return self.fastroute_core.reportCongestionSummary()
 
+    def createCongestionReport(self) -> Dict[str, Any]:
+        """返回 JSON 安全的 congestion report。"""
+
+        return self.fastroute_core.createCongestionReport()
+
+    def writeCongestionReport(self, file_name: str) -> None:
+        """写出 JSON congestion report。"""
+
+        self.fastroute_core.writeCongestionMap(file_name)
+
     def getResourceSnapshot(self) -> Dict[str, Any]:
         """返回 FastRouteCore 最近一次 resource snapshot。"""
 
         return self.fastroute_core.getResourceSnapshot()
+
+    def createResourceSnapshot(self) -> Dict[str, Any]:
+        """创建并返回当前 resource snapshot。"""
+
+        return self.fastroute_core.createResourceSnapshot()
+
+    def writeResourceReport(self, file_name: str) -> None:
+        """写出 JSON resource report。"""
+
+        self.fastroute_core.writeResourceReport(file_name)
 
     def getPinGridPositions(self, db_net: Any) -> List[PinGridLocation]:
         net = self.db_net_map.get(db_net)
@@ -883,6 +995,161 @@ class GlobalRouter:
 
     def fastroute(self) -> FastRouteCore:
         return self.fastroute_core
+
+    def toStateDict(self) -> Dict[str, Any]:
+        """序列化可落地的 GlobalRouter/FastRouteCore 状态。
+
+        仅保存 Python grt 边界状态；不序列化 OpenDB/STA/logger 等外部对象。
+        """
+
+        resource_snapshot = self.fastroute_core.createResourceSnapshot()
+        return {
+            "format": "winroad-grt-state",
+            "version": 1,
+            "grid_origin": list(self.grid_origin),
+            "grid": {
+                "die_area": list(self.grid.die_area),
+                "tile_size": self.grid.tile_size,
+                "x_grids": self.grid.x_grids,
+                "y_grids": self.grid.y_grids,
+                "perfect_regular_x": self.grid.perfect_regular_x,
+                "perfect_regular_y": self.grid.perfect_regular_y,
+                "num_layers": self.grid.num_layers,
+                "track_pitches": list(self.grid.track_pitches),
+            },
+            "routing_layers": dict(self.routing_layers),
+            "routes": self._route_payload(),
+            "partial_routes": routes_to_guide_file(self.partial_routes, _object_name).toDict(),
+            "adjustments": [
+                {
+                    "min_x": adj.min_x,
+                    "min_y": adj.min_y,
+                    "max_x": adj.max_x,
+                    "max_y": adj.max_y,
+                    "layer": adj.layer,
+                    "adjustment": adj.adjustment,
+                }
+                for adj in self.region_adjustments
+            ],
+            "config": {
+                "infinite_capacity": self.infinite_capacity,
+                "adjustment": self.adjustment,
+                "congestion_iterations": self.congestion_iterations,
+                "congestion_report_iter_step": self.congestion_report_iter_step,
+                "congestion_file_name": self.congestion_file_name,
+                "allow_congestion": self.allow_congestion,
+                "resistance_aware": self.resistance_aware,
+                "snapshot_batched_width": self.snapshot_batched_width,
+                "num_threads": self.num_threads,
+                "macro_extension": self.macro_extension,
+                "initialized": self.initialized,
+                "is_congested": self.is_congested,
+                "use_cugr": self.use_cugr,
+                "skip_large_fanout": self.skip_large_fanout,
+                "check_pin_placement": self.check_pin_placement,
+                "verbose": self.verbose,
+                "seed": self.seed,
+                "caps_perturbation_percentage": self.caps_perturbation_percentage,
+                "perturbation_amount": self.perturbation_amount,
+                "is_incremental": self.is_incremental,
+            },
+            "fastroute": {
+                "x_grid": self.fastroute_core.x_grid,
+                "y_grid": self.fastroute_core.y_grid,
+                "num_layers": self.fastroute_core.num_layers,
+                "x_corner": self.fastroute_core.x_corner,
+                "y_corner": self.fastroute_core.y_corner,
+                "tile_size_value": self.fastroute_core.tile_size_value,
+                "x_grid_max": self.fastroute_core.x_grid_max,
+                "y_grid_max": self.fastroute_core.y_grid_max,
+                "resistance_aware": self.fastroute_core.resistance_aware,
+                "layer_directions": {
+                    str(layer): str(direction)
+                    for layer, direction in self.fastroute_core.layer_directions.items()
+                },
+                "v_capacity_3D": list(self.fastroute_core.v_capacity_3D),
+                "h_capacity_3D": list(self.fastroute_core.h_capacity_3D),
+                "last_col_v_capacity_3D": list(self.fastroute_core.last_col_v_capacity_3D),
+                "last_row_h_capacity_3D": list(self.fastroute_core.last_row_h_capacity_3D),
+                "cap_per_layer": list(self.fastroute_core.cap_per_layer),
+                "usage_per_layer": list(self.fastroute_core.usage_per_layer),
+                "overflow_per_layer": list(self.fastroute_core.overflow_per_layer),
+                "max_h_overflow": list(self.fastroute_core.max_h_overflow),
+                "max_v_overflow": list(self.fastroute_core.max_v_overflow),
+                "edge_capacities": resource_snapshot["edge_capacity_records"],
+                "edge_usage": resource_snapshot["edge_usage_records"],
+                "total_overflow_value": self.fastroute_core.total_overflow_value,
+                "has_2d_overflow": self.fastroute_core.has_2d_overflow,
+            },
+        }
+
+    def loadStateDict(self, state: Dict[str, Any]) -> None:
+        """从 ``toStateDict`` 结果恢复可落地状态。"""
+
+        self.grid_origin = tuple(state.get("grid_origin", (0, 0)))  # type: ignore[assignment]
+        grid_state = state.get("grid", {})
+        self.grid.die_area = tuple(grid_state.get("die_area", (0, 0, 0, 0)))  # type: ignore[assignment]
+        self.grid.tile_size = int(grid_state.get("tile_size", 0))
+        self.grid.x_grids = int(grid_state.get("x_grids", 0))
+        self.grid.y_grids = int(grid_state.get("y_grids", 0))
+        self.grid.perfect_regular_x = bool(grid_state.get("perfect_regular_x", True))
+        self.grid.perfect_regular_y = bool(grid_state.get("perfect_regular_y", True))
+        self.grid.num_layers = int(grid_state.get("num_layers", 0))
+        self.grid.track_pitches = [int(value) for value in grid_state.get("track_pitches", [])]
+        self.routing_layers = dict(state.get("routing_layers", {}))
+
+        self.routes.clear()
+        self.fastroute_core.routes.clear()
+        self._load_route_payload(state.get("routes", {}))
+        self.partial_routes = {}
+        for guide in GuideFile.fromDict(state.get("partial_routes", {})).guides:
+            self.partial_routes[self._net_key_from_name(guide.net)] = list(guide.segments)
+
+        self.region_adjustments = [
+            RegionAdjustment(
+                int(item.get("min_x", 0)),
+                int(item.get("min_y", 0)),
+                int(item.get("max_x", 0)),
+                int(item.get("max_y", 0)),
+                int(item.get("layer", 0)),
+                float(item.get("adjustment", 0.0)),
+            )
+            for item in state.get("adjustments", [])
+        ]
+        self._syncFastRouteAdjustments()
+
+        for key, value in state.get("config", {}).items():
+            if hasattr(self, key):
+                setattr(self, key, value)
+
+        fr_state = state.get("fastroute", {})
+        for key, value in fr_state.items():
+            if key in {"edge_capacities", "edge_usage"}:
+                continue
+            if hasattr(self.fastroute_core, key):
+                setattr(self.fastroute_core, key, value)
+        self.fastroute_core.edge_capacities.clear()
+        for rec in fr_state.get("edge_capacities", []):
+            self.fastroute_core.setEdgeCapacity(
+                rec["x1"], rec["y1"], rec["x2"], rec["y2"], rec["layer"], rec["value"]
+            )
+        self.fastroute_core.edge_usage.clear()
+        for rec in fr_state.get("edge_usage", []):
+            key = self.fastroute_core._edge_key(rec["x1"], rec["y1"], rec["x2"], rec["y2"], rec["layer"])
+            self.fastroute_core.edge_usage[key] = int(rec["value"])
+
+    def saveState(self, file_name: str) -> None:
+        """把当前 grt 状态写成 JSON。"""
+
+        with open(file_name, "w", encoding="utf-8") as out:
+            json.dump(self.toStateDict(), out, indent=2)
+            out.write("\n")
+
+    def loadState(self, file_name: str) -> None:
+        """读取 ``saveState`` 生成的 JSON 状态。"""
+
+        with open(file_name, "r", encoding="utf-8") as src:
+            self.loadStateDict(json.load(src))
 
     def getRudy(self) -> Any:
         return self.rudy

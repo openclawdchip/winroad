@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum, IntEnum
 from typing import Any, Optional, Tuple
 
@@ -169,6 +169,24 @@ class RouterConfiguration:
     REPAIR_PDN_LAYER_NAME: str = ""
     REPAIR_PDN_LAYER_NUM: frLayerNum = -1
     GC_IGNORE_PDN_LAYER_NUM: frLayerNum = -1
+
+    def update(self, **values: Any) -> None:
+        """Update known configuration fields in place."""
+
+        for name, value in values.items():
+            if not hasattr(self, name):
+                raise AttributeError(f"Unknown RouterConfiguration field: {name}")
+            setattr(self, name, value)
+
+    def to_dict(self) -> dict[str, Any]:
+        """Return a serializable snapshot of the current router configuration."""
+
+        return asdict(self)
+
+    def copy(self) -> "RouterConfiguration":
+        """Return an independent configuration object with the same values."""
+
+        return RouterConfiguration(**self.to_dict())
 
 
 @dataclass

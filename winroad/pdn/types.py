@@ -126,6 +126,38 @@ def _rect_intersects(a: Rect, b: Rect) -> bool:
     return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
 
 
+def _validate_rect(rect: Rect, name: str = "rect") -> Rect:
+    if len(rect) != 4:
+        raise ValueError(f"{name} must contain four coordinates")
+    lx, ly, ux, uy = (int(value) for value in rect)
+    if lx > ux or ly > uy:
+        raise ValueError(f"{name} has inverted coordinates: {rect!r}")
+    return (lx, ly, ux, uy)
+
+
+def _validate_halo(halo: Halo, name: str = "halo") -> Halo:
+    if len(halo) != 4:
+        raise ValueError(f"{name} must contain four offsets")
+    normalized = tuple(int(value) for value in halo)
+    if any(value < 0 for value in normalized):
+        raise ValueError(f"{name} offsets must be non-negative: {halo!r}")
+    return normalized  # type: ignore[return-value]
+
+
+def _validate_non_negative(value: int, name: str) -> int:
+    normalized = int(value)
+    if normalized < 0:
+        raise ValueError(f"{name} must be non-negative")
+    return normalized
+
+
+def _validate_positive(value: int, name: str) -> int:
+    normalized = int(value)
+    if normalized <= 0:
+        raise ValueError(f"{name} must be positive")
+    return normalized
+
+
 def _name(obj: Any) -> str:
     """取得 ODB/WinRoad 对象名；不依赖 odb 具体类型。"""
 
@@ -160,6 +192,11 @@ class Shape:
     bterm_connections: Set[Rect] = field(default_factory=set)
     grid_component: Optional["GridComponent"] = None
 
+    def __post_init__(self) -> None:
+        if self.layer is None:
+            raise ValueError("shape layer is required")
+        self.rect = _validate_rect(self.rect)
+
     def getLayer(self) -> Any:
         return self.layer
 
@@ -173,7 +210,7 @@ class Shape:
         return self.rect
 
     def setRect(self, rect: Rect) -> None:
-        self.rect = rect
+        self.rect = _validate_rect(rect)
 
     def getLength(self) -> int:
         lx, ly, ux, uy = self.rect
@@ -198,7 +235,8 @@ class Shape:
         self.locked = False
 
     def addVia(self, via: "Via") -> None:
-        self.vias.append(via)
+        if via not in self.vias:
+            self.vias.append(via)
 
     def removeVia(self, via: "Via") -> None:
         if via in self.vias:
@@ -213,4 +251,14 @@ class Shape:
     def writeToDb(self, swire: Any, add_pins: bool, make_rect_as_pin: bool) -> List[Any]:
         _not_implemented("Shape::writeToDb")
 
+    def report(self) -> Dict[str, Any]:
+        return {
+            "layer": _name(self.layer),
+            "net": _name(self.net) if self.net is not None else None,
+            "rect": self.rect,
+            "wire_type": _name(self.wire_type) if self.wire_type is not None else None,
+            "shape_type": self.shape_type.value,
+            "locked": self.locked,
+            "via_count": len(self.vias),
+        }
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Set
 
-from .common import _not_translated, _obj_key
+from .common import RecoverPowerConfig, _not_translated, _obj_key
 
 
 class RecoverPower:
@@ -35,6 +35,7 @@ class RecoverPower:
         self.bad_vertices_: Set[Any] = set()
         self.initial_design_area_ = 0.0
         self.print_interval_ = 0
+        self.config_ = RecoverPowerConfig(setup_slack_margin=self.setup_slack_margin_)
 
     def init(self) -> None:
         self.db_network_ = self.resizer_.db_network_
@@ -44,22 +45,55 @@ class RecoverPower:
 
     def configure(
         self,
+        recover_power_percent: float = 0.0,
         match_cell_footprint: bool = False,
         verbose: bool = False,
         scene: Any = None,
-    ) -> None:
+        setup_slack_margin: float = setup_slack_margin_,
+    ) -> RecoverPowerConfig:
         self.match_cell_footprint_ = match_cell_footprint
         self.verbose_ = verbose
         self.scene_ = scene
+        self.setup_slack_margin_ = setup_slack_margin
+        self.config_ = RecoverPowerConfig(
+            recover_power_percent=recover_power_percent,
+            match_cell_footprint=match_cell_footprint,
+            verbose=verbose,
+            scene=scene,
+            setup_slack_margin=setup_slack_margin,
+        )
+        return self.config_
+
+    def config(self) -> RecoverPowerConfig:
+        return self.config_
+
+    def reportConfig(self) -> Dict[str, Any]:
+        return self.config_.as_dict()
 
     def recordSwap(self, count: int = 1, recovered_power: float = 0.0) -> None:
+        if count < 0:
+            raise ValueError("swap count must be non-negative")
         self.swapped_cell_count_ += count
         self.recovered_power_ += recovered_power
 
     def recordSizeDown(self, count: int = 1, recovered_power: float = 0.0) -> None:
+        if count < 0:
+            raise ValueError("size-down count must be non-negative")
         self.sizedown_cell_count_ += count
         self.resize_count_ += count
         self.recovered_power_ += recovered_power
+
+    def recordResize(self, count: int = 1) -> None:
+        if count < 0:
+            raise ValueError("resize count must be non-negative")
+        self.resize_count_ += count
+
+    def resetCounters(self) -> None:
+        self.resize_count_ = 0
+        self.swapped_cell_count_ = 0
+        self.sizedown_cell_count_ = 0
+        self.recovered_power_ = 0.0
+        self.bad_vertices_.clear()
 
     def markBadVertex(self, vertex: Any) -> None:
         self.bad_vertices_.add(_obj_key(vertex))
@@ -87,4 +121,5 @@ class RecoverPower:
             "recovered_power": self.recovered_power_,
             "bad_vertices": len(self.bad_vertices_),
             "match_cell_footprint": self.match_cell_footprint_,
+            "verbose": self.verbose_,
         }

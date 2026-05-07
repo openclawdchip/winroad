@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .types import (
     Point,
@@ -93,6 +93,16 @@ class frLayer:
     def getDefaultViaDef(self) -> Optional["frViaDef"]:
         return self.default_via_def
 
+    def addSecondaryViaDef(self, via_def: "frViaDef") -> None:
+        if via_def not in self.secondary_via_defs:
+            self.secondary_via_defs.append(via_def)
+
+    def getSecondaryViaDefs(self) -> List["frViaDef"]:
+        return self.secondary_via_defs
+
+    def getConstraints(self) -> List[Any]:
+        return self.constraints
+
 
 @dataclass
 class frViaDef:
@@ -103,9 +113,19 @@ class frViaDef:
     cut_layer_num: frLayerNum = 0
     layer2_num: frLayerNum = 0
     is_default: bool = False
+    owner: Optional["frTechObject"] = None
 
     def getName(self) -> str:
         return self.name
+
+    def getLayer1Num(self) -> frLayerNum:
+        return self.layer1_num
+
+    def getCutLayerNum(self) -> frLayerNum:
+        return self.cut_layer_num
+
+    def getLayer2Num(self) -> frLayerNum:
+        return self.layer2_num
 
 
 @dataclass
@@ -131,8 +151,15 @@ class frVia:
     def addToNet(self, net: "frNet") -> None:
         self.owner = net
 
+    def removeFromNet(self) -> None:
+        self.owner = None
+
     def typeId(self) -> frBlockObjectEnum:
         return frBlockObjectEnum.frcVia
+
+    def getBBox(self) -> Rect:
+        x, y = self.origin
+        return (x, y, x, y)
 
 
 @dataclass
@@ -145,6 +172,9 @@ class frShape:
 
     def addToNet(self, net: "frNet") -> None:
         self.owner = net
+
+    def removeFromNet(self) -> None:
+        self.owner = None
 
     def getLayerNum(self) -> frLayerNum:
         return self.layer_num
@@ -160,6 +190,18 @@ class frGuide(frShape):
     begin_layer_num: frLayerNum = 0
     end_layer_num: frLayerNum = 0
 
+    def __post_init__(self) -> None:
+        if self.begin_layer_num == 0:
+            self.begin_layer_num = self.layer_num
+        if self.end_layer_num == 0:
+            self.end_layer_num = self.layer_num
+
+    def getBeginLayerNum(self) -> frLayerNum:
+        return self.begin_layer_num
+
+    def getEndLayerNum(self) -> frLayerNum:
+        return self.end_layer_num
+
 
 @dataclass
 class frMarker:
@@ -168,13 +210,30 @@ class frMarker:
     bbox: Rect = (0, 0, 0, 0)
     layer_num: frLayerNum = 0
     constraint: Optional[Any] = None
-    sources: Set[Any] = field(default_factory=set)
+    sources: List[Any] = field(default_factory=list)
+    owner: Optional[Any] = None
 
     def getBBox(self) -> Rect:
         return self.bbox
 
     def getLayerNum(self) -> frLayerNum:
         return self.layer_num
+
+    def addSrc(self, obj: Any) -> None:
+        if obj not in self.sources:
+            self.sources.append(obj)
+
+    def getSrcs(self) -> List[Any]:
+        return self.sources
+
+    def setConstraint(self, constraint: Any) -> None:
+        self.constraint = constraint
+
+    def getConstraint(self) -> Optional[Any]:
+        return self.constraint
+
+    def typeId(self) -> frBlockObjectEnum:
+        return frBlockObjectEnum.frcMarker
 
 
 @dataclass
@@ -228,6 +287,7 @@ class frNet:
     has_jumpers: bool = False
     abs_priority_lvl: int = 0
     nondefault_rule: Optional[Any] = None
+    owner: Optional["frBlock"] = None
 
     def getName(self) -> str:
         return self.name
@@ -248,18 +308,26 @@ class frNet:
         return self.bterms
 
     def addShape(self, shape: frShape) -> None:
+        if shape in self.shapes:
+            return
         shape.addToNet(self)
         self.shapes.append(shape)
 
     def addVia(self, via: frVia) -> None:
+        if via in self.vias:
+            return
         via.addToNet(self)
         self.vias.append(via)
 
     def addPatchWire(self, shape: frShape) -> None:
+        if shape in self.patch_wires:
+            return
         shape.addToNet(self)
         self.patch_wires.append(shape)
 
     def addGuide(self, guide: frGuide) -> None:
+        if guide in self.guides:
+            return
         guide.addToNet(self)
         self.guides.append(guide)
 
@@ -267,7 +335,53 @@ class frNet:
         node.setId(len(self.nodes))
         self.nodes.append(node)
 
+    def addGRShape(self, shape: Any) -> None:
+        self.gr_shapes.append(shape)
+
+    def addGRVia(self, via: Any) -> None:
+        self.gr_vias.append(via)
+
+    def getShapes(self) -> List[frShape]:
+        return self.shapes
+
+    def getVias(self) -> List[frVia]:
+        return self.vias
+
+    def getPatchWires(self) -> List[frShape]:
+        return self.patch_wires
+
+    def getGuides(self) -> List[frGuide]:
+        return self.guides
+
+    def getOrigGuides(self) -> List[frShape]:
+        return self.orig_guides
+
+    def setOrigGuides(self, guides: Iterable[frShape]) -> None:
+        self.orig_guides = list(guides)
+
+    def addOrigGuide(self, guide: frShape) -> None:
+        self.orig_guides.append(guide)
+
+    def getNodes(self) -> List[frNode]:
+        return self.nodes
+
+    def removeShape(self, shape: frShape) -> None:
+        if shape in self.shapes:
+            self.shapes.remove(shape)
+            shape.removeFromNet()
+
+    def removeVia(self, via: frVia) -> None:
+        if via in self.vias:
+            self.vias.remove(via)
+            via.removeFromNet()
+
     def clearRoutes(self) -> None:
+        for shape in self.shapes:
+            shape.removeFromNet()
+        for via in self.vias:
+            via.removeFromNet()
+        for shape in self.patch_wires:
+            shape.removeFromNet()
         self.shapes.clear()
         self.vias.clear()
         self.patch_wires.clear()
@@ -279,6 +393,8 @@ class frNet:
         self.gr_vias.clear()
 
     def clearGuides(self) -> None:
+        for guide in self.guides:
+            guide.removeFromNet()
         self.guides.clear()
 
     def hasGuides(self) -> bool:
@@ -338,6 +454,7 @@ class frTechObject:
     via_defs: Dict[str, frViaDef] = field(default_factory=dict)
 
     def addLayer(self, layer: frLayer) -> None:
+        self.layers = [item for item in self.layers if item.getLayerNum() != layer.getLayerNum() and item.getName() != layer.getName()]
         self.layers.append(layer)
         self.layers.sort(key=lambda item: item.getLayerNum())
 
@@ -347,6 +464,12 @@ class frTechObject:
     def getLayer(self, layer_num: frLayerNum) -> Optional[frLayer]:
         for layer in self.layers:
             if layer.getLayerNum() == layer_num:
+                return layer
+        return None
+
+    def getLayerByName(self, name: str) -> Optional[frLayer]:
+        for layer in self.layers:
+            if layer.getName() == name:
                 return layer
         return None
 
@@ -362,10 +485,22 @@ class frTechObject:
         return bool(layer and layer.isVertical())
 
     def addViaDef(self, via_def: frViaDef) -> None:
+        via_def.owner = self
         self.via_defs[via_def.getName()] = via_def
+        if via_def.is_default:
+            layer = self.getLayer(via_def.layer1_num)
+            if layer is not None:
+                layer.setDefaultViaDef(via_def)
+        else:
+            layer = self.getLayer(via_def.layer1_num)
+            if layer is not None:
+                layer.addSecondaryViaDef(via_def)
 
     def getViaDef(self, name: str) -> Optional[frViaDef]:
         return self.via_defs.get(name)
+
+    def getViaDefs(self) -> List[frViaDef]:
+        return list(self.via_defs.values())
 
 
 @dataclass
@@ -376,8 +511,16 @@ class frBlock:
     nets: List[frNet] = field(default_factory=list)
     markers: List[frMarker] = field(default_factory=list)
     track_patterns: Dict[Tuple[frLayerNum, bool], List[Any]] = field(default_factory=dict)
+    owner: Optional["frDesign"] = None
 
     def addNet(self, net: frNet) -> None:
+        existing = self.findNet(net.getName())
+        if existing is net:
+            return
+        if existing is not None:
+            self.nets.remove(existing)
+            existing.owner = None
+        net.owner = self
         self.nets.append(net)
 
     def getNets(self) -> List[frNet]:
@@ -390,10 +533,19 @@ class frBlock:
         return None
 
     def addMarker(self, marker: frMarker) -> None:
+        marker.owner = self
         self.markers.append(marker)
 
     def getMarkers(self) -> List[frMarker]:
         return self.markers
+
+    def clearMarkers(self) -> None:
+        for marker in self.markers:
+            marker.owner = None
+        self.markers.clear()
+
+    def setTrackPatterns(self, layer_num: frLayerNum, is_vertical: bool, patterns: Iterable[Any]) -> None:
+        self.track_patterns[(layer_num, is_vertical)] = list(patterns)
 
     def getTrackPatterns(self, layer_num: frLayerNum, is_vertical: bool) -> List[Any]:
         return self.track_patterns.get((layer_num, is_vertical), [])
@@ -402,26 +554,43 @@ class frBlock:
 class frRegionQuery:
     """对应 ``frRegionQuery.h`` 的边界对象。
 
-    Region query 的 R-tree 索引和几何查询属于 DRC/route 核心算法，本轮只
-    保留 init/query/update 入口。
+    Region query 的 R-tree 索引属于后续优化；本轮用线性索引提供可落地
+    容器查询，不执行任何 DRC 判断。
     """
 
     def __init__(self, design: "frDesign", logger: Any = None, router_cfg: Optional[RouterConfiguration] = None):
         self.design = design
         self.logger = logger
         self.router_cfg = router_cfg
+        self.objects_: List[Any] = []
 
     def init(self) -> None:
-        _unsupported("frRegionQuery::init")
+        self.objects_.clear()
+        block = self.design.getTopBlock()
+        if block is None:
+            return
+        for net in block.getNets():
+            self.objects_.extend(net.getShapes())
+            self.objects_.extend(net.getVias())
+            self.objects_.extend(net.getPatchWires())
+            self.objects_.extend(net.getGuides())
+        self.objects_.extend(block.getMarkers())
 
     def query(self, box: Rect, layer_num: frLayerNum) -> List[Any]:
-        _unsupported("frRegionQuery::query")
+        return [
+            obj
+            for obj in self.objects_
+            if getattr(obj, "getLayerNum", lambda: None)() == layer_num
+            and _rect_intersects(getattr(obj, "getBBox")(), box)
+        ]
 
     def add(self, obj: Any) -> None:
-        _unsupported("frRegionQuery::add")
+        if obj not in self.objects_:
+            self.objects_.append(obj)
 
     def remove(self, obj: Any) -> None:
-        _unsupported("frRegionQuery::remove")
+        if obj in self.objects_:
+            self.objects_.remove(obj)
 
 
 class frDesign:
@@ -444,6 +613,7 @@ class frDesign:
         return self.topBlock_
 
     def setTopBlock(self, block: frBlock) -> None:
+        block.owner = self
         self.topBlock_ = block
 
     def getTech(self) -> frTechObject:
@@ -451,6 +621,7 @@ class frDesign:
 
     def setTech(self, tech: frTechObject) -> None:
         self.tech_ = tech
+        self.rq_.design = self
 
     def getRegionQuery(self) -> frRegionQuery:
         return self.rq_
@@ -464,7 +635,8 @@ class frDesign:
         return self.masters_
 
     def addUserSelectedVia(self, via_name: str) -> None:
-        self.user_selected_vias_.append(via_name)
+        if via_name not in self.user_selected_vias_:
+            self.user_selected_vias_.append(via_name)
 
     def getUserSelectedVias(self) -> List[str]:
         return self.user_selected_vias_
@@ -506,6 +678,10 @@ class frDesign:
 
     def getVersion(self) -> int:
         return self.version_
+
+
+def _rect_intersects(lhs: Rect, rhs: Rect) -> bool:
+    return not (lhs[2] < rhs[0] or rhs[2] < lhs[0] or lhs[3] < rhs[1] or rhs[3] < lhs[1])
 
 __all__ = [
     "frBlock",

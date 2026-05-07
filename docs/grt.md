@@ -5,7 +5,7 @@
 - `winroad/grt.py` 已拆为 `winroad/grt/` package，旧文件仅保留兼容转发。
 - 拆分边界：
   - `types.py`：公共类型别名、枚举、`RoutePt` 和内部辅助函数。
-  - `guide.py`：`GSegment`、guide 行/字典转换、`print_groute()`。
+  - `guide.py`：`GSegment`、`Guide`、`GuideFile`、guide 行/JSON/括号文本转换、`print_groute()`。
   - `congestion.py`：拥塞、容量调整和 region adjustment 数据结构。
   - `grid.py`：`Pin`、`Net`、`Grid`、`RoutingTracks` 等 pin/net/grid 边界对象。
   - `fast_route.py`：`DebugSetting`、`CostParams`、`Parent3D`、`FastRouteCore`。
@@ -46,9 +46,13 @@
   - `IncrementalGRoute`
 - 第三轮已继续深化 OpenROAD `src/grt` 边界，不触碰 `odb`：
   - guide/segment 轻量写回与读取：`GSegment.toDict()`、`GSegment.fromDict()`、`GSegment.toGuideLine()`、`GSegment.fromGuideTokens()`、`GlobalRouter.readGuides()`、`loadGuidesFromDB()`、`saveGuidesFromDB()`、`saveGuides()`、`writeSegments()`、`readSegments()`
+  - 第四轮新增 guide 文档对象和更完整 round-trip：`Guide`、`GuideFile`、`routes_to_guide_file()`、`GlobalRouter.writeGuides(format="json"|"guide")`；支持 WinRoad JSON、逐行 segment 文本、`net / ( ... )` guide 文本，层字段支持数字和末尾带数字的轻量层名。
   - region/layer adjustment 状态：`GlobalRouter.addLayerAdjustment()`、`addRegionAdjustment()`、`getLayerAdjustments()`、`getRegionAdjustments()`，并同步记录到 `FastRouteCore.addAdjustment()`
+  - 第四轮新增 adjustment 管理：`GlobalRouter.clearAdjustments()`、`removeLayerAdjustment()`、`removeRegionAdjustment()`、`FastRouteCore.getAdjustments()`、`clearAdjustments()`，删除/清空会同步 GlobalRouter 与 FastRouteCore 状态。
   - net alpha/beta/gamma 参数：`Net.setAlpha()`、`getAlpha()`、`setBeta()`、`getBeta()`、`setGamma()`、`getGamma()`、`setCostParameters()`、`getCostParameters()`、`GlobalRouter.setNetAlphaBetaGamma()`、`getNetAlphaBetaGamma()`、`FastRouteCore.addNet(..., alpha, beta, gamma)`
   - tile congestion 与 resource snapshot：`FastRouteCore.buildTileCongestion()`、`getTileCongestion()`、`reportCongestionSummary()`、`createResourceSnapshot()`、`getResourceSnapshot()`、`GlobalRouter.getCongestionReport()`、`getResourceSnapshot()`
+  - 第四轮新增可落盘报告：`FastRouteCore.createCongestionReport()`、`writeCongestionMap()`、`writeResourceReport()`、`saveCongestion()`、`GlobalRouter.createCongestionReport()`、`writeCongestionReport()`、`createResourceSnapshot()`、`writeResourceReport()`；报告使用 JSON 安全的 edge/tile records，不依赖 OpenDB。
+  - 第四轮新增 route/core 状态管理：`GlobalRouter.setRoute()`、`getRoute()`、`clearRoute()`、`clearRoutes()`、`updateFastRouteGridsLayer()`、`toStateDict()`、`loadStateDict()`、`saveState()`、`loadState()`；`FastRouteCore` edge capacity/usage key 规范化为无向 grid edge，正反方向查询一致。
   - report 函数边界：`GlobalRouter.reportNetLayerWirelengths()`、`reportLayerWireLengths()`、`getLastLayerWirelengthReport()`、`reportNetWireLength()`、`createWLReportFile()`
 - 已提供基础便利函数：
   - `create_global_router()`
@@ -74,7 +78,7 @@
   - capacity lower bound 与 edge graph 完整初始化
 - OpenDB 真实 guide/wire 读写：
   - `updateVias()`
-  - 当前 `readGuides()`、`loadGuidesFromDB()`、`saveGuides()`、`writeSegments()`、`readSegments()` 只实现 WinRoad Python 轻量文件或普通对象属性边界，不创建/修改 OpenDB guide/wire。
+  - 当前 `readGuides()`、`writeGuides()`、`loadGuidesFromDB()`、`saveGuides()`、`writeSegments()`、`readSegments()` 只实现 WinRoad Python 轻量文件或普通对象属性边界，不创建/修改 OpenDB guide/wire。
 - pin access 与 pin coverage 的完整 OpenDB/DRT 联动：
   - `ensurePinsPositions()`
   - `findCoveredAccessPoint()`
@@ -89,6 +93,67 @@
 - 第二轮已继续补齐的边界包括：
   - `FastRouteCore` 的 `getDbNetLayerEdgeCost()`、`initEdgesCapacityPerLayer()`、`setNumAdjustments()`、`addAdjustment()`、`saveResourcesBeforeAdjustments()`、`initAuxVar()`、`getCongestionGrid()`、`getCongestionNets()`、`getOriginalResources()`、`getTotalCapacityPerLayer()`、`getTotalUsagePerLayer()`、`getTotalOverflowPerLayer()`、`getMaxHorizontalOverflows()`、`getMaxVerticalOverflows()`、`clearNDRnets()` 等状态与报告入口
   - `GlobalRouter` 的 guide/report/resistance 入口名和增量辅助方法边界
+
+## 第四轮验证命令
+
+```powershell
+python -m py_compile D:\winroad_py\winroad\grt.py D:\winroad_py\winroad\grt\types.py D:\winroad_py\winroad\grt\guide.py D:\winroad_py\winroad\grt\congestion.py D:\winroad_py\winroad\grt\grid.py D:\winroad_py\winroad\grt\fast_route.py D:\winroad_py\winroad\grt\global_router.py D:\winroad_py\winroad\grt\__init__.py
+@'
+from pathlib import Path
+from winroad.grt import GSegment, GlobalRouter, GuideFile, Net
+
+base = Path("D:/winroad_py")
+r = GlobalRouter()
+net = "n1"
+r.setRoute(net, [GSegment(0, 0, 1, 2, 0, 1), GSegment(2, 0, 1, 2, 0, 3)])
+r.db_net_map[net] = Net(net)
+r.setNetAlphaBetaGamma(net, 0.2, 0.3, 0.4)
+assert r.getNetAlphaBetaGamma(net) == (0.2, 0.3, 0.4)
+
+r.addLayerAdjustment(2, 0.5)
+r.addRegionAdjustment(0, 0, 10, 10, 3, 0.7)
+r.removeLayerAdjustment(2)
+assert len(r.fastroute().getAdjustments()) == 1
+
+json_guides = base / ".grt_guides.json"
+text_guides = base / ".grt_guides.guide"
+r.writeGuides(str(json_guides))
+r.writeGuides(str(text_guides), format="guide")
+r2 = GlobalRouter()
+r2.readGuides(str(json_guides))
+assert len(r2.routes[net]) == 2
+assert GuideFile.fromText(text_guides.read_text()).guides[0].net == net
+
+r.fastroute().setGridsAndLayers(2, 2, 3)
+r.fastroute().setEdgeCapacity(0, 0, 1, 0, 1, 1)
+r.updateResources(1, 0, 0, 0, 1, 2, net)
+assert r.getCongestionReport()["congested_tile_count"] == 1
+
+congestion = base / ".grt_congestion.json"
+resource = base / ".grt_resource.json"
+state = base / ".grt_state.json"
+r.writeCongestionReport(str(congestion))
+r.writeResourceReport(str(resource))
+r.grid.init((0, 0, 100, 100), 10, 10, 10, True, True, 3)
+r.saveState(str(state))
+r3 = GlobalRouter()
+r3.loadState(str(state))
+assert len(r3.routes[net]) == 2
+assert r3.getGridSize() == (10, 10)
+
+for path in (json_guides, text_guides, congestion, resource, state):
+    path.unlink(missing_ok=True)
+
+for call in (r.fastroute().run, r.globalRoute):
+    try:
+        call()
+    except NotImplementedError:
+        pass
+    else:
+        raise AssertionError("routing algorithms must stay unsupported")
+print("smoke ok")
+'@ | python -
+```
 
 ## 第三轮验证命令
 

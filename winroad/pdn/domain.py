@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Set
+from typing import Any, Dict, List, Optional, Set
 
 from .grid import Grid
 from .types import PowerSwitchNetworkType, Rect, _name, _not_implemented
@@ -22,6 +22,10 @@ class VoltageDomain:
     logger: Any = None
     switched_power: Any = None
     grids: List[Grid] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.name:
+            raise ValueError("voltage domain name is required")
 
     def getName(self) -> str:
         return self.name
@@ -53,14 +57,22 @@ class VoltageDomain:
         return [*power_nets, *ground_nets] if start_with_power else [*ground_nets, *power_nets]
 
     def addGrid(self, grid: Grid) -> None:
+        if grid is None:
+            raise ValueError("cannot add an empty grid")
+        duplicate = self.getGridByName(grid.getLongName()) or self.getGridByName(grid.getName())
+        if duplicate is not None and duplicate is not grid:
+            raise ValueError(f"grid {grid.getLongName()!r} already exists in voltage domain {self.name!r}")
         grid.setDomain(self)
-        self.grids.append(grid)
+        if grid not in self.grids:
+            self.grids.append(grid)
 
     def resetGrids(self) -> None:
         for grid in self.grids:
             grid.resetShapes()
 
     def clearGrids(self) -> None:
+        for grid in self.grids:
+            grid.resetShapes()
         self.grids.clear()
 
     def removeGrid(self, grid: Grid) -> None:
@@ -88,6 +100,10 @@ class VoltageDomain:
             raise ValueError(f"voltage domain {self.name!r} has no power net")
         if self.ground is None:
             raise ValueError(f"voltage domain {self.name!r} has no ground net")
+        for grid in self.grids:
+            if grid.getDomain() is not self:
+                raise ValueError(f"grid {grid.getLongName()!r} is attached to the wrong voltage domain")
+            grid.checkSetup()
 
     def report(self) -> Dict[str, Any]:
         return {
@@ -159,5 +175,4 @@ class GridSwitchedPower:
             "control": _name(self.control),
             "network": self.network.value,
         }
-
 

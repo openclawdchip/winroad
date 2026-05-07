@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Any, Dict, Optional, Sequence, Tuple
+import json
+import re
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .types import GRoute, RoutePt
 
@@ -121,6 +123,169 @@ class GSegment:
         flags = {token.lower() for token in tokens[offset + 6 :]}
         return net_name, cls(*values, is_jumper="jumper" in flags, is_3d_route="3d" in flags)
 
+
+def _layer_to_int(token: Any) -> int:
+    """解析数字层或 ``M2``/``metal2`` 这类轻量层名。"""
+
+    if isinstance(token, int):
+        return token
+    text = str(token).strip()
+    try:
+        return int(text)
+    except ValueError:
+        match = re.search(r"(\d+)$", text)
+        if match:
+            return int(match.group(1))
+        raise ValueError(f"无法解析 routing layer: {text!r}") from None
+
+
+def _segment_from_any(data: Any) -> GSegment:
+    """把 dict/list/GSegment 恢复为 GSegment。"""
+
+    if isinstance(data, GSegment):
+        return data
+    if isinstance(data, dict):
+        if {"rect", "layer"} <= set(data):
+            x1, y1, x2, y2 = data["rect"]
+            layer = _layer_to_int(data["layer"])
+            via_layer = data.get("via_layer", layer)
+            return GSegment(int(x1), int(y1), layer, int(x2), int(y2), _layer_to_int(via_layer))
+        return GSegment.fromDict(data)
+    if isinstance(data, (list, tuple)) and len(data) >= 6:
+        values = [int(value) for value in data[:6]]
+        return GSegment(*values)
+    raise TypeError(f"无法转换为 GSegment: {data!r}")
+
+
+@dataclass
+class Guide:
+    """单个 net 的 guide/segment 集合。"""
+
+    net: str
+    segments: GRoute = field(default_factory=list)
+
+    def toDict(self) -> Dict[str, Any]:
+        return {"net": self.net, "segments": [segment.toDict() for segment in self.segments]}
+
+    @classmethod
+    def fromDict(cls, data: Dict[str, Any]) -> "Guide":
+        return cls(str(data.get("net", "")), [_segment_from_any(seg) for seg in data.get("segments", [])])
+
+    def toGuideText(self) -> str:
+        """写出 OpenROAD guide 风格的轻量文本。"""
+
+        lines = [self.net, "("]
+        for segment in self.segments:
+            lines.append(
+                f"  {segment.init_x} {segment.init_y} "
+                f"{segment.final_x} {segment.final_y} {segment.init_layer}"
+            )
+            if segment.init_layer != segment.final_layer:
+                lines.append(
+                    f"  {segment.final_x} {segment.final_y} "
+                    f"{segment.final_x} {segment.final_y} {segment.final_layer}"
+                )
+        lines.append(")")
+        return "\n".join(lines)
+
+
+@dataclass
+class GuideFile:
+    """WinRoad 轻量 guide 文件，可在 JSON 与可读文本间 round-trip。"""
+
+    guides: List[Guide] = field(default_factory=list)
+    format: str = "winroad-grt-routes"
+    version: int = 1
+
+    def toDict(self) -> Dict[str, Any]:
+        return {
+            "format": self.format,
+            "version": self.version,
+            "routes": [guide.toDict() for guide in self.guides],
+        }
+
+    @classmethod
+    def fromDict(cls, data: Dict[str, Any]) -> "GuideFile":
+        return cls([Guide.fromDict(item) for item in data.get("routes", [])])
+
+    def toJson(self, **dump_kwargs: Any) -> str:
+        kwargs = {"indent": 2}
+        kwargs.update(dump_kwargs)
+        return json.dumps(self.toDict(), **kwargs) + "\n"
+
+    def toGuideText(self) -> str:
+        return "\n".join(guide.toGuideText() for guide in self.guides) + ("\n" if self.guides else "")
+
+    @classmethod
+    def fromText(cls, text: str) -> "GuideFile":
+        stripped = text.strip()
+        if not stripped:
+            return cls()
+        if stripped[0] == "{":
+            return cls.fromDict(json.loads(stripped))
+        return cls(_parse_plain_guides(stripped.splitlines()))
+
+
+def _parse_plain_guides(lines: Iterable[str]) -> List[Guide]:
+    guides: List[Guide] = []
+    current: Optional[Guide] = None
+    in_block = False
+    for line_no, raw_line in enumerate(lines, 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line == "(":
+            if current is None:
+                raise ValueError(f"guide:{line_no}: '(' 前缺少 net 名")
+            in_block = True
+            continue
+        if line == ")":
+            if current is not None:
+                guides.append(current)
+            current = None
+            in_block = False
+            continue
+        if line.endswith(":"):
+            if current is not None:
+                guides.append(current)
+            current = Guide(line[:-1].strip())
+            in_block = True
+            continue
+
+        tokens = line.replace("(", " ").replace(")", " ").split()
+        if len(tokens) == 1 and not in_block:
+            if current is not None:
+                guides.append(current)
+            current = Guide(tokens[0])
+            continue
+
+        if in_block and len(tokens) == 5:
+            if current is None:
+                raise ValueError(f"guide:{line_no}: guide 矩形缺少 net 名")
+            x1, y1, x2, y2 = [int(token) for token in tokens[:4]]
+            layer = _layer_to_int(tokens[4])
+            current.segments.append(GSegment(x1, y1, layer, x2, y2, layer))
+            continue
+
+        net_name, segment = GSegment.fromGuideTokens(tokens)
+        if net_name is not None:
+            if current is not None and current.net != net_name:
+                guides.append(current)
+                current = None
+            current = current or Guide(net_name)
+        if current is None:
+            raise ValueError(f"guide:{line_no}: guide 行缺少 net 名")
+        current.segments.append(segment)
+
+    if current is not None:
+        guides.append(current)
+    return guides
+
+
+def routes_to_guide_file(route_map: Dict[Any, GRoute], name_resolver: Callable[[Any], str]) -> GuideFile:
+    """把 route map 转为 GuideFile。"""
+
+    return GuideFile([Guide(name_resolver(net), list(route)) for net, route in route_map.items()])
 
 
 def print_groute(groute: GRoute) -> str:

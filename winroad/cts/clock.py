@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Iterator, List, Optional, Tuple
 
 from .types import InstType
 
@@ -63,8 +63,20 @@ class ClockSubNet:
     def addInst(self, inst: ClockInst) -> None:
         self.instances.append(inst)
 
+    def setDriver(self, inst: ClockInst) -> None:
+        if self.instances:
+            self.instances[0] = inst
+        else:
+            self.instances.append(inst)
+
     def getName(self) -> str:
         return self.name
+
+    def getInsts(self) -> List[ClockInst]:
+        return list(self.instances)
+
+    def getSinks(self) -> List[ClockInst]:
+        return list(self.instances[1:])
 
     def getNumSinks(self) -> int:
         return max(0, len(self.instances) - 1)
@@ -77,6 +89,13 @@ class ClockSubNet:
     def forEachSink(self, func: Callable[[ClockInst], None]) -> None:
         for inst in self.instances[1:]:
             func(inst)
+
+    def forEachInst(self, func: Callable[[ClockInst], None]) -> None:
+        for inst in self.instances:
+            func(inst)
+
+    def __iter__(self) -> Iterator[ClockInst]:
+        return iter(self.instances)
 
 
 @dataclass
@@ -108,6 +127,9 @@ class Clock:
         self.sub_nets.append(subnet)
         return subnet
 
+    def addSubNetObj(self, subnet: ClockSubNet) -> None:
+        self.sub_nets.append(subnet)
+
     def addSink(
         self,
         name: str,
@@ -116,19 +138,20 @@ class Clock:
         pin_obj: Any = None,
         input_cap: float = 0.0,
         ins_delay: float = 0.0,
-    ) -> None:
-        self.sinks.append(
-            ClockInst(
-                name,
-                "",
-                InstType.CLOCK_SINK,
-                x,
-                y,
-                pin_obj,
-                input_cap,
-                ins_delay,
-            )
+    ) -> ClockInst:
+        sink = ClockInst(
+            name,
+            "",
+            InstType.CLOCK_SINK,
+            x,
+            y,
+            pin_obj,
+            input_cap,
+            ins_delay,
         )
+        self.sinks.append(sink)
+        self.name_to_inst[name] = sink
+        return sink
 
     def getName(self) -> str:
         return self.net_name
@@ -138,3 +161,33 @@ class Clock:
 
     def getNumSinks(self) -> int:
         return len(self.sinks)
+
+    def getClockPin(self) -> str:
+        return self.clock_pin
+
+    def getClockPinLocation(self) -> Tuple[int, int]:
+        return (self.clock_pin_x, self.clock_pin_y)
+
+    def getClockBuffers(self) -> List[ClockInst]:
+        return list(self.clock_buffers)
+
+    def getSinks(self) -> List[ClockInst]:
+        return list(self.sinks)
+
+    def getSubNets(self) -> List[ClockSubNet]:
+        return list(self.sub_nets)
+
+    def setSubNets(self, subnets: Iterable[ClockSubNet]) -> None:
+        self.sub_nets = list(subnets)
+
+    def forEachClockBuffer(self, func: Callable[[ClockInst], None]) -> None:
+        for inst in self.clock_buffers:
+            func(inst)
+
+    def forEachSink(self, func: Callable[[ClockInst], None]) -> None:
+        for sink in self.sinks:
+            func(sink)
+
+    def forEachSubNet(self, func: Callable[[ClockSubNet], None]) -> None:
+        for subnet in self.sub_nets:
+            func(subnet)

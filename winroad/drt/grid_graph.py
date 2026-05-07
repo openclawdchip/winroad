@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, List, Optional, Sequence, Tuple
+from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 from .fr import frTechObject
 from .types import (
@@ -51,6 +51,57 @@ class FlexGridGraphNode:
     has_grid_cost_up: bool = False
     has_special_via: bool = False
 
+    def has_edge(self, direction: frDirEnum) -> bool:
+        if direction == frDirEnum.E:
+            return self.has_east_edge
+        if direction == frDirEnum.N:
+            return self.has_north_edge
+        if direction == frDirEnum.U:
+            return self.has_up_edge
+        return False
+
+    def set_edge(self, direction: frDirEnum, value: bool) -> None:
+        if direction == frDirEnum.E:
+            self.has_east_edge = value
+        elif direction == frDirEnum.N:
+            self.has_north_edge = value
+        elif direction == frDirEnum.U:
+            self.has_up_edge = value
+
+    def is_blocked(self, direction: frDirEnum) -> bool:
+        if direction == frDirEnum.E:
+            return self.is_blocked_east
+        if direction == frDirEnum.N:
+            return self.is_blocked_north
+        if direction == frDirEnum.U:
+            return self.is_blocked_up
+        return False
+
+    def set_blocked(self, direction: frDirEnum, value: bool) -> None:
+        if direction == frDirEnum.E:
+            self.is_blocked_east = value
+        elif direction == frDirEnum.N:
+            self.is_blocked_north = value
+        elif direction == frDirEnum.U:
+            self.is_blocked_up = value
+
+    def has_grid_cost(self, direction: frDirEnum) -> bool:
+        if direction == frDirEnum.E:
+            return self.has_grid_cost_east
+        if direction == frDirEnum.N:
+            return self.has_grid_cost_north
+        if direction == frDirEnum.U:
+            return self.has_grid_cost_up
+        return False
+
+    def set_grid_cost(self, direction: frDirEnum, value: bool) -> None:
+        if direction == frDirEnum.E:
+            self.has_grid_cost_east = value
+        elif direction == frDirEnum.N:
+            self.has_grid_cost_north = value
+        elif direction == frDirEnum.U:
+            self.has_grid_cost_up = value
+
 
 class FlexGridGraph:
     """对应 ``dr/FlexGridGraph.h`` 的 detailed routing maze graph。
@@ -84,10 +135,42 @@ class FlexGridGraph:
         return self.drWorker_
 
     def setCoords(self, x_coords: Sequence[frCoord], y_coords: Sequence[frCoord], z_coords: Sequence[frLayerNum]) -> None:
-        self.xCoords_ = sorted(x_coords)
-        self.yCoords_ = sorted(y_coords)
-        self.zCoords_ = sorted(z_coords)
+        self.xCoords_ = sorted(dict.fromkeys(x_coords))
+        self.yCoords_ = sorted(dict.fromkeys(y_coords))
+        self.zCoords_ = sorted(dict.fromkeys(z_coords))
         self.nodes_ = [FlexGridGraphNode() for _ in range(len(self.xCoords_) * len(self.yCoords_) * len(self.zCoords_))]
+        self.zHeights_ = [0 for _ in self.zCoords_]
+        self.layerRouteDirections_ = [
+            (self.tech_.getLayer(layer_num).getDir() if self.tech_.getLayer(layer_num) is not None else dbTechLayerDir.NONE)
+            for layer_num in self.zCoords_
+        ]
+
+    def setLayerRouteDirections(self, directions: Iterable[dbTechLayerDir]) -> None:
+        self.layerRouteDirections_ = list(directions)
+
+    def getLayerRouteDirection(self, z: frMIdx) -> dbTechLayerDir:
+        return self.layerRouteDirections_[z]
+
+    def setZHeights(self, heights: Iterable[frCoord]) -> None:
+        self.zHeights_ = list(heights)
+
+    def getZHeight(self, z: frMIdx) -> frCoord:
+        return self.zHeights_[z]
+
+    def getXCoords(self) -> List[frCoord]:
+        return self.xCoords_
+
+    def getYCoords(self) -> List[frCoord]:
+        return self.yCoords_
+
+    def getZCoords(self) -> List[frLayerNum]:
+        return self.zCoords_
+
+    def getNodes(self) -> List[FlexGridGraphNode]:
+        return self.nodes_
+
+    def getNode(self, x: frMIdx, y: frMIdx, z: frMIdx) -> FlexGridGraphNode:
+        return self.nodes_[self.getIdx(x, y, z)]
 
     def getDim(self) -> Tuple[frMIdx, frMIdx, frMIdx]:
         return (len(self.xCoords_), len(self.yCoords_), len(self.zCoords_))
@@ -104,9 +187,13 @@ class FlexGridGraph:
         return self.zCoords_[z]
 
     def getMinLayerNum(self) -> frLayerNum:
+        if not self.zCoords_:
+            return 0
         return self.zCoords_[0]
 
     def getMaxLayerNum(self) -> frLayerNum:
+        if not self.zCoords_:
+            return 0
         return self.zCoords_[-1]
 
     def hasMazeXIdx(self, coord: frCoord) -> bool:
@@ -135,27 +222,96 @@ class FlexGridGraph:
 
     def getIdx(self, x: frMIdx, y: frMIdx, z: frMIdx) -> int:
         x_dim, y_dim, _ = self.getDim()
+        self._check_idx(x, y, z)
         return z * x_dim * y_dim + y * x_dim + x
 
     def hasEdge(self, x: frMIdx, y: frMIdx, z: frMIdx, direction: frDirEnum) -> bool:
-        node = self.nodes_[self.getIdx(x, y, z)]
-        if direction == frDirEnum.E:
-            return node.has_east_edge
-        if direction == frDirEnum.N:
-            return node.has_north_edge
-        if direction == frDirEnum.U:
-            return node.has_up_edge
-        return False
+        mapped = self._map_direction(x, y, z, direction)
+        if mapped is None:
+            return False
+        mx, my, mz, mdir = mapped
+        return self.getNode(mx, my, mz).has_edge(mdir)
+
+    def setEdge(self, x: frMIdx, y: frMIdx, z: frMIdx, direction: frDirEnum, value: bool = True) -> None:
+        mapped = self._map_direction(x, y, z, direction)
+        if mapped is None:
+            raise IndexError("edge direction leaves FlexGridGraph bounds")
+        mx, my, mz, mdir = mapped
+        self.getNode(mx, my, mz).set_edge(mdir, value)
+
+    def clearEdge(self, x: frMIdx, y: frMIdx, z: frMIdx, direction: frDirEnum) -> None:
+        self.setEdge(x, y, z, direction, False)
+
+    def addEdge(self, x: frMIdx, y: frMIdx, z: frMIdx, direction: frDirEnum) -> None:
+        self.setEdge(x, y, z, direction, True)
+
+    def hasGridCost(self, x: frMIdx, y: frMIdx, z: frMIdx, direction: frDirEnum) -> bool:
+        mapped = self._map_direction(x, y, z, direction)
+        if mapped is None:
+            return False
+        mx, my, mz, mdir = mapped
+        return self.getNode(mx, my, mz).has_grid_cost(mdir)
+
+    def setGridCost(self, x: frMIdx, y: frMIdx, z: frMIdx, direction: frDirEnum, value: bool = True) -> None:
+        mapped = self._map_direction(x, y, z, direction)
+        if mapped is None:
+            raise IndexError("grid-cost direction leaves FlexGridGraph bounds")
+        mx, my, mz, mdir = mapped
+        self.getNode(mx, my, mz).set_grid_cost(mdir, value)
+
+    def setSpecialVia(self, x: frMIdx, y: frMIdx, z: frMIdx, value: bool = True) -> None:
+        self.getNode(x, y, z).has_special_via = value
+
+    def hasSpecialVia(self, x: frMIdx, y: frMIdx, z: frMIdx) -> bool:
+        return self.getNode(x, y, z).has_special_via
+
+    def setBlocked(self, x: frMIdx, y: frMIdx, z: frMIdx, direction: frDirEnum, value: bool = True) -> None:
+        mapped = self._map_direction(x, y, z, direction)
+        if mapped is None:
+            raise IndexError("blockage direction leaves FlexGridGraph bounds")
+        mx, my, mz, mdir = mapped
+        self.getNode(mx, my, mz).set_blocked(mdir, value)
+
+    def clearBlocked(self, x: frMIdx, y: frMIdx, z: frMIdx, direction: frDirEnum) -> None:
+        self.setBlocked(x, y, z, direction, False)
+
+    def reset(self) -> None:
+        self.nodes_ = [FlexGridGraphNode() for _ in self.nodes_]
+
+    def clear(self) -> None:
+        self.xCoords_.clear()
+        self.yCoords_.clear()
+        self.zCoords_.clear()
+        self.zHeights_.clear()
+        self.layerRouteDirections_.clear()
+        self.nodes_.clear()
+
+    def isValidIdx(self, x: frMIdx, y: frMIdx, z: frMIdx) -> bool:
+        x_dim, y_dim, z_dim = self.getDim()
+        return 0 <= x < x_dim and 0 <= y < y_dim and 0 <= z < z_dim
+
+    def _check_idx(self, x: frMIdx, y: frMIdx, z: frMIdx) -> None:
+        if not self.isValidIdx(x, y, z):
+            raise IndexError(f"FlexGridGraph index out of range: ({x}, {y}, {z})")
+
+    def _map_direction(self, x: frMIdx, y: frMIdx, z: frMIdx, direction: frDirEnum) -> Optional[Tuple[frMIdx, frMIdx, frMIdx, frDirEnum]]:
+        self._check_idx(x, y, z)
+        if direction in (frDirEnum.E, frDirEnum.N, frDirEnum.U):
+            return (x, y, z, direction)
+        if direction == frDirEnum.W:
+            return None if x == 0 else (x - 1, y, z, frDirEnum.E)
+        if direction == frDirEnum.S:
+            return None if y == 0 else (x, y - 1, z, frDirEnum.N)
+        if direction == frDirEnum.D:
+            return None if z == 0 else (x, y, z - 1, frDirEnum.U)
+        return None
 
     def isBlocked(self, x: frMIdx, y: frMIdx, z: frMIdx, direction: frDirEnum) -> bool:
-        node = self.nodes_[self.getIdx(x, y, z)]
-        if direction == frDirEnum.E:
-            return node.is_blocked_east
-        if direction == frDirEnum.N:
-            return node.is_blocked_north
-        if direction == frDirEnum.U:
-            return node.is_blocked_up
-        return False
+        mapped = self._map_direction(x, y, z, direction)
+        if mapped is None:
+            return False
+        mx, my, mz, mdir = mapped
+        return self.getNode(mx, my, mz).is_blocked(mdir)
 
     def init(self, *args: Any, **kwargs: Any) -> None:
         _unsupported("FlexGridGraph::init")

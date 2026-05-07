@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Set
 
-from .common import MoveType, OptoParams, _not_translated, _obj_key
+from .common import MoveType, OptoParams, RepairSetupConfig, _not_translated, _obj_key
 from .moves import (
     BaseMove,
     BufferMove,
@@ -61,6 +61,7 @@ class RepairSetup:
         self.overall_no_progress_count_ = 0
         self.max_end_repairs_ = -1
         self.equiv_pin_map_: Dict[Any, Set[Any]] = {}
+        self.config_ = RepairSetupConfig()
 
     def init(self) -> None:
         self.db_network_ = self.resizer_.db_network_
@@ -123,6 +124,62 @@ class RepairSetup:
         }
         self.move_sequence_types_ = [move for move in sequence if move not in skipped]
         self.move_sequence_ = [move_map[move] for move in self.move_sequence_types_]
+        self.config_.move_sequence = list(self.move_sequence_types_)
+        self.config_.skip_pin_swap = skip_pin_swap
+        self.config_.skip_gate_cloning = skip_gate_cloning
+        self.config_.skip_size_down = skip_size_down
+        self.config_.skip_buffering = skip_buffering
+        self.config_.skip_buffer_removal = skip_buffer_removal
+        self.config_.skip_vt_swap = skip_vt_swap
+
+    def configure(
+        self,
+        setup_slack_margin: float = 0.0,
+        verbose: bool = False,
+        skip_pin_swap: bool = False,
+        skip_gate_cloning: bool = False,
+        skip_size_down: bool = False,
+        skip_buffering: bool = False,
+        skip_buffer_removal: bool = False,
+        skip_vt_swap: bool = False,
+        max_repairs_per_pass: Optional[int] = None,
+        max_end_repairs: Optional[int] = None,
+        move_sequence: Optional[Sequence[MoveType]] = None,
+    ) -> RepairSetupConfig:
+        if max_repairs_per_pass is not None:
+            self.max_repairs_per_pass_ = int(max_repairs_per_pass)
+        if max_end_repairs is not None:
+            self.max_end_repairs_ = int(max_end_repairs)
+        self.config_ = RepairSetupConfig(
+            setup_slack_margin=setup_slack_margin,
+            verbose=verbose,
+            skip_pin_swap=skip_pin_swap,
+            skip_gate_cloning=skip_gate_cloning,
+            skip_size_down=skip_size_down,
+            skip_buffering=skip_buffering,
+            skip_buffer_removal=skip_buffer_removal,
+            skip_vt_swap=skip_vt_swap,
+            max_repairs_per_pass=self.max_repairs_per_pass_,
+            max_end_repairs=self.max_end_repairs_,
+            move_sequence=list(move_sequence or self.move_sequence_types_),
+        )
+        if move_sequence is not None:
+            self.setupMoveSequence(
+                move_sequence,
+                skip_pin_swap,
+                skip_gate_cloning,
+                skip_size_down,
+                skip_buffering,
+                skip_buffer_removal,
+                skip_vt_swap,
+            )
+        return self.config_
+
+    def config(self) -> RepairSetupConfig:
+        return self.config_
+
+    def reportConfig(self) -> Dict[str, Any]:
+        return self.config_.as_dict()
 
     def moveSequenceTypes(self) -> List[MoveType]:
         return list(self.move_sequence_types_)
@@ -166,6 +223,35 @@ class RepairSetup:
     def removedBufferCount(self) -> int:
         return self.removed_buffer_count_
 
+    def recordRemovedBuffer(self, count: int = 1) -> None:
+        if count < 0:
+            raise ValueError("removed buffer count must be non-negative")
+        self.removed_buffer_count_ += count
+
+    def resetCounters(self) -> None:
+        self.removed_buffer_count_ = 0
+        self.endpoint_pass_counts_phase1_.clear()
+        self.wns_no_progress_count_ = 0
+        self.overall_no_progress_count_ = 0
+        self.rejected_pin_moves_current_endpoint_.clear()
+        for move in self.allMoves():
+            move.all_inst_set_.clear()
+            move.accepted_inst_set_.clear()
+            move.pending_inst_set_.clear()
+            move.all_count_ = 0
+            move.pending_count_ = 0
+            move.rejected_count_ = 0
+            move.accepted_count_ = 0
+
+    def reportCounters(self) -> Dict[str, Any]:
+        return {
+            "removed_buffers": self.removed_buffer_count_,
+            "endpoint_repairs": dict(self.endpoint_pass_counts_phase1_),
+            "wns_no_progress": self.wns_no_progress_count_,
+            "overall_no_progress": self.overall_no_progress_count_,
+            "move_counts": {move.name(): move.moveCounters() for move in self.allMoves()},
+        }
+
     def reportMoveSummary(self) -> Dict[str, Any]:
         move_counts = {move.name(): move.numMoves() for move in self.allMoves()}
         return {
@@ -173,7 +259,8 @@ class RepairSetup:
             "removed_buffers": self.removed_buffer_count_,
             "endpoint_repairs": dict(self.endpoint_pass_counts_phase1_),
             "move_counts": move_counts,
-            "tracker": self.move_tracker_.moveSummary() if self.move_tracker_ is not None else None,
+            "tracker": self.move_tracker_.report() if self.move_tracker_ is not None else None,
+            "config": self.reportConfig(),
         }
 
     def repairSetup(self, *_args: Any, **_kwargs: Any) -> bool:

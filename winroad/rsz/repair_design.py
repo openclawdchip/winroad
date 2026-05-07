@@ -142,6 +142,18 @@ class RepairDesign:
     def limits(self) -> RepairDesignLimits:
         return self.limits_
 
+    def reportLimits(self) -> Dict[str, Any]:
+        return {
+            "max_wire_length": self.limits_.max_wire_length,
+            "max_slew": self.limits_.max_slew,
+            "max_cap": self.limits_.max_cap,
+            "max_fanout": self.limits_.max_fanout,
+            "slew_margin": self.limits_.slew_margin,
+            "cap_margin": self.limits_.cap_margin,
+            "corner": self.limits_.corner,
+            "buffer_cells": list(self.limits_.buffer_cells),
+        }
+
     def resetViolationCounters(self) -> None:
         self.resize_count_ = 0
         self.inserted_buffer_count_ = 0
@@ -163,6 +175,17 @@ class RepairDesign:
     ) -> None:
         """累加 C++ repair pass 会维护的 counters。"""
 
+        values = (
+            long_wire,
+            max_slew,
+            max_cap,
+            max_fanout,
+            inserted_buffers,
+            resized_drivers,
+            repaired_nets,
+        )
+        if any(value < 0 for value in values):
+            raise ValueError("repair counters must be non-negative")
         self.long_wire_count_ += long_wire
         self.max_slew_count_ += max_slew
         self.max_cap_count_ += max_cap
@@ -181,6 +204,12 @@ class RepairDesign:
             max_cap=self.max_cap_count_,
             max_fanout=self.max_fanout_count_,
         )
+
+    def resizedDriverCount(self) -> int:
+        return self.resize_count_
+
+    def repairedNetCount(self) -> int:
+        return self.repaired_net_count_
 
     def repairNet(self, *_args: Any, **_kwargs: Any) -> None:
         _not_translated("RepairDesign::repairNet")

@@ -17,7 +17,7 @@ from .global_router import (
     getLayerName,
 )
 from .grid import Grid, Net, Pin, PinGridLocation, RoutePointPins, RoutingTracks
-from .guide import GSegment, print_groute
+from .guide import GSegment, Guide, GuideFile, print_groute, routes_to_guide_file
 from .types import (
     CapacityReductionData,
     GRoute,
@@ -44,6 +44,8 @@ __all__ = [
     "GSegment",
     "GlobalRouter",
     "Grid",
+    "Guide",
+    "GuideFile",
     "IncrementalGRoute",
     "LayerId",
     "Net",
@@ -67,4 +69,5 @@ __all__ = [
     "getITermName",
     "getLayerName",
     "print_groute",
+    "routes_to_guide_file",
 ]

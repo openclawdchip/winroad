@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .fr import frDesign, frRegionQuery, frTechObject
@@ -100,7 +101,16 @@ class FlexDR:
         _unsupported("FlexDR::end")
 
     def reportGuideCoverage(self) -> None:
-        _unsupported("FlexDR::reportGuideCoverage")
+        block = self.design_.getTopBlock()
+        rows: List[str] = ["net,guides,orig_guides,has_guides"]
+        if block is not None:
+            for net in block.getNets():
+                rows.append(f"{net.getName()},{len(net.getGuides())},{len(net.getOrigGuides())},{int(net.hasGuides())}")
+        report = "\n".join(rows) + "\n"
+        if self.router_cfg_.GUIDE_REPORT_FILE:
+            Path(self.router_cfg_.GUIDE_REPORT_FILE).write_text(report, encoding="utf-8")
+        elif self.logger_ is not None and hasattr(self.logger_, "info"):
+            self.logger_.info(report.rstrip())
 
     def fixMaxSpacing(self) -> None:
         _unsupported("FlexDR::fixMaxSpacing")

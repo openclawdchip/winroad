@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Set
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple
 
-from .types import ExtensionMode, GridComponentType, Halo, Rect, Shape, _name, _normalize_extension_mode, _not_implemented
+from .types import ExtensionMode, GridComponentType, Halo, Rect, Shape, _name, _normalize_extension_mode, _not_implemented, _validate_halo, _validate_non_negative, _validate_positive, _validate_rect
 
 @dataclass
 class GridComponent:
@@ -15,6 +15,10 @@ class GridComponent:
     starts_with_power: bool = True
     nets: List[Any] = field(default_factory=list)
     shapes: List[Shape] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.grid is None:
+            raise ValueError("grid component requires a grid")
 
     def getGrid(self) -> "Grid":
         return self.grid
@@ -30,9 +34,12 @@ class GridComponent:
 
     def addShape(self, shape: Shape) -> None:
         shape.grid_component = self
-        self.shapes.append(shape)
+        if shape not in self.shapes:
+            self.shapes.append(shape)
 
     def clearShapes(self) -> None:
+        for shape in self.shapes:
+            shape.grid_component = None
         self.shapes.clear()
 
     def getShapeCount(self) -> int:
@@ -77,13 +84,15 @@ class GridComponent:
             "grid": self.grid.getName(),
             "nets": [_name(net) for net in self.getNets()],
             "shape_count": len(self.shapes),
+            "shapes": [shape.report() for shape in self.shapes],
         }
 
     def type(self) -> GridComponentType:
         raise NotImplementedError
 
     def checkLayerSpecifications(self) -> None:
-        _not_implemented(f"{type(self).__name__}::checkLayerSpecifications")
+        if self.grid is None:
+            raise ValueError(f"{type(self).__name__} is not attached to a grid")
 
 
 @dataclass
@@ -93,6 +102,14 @@ class RingLayer:
     layer: Any = None
     width: int = 0
     spacing: int = 0
+
+    def __post_init__(self) -> None:
+        if self.layer is None:
+            self.width = _validate_non_negative(self.width, "ring width")
+            self.spacing = _validate_non_negative(self.spacing, "ring spacing")
+            return
+        self.width = _validate_positive(self.width, "ring width")
+        self.spacing = _validate_non_negative(self.spacing, "ring spacing")
 
 
 @dataclass
@@ -105,14 +122,19 @@ class Rings(GridComponent):
     extend_to_boundary: bool = False
     allow_outside_die: bool = False
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.offset = _validate_halo(self.offset, "ring offset")
+        self.pad_offset = _validate_halo(self.pad_offset, "ring pad_offset")
+
     def setOffset(self, offset: Halo) -> None:
-        self.offset = tuple(offset)  # type: ignore[assignment]
+        self.offset = _validate_halo(offset, "ring offset")
 
     def getOffset(self) -> Halo:
         return self.offset
 
     def setPadOffset(self, offset: Halo) -> None:
-        self.pad_offset = tuple(offset)  # type: ignore[assignment]
+        self.pad_offset = _validate_halo(offset, "ring pad_offset")
 
     def setExtendToBoundary(self, value: bool) -> None:
         self.extend_to_boundary = value
@@ -142,6 +164,16 @@ class Rings(GridComponent):
     def type(self) -> GridComponentType:
         return GridComponentType.RING
 
+    def checkLayerSpecifications(self) -> None:
+        super().checkLayerSpecifications()
+        if len(self.layers) != 2:
+            raise ValueError("rings require exactly two layer specifications")
+        for layer in self.layers:
+            if layer.layer is None:
+                raise ValueError("ring layer is required")
+            _validate_positive(layer.width, "ring width")
+            _validate_non_negative(layer.spacing, "ring spacing")
+
 
 @dataclass
 class Straps(GridComponent):
@@ -159,8 +191,19 @@ class Straps(GridComponent):
     strap_end: int = 0
     direction: Any = None
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.setExtend(self.extend_mode)
+        self.width = _validate_non_negative(self.width, "strap width")
+        self.pitch = _validate_non_negative(self.pitch, "strap pitch")
+        self.spacing = _validate_non_negative(self.spacing, "strap spacing")
+        self.number_of_straps = _validate_non_negative(self.number_of_straps, "number_of_straps")
+        self.offset = _validate_non_negative(self.offset, "strap offset")
+        self.strap_start = int(self.strap_start)
+        self.strap_end = int(self.strap_end)
+
     def setOffset(self, offset: int) -> None:
-        self.offset = offset
+        self.offset = _validate_non_negative(offset, "strap offset")
 
     def setSnapToGrid(self, snap: bool) -> None:
         self.snap = snap
@@ -169,6 +212,10 @@ class Straps(GridComponent):
         self.extend_mode = _normalize_extension_mode(mode)
 
     def setStrapStartEnd(self, start: int, end: int) -> None:
+        start = int(start)
+        end = int(end)
+        if start and end and start > end:
+            raise ValueError("strap start must be <= strap end")
         self.strap_start = start
         self.strap_end = end
 
@@ -198,6 +245,17 @@ class Straps(GridComponent):
 
     def type(self) -> GridComponentType:
         return GridComponentType.STRAP
+
+    def checkLayerSpecifications(self) -> None:
+        super().checkLayerSpecifications()
+        if self.layer is None:
+            raise ValueError(f"{type(self).__name__} layer is required")
+        _validate_non_negative(self.width, "strap width")
+        if not isinstance(self, FollowPins):
+            _validate_positive(self.width, "strap width")
+            _validate_positive(self.pitch, "strap pitch")
+        _validate_non_negative(self.spacing, "strap spacing")
+        _validate_non_negative(self.number_of_straps, "number_of_straps")
 
 
 @dataclass
@@ -242,6 +300,12 @@ class RepairChannelStraps(Straps):
     repair_nets: Set[Any] = field(default_factory=set)
     invalid: bool = False
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.area = _validate_rect(self.area, "repair area")
+        self.available_area = _validate_rect(self.available_area, "repair available_area")
+        self.obs_check_area = _validate_rect(self.obs_check_area, "repair obs_check_area")
+
     def type(self) -> GridComponentType:
         return GridComponentType.REPAIR_CHANNEL
 
@@ -269,5 +333,3 @@ class RepairChannelStraps(Straps):
     @staticmethod
     def repairGridChannels(grid: "Grid", global_shapes: Any, obstructions: Any, allow: bool, renderer: Any = None) -> None:
         _not_implemented("RepairChannelStraps::repairGridChannels")
-
-

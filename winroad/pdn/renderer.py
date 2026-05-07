@@ -28,7 +28,8 @@ class PDNRenderer:
         self.grids = list(grids)
 
     def select(self, item: Any) -> None:
-        self.selected.append(item)
+        if item not in self.selected:
+            self.selected.append(item)
 
     def clear(self) -> None:
         self.selected.clear()
@@ -39,9 +40,9 @@ class PDNRenderer:
             "block": _name(self.block) if self.block is not None else None,
             "grids": [grid.getLongName() for grid in self.grids],
             "selected_count": len(self.selected),
+            "selected": [_name(item) for item in self.selected],
         }
 
     def redraw(self) -> None:
         _not_implemented("PDNRenderer::redraw")
-
 

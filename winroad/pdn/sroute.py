@@ -15,6 +15,8 @@ class SRoute:
     connects: List[Dict[str, Any]] = field(default_factory=list)
 
     def addSrouteConnect(self, **params: Any) -> Dict[str, Any]:
+        if not params:
+            raise ValueError("addSrouteConnect requires at least one parameter")
         self.connects.append(dict(params))
         return self.connects[-1]
 
@@ -24,4 +26,6 @@ class SRoute:
     def createSrouteWires(self, *args: Any, **kwargs: Any) -> None:
         _not_implemented("SRoute::createSrouteWires")
 
+    def report(self) -> Dict[str, Any]:
+        return {"connect_count": len(self.connects), "connects": self.getSrouteConnects()}
 
