@@ -281,6 +281,152 @@ class DbTech:
 
 
 @dataclass
+class DbTechLayer:
+    """复刻 _dbTechLayer 的 Python 版本。"""
+
+    name: str
+    type: str = "routing"
+    direction: str = "none"
+    minstep_type: str = "none"
+    has_max_width: bool = False
+    has_thickness: bool = False
+    has_area: bool = False
+    has_protrusion: bool = False
+    has_alias: bool = False
+    has_xy_pitch: bool = False
+    has_xy_offset: bool = False
+    rect_only: bool = False
+    right_way_on_grid_only: bool = False
+    right_way_on_grid_only_check_mask: bool = False
+    rect_only_except_non_core_pins: bool = False
+    lef58_type: int = 0
+    wrong_way_width: int = 0
+    layer_adjustment: float = 0.0
+    orth_spacing_tbl: List[tuple[int, int]] = field(default_factory=list)
+    pitch_x: int = 0
+    pitch_y: int = 0
+    offset_x: int = 0
+    offset_y: int = 0
+    width: int = 0
+    spacing: int = 0
+    resistance: float = 0.0
+    capacitance: float = 0.0
+    edge_capacitance: float = 0.0
+    wire_extension: int = 0
+    number: int = 0
+    rlevel: int = 0
+    area: float = 0.0
+    thickness: int = 0
+    max_width: int = 0
+    min_width: int = 0
+    min_step: int = 0
+    min_step_max_length: int = 0
+    min_step_max_edges: int = 0
+    first_last_pitch: int = 0
+    upper: Optional[str] = None
+    lower: Optional[str] = None
+    spacing_rules: List[dict] = field(default_factory=list)
+    min_cut_rules: List[dict] = field(default_factory=list)
+    min_enc_rules: List[dict] = field(default_factory=list)
+    antenna_rules: List[dict] = field(default_factory=list)
+    v55sp_length_idx: List[int] = field(default_factory=list)
+    v55sp_width_idx: List[int] = field(default_factory=list)
+    v55sp_spacing: List[List[int]] = field(default_factory=list)
+    two_widths_sp_idx: List[int] = field(default_factory=list)
+    two_widths_sp_prl: List[int] = field(default_factory=list)
+    two_widths_sp_spacing: List[List[int]] = field(default_factory=list)
+    oxide1: Optional[str] = None
+    oxide2: Optional[str] = None
+
+
+@dataclass
+class DbWire:
+    """复刻 _dbWire 的 Python 版本。"""
+
+    is_global: bool = False
+    data: List[int] = field(default_factory=list)
+    opcodes: List[int] = field(default_factory=list)
+    net: Optional[str] = None
+
+    def length(self) -> int:
+        """对应 OpenDB 的 length()。"""
+
+        return len(self.opcodes)
+
+
+@dataclass
+class DbVia:
+    """复刻 _dbVia 的 Python 版本。"""
+
+    name: str
+    pattern: Optional[str] = None
+    is_rotated: bool = False
+    is_tech_via: bool = False
+    has_params: bool = False
+    orient: OrientType = OrientType.N
+    default: bool = False
+    bbox: Optional[str] = None
+    boxes: Optional[str] = None
+    top: Optional[str] = None
+    bottom: Optional[str] = None
+    generate_rule: Optional[str] = None
+    rotated_via_id: int = 0
+    via_params: dict = field(default_factory=dict)
+
+
+@dataclass
+class DbMTerm:
+    """复刻 _dbMTerm 的 Python 版本。"""
+
+    name: str
+    order_id: int = 0
+    io_type: str = "input"
+    sig_type: str = "signal"
+    shape_type: str = "none"
+    mark: bool = False
+    pins: List[str] = field(default_factory=list)
+    targets: List[str] = field(default_factory=list)
+    oxide1: Optional[str] = None
+    oxide2: Optional[str] = None
+    par_met_area: List[object] = field(default_factory=list)
+    par_met_sidearea: List[object] = field(default_factory=list)
+    par_cut_area: List[object] = field(default_factory=list)
+    diffarea: List[object] = field(default_factory=list)
+
+
+@dataclass
+class DbITerm:
+    """复刻 _dbITerm 的 Python 版本。"""
+
+    mterm_idx: int = 0
+    ext_id: int = 0
+    clocked: bool = False
+    mark: bool = False
+    spef: bool = False
+    special: bool = False
+    connected: bool = False
+    net: Optional[str] = None
+    mnet: Optional[str] = None
+    inst: Optional[str] = None
+    next_net_iterm: Optional[str] = None
+    prev_net_iterm: Optional[str] = None
+    next_modnet_iterm: Optional[str] = None
+    prev_modnet_iterm: Optional[str] = None
+    sta_vertex_id: int = 0
+    aps: Dict[str, str] = field(default_factory=dict)
+
+    def get_mterm(self) -> Optional[str]:
+        """返回关联的 mterm 名称占位。"""
+
+        return None
+
+    def get_inst(self) -> Optional[str]:
+        """返回关联的 inst 名称占位。"""
+
+        return self.inst
+
+
+@dataclass
 class DbBlock:
     """复刻 _dbBlock 的 Python 版本。
 
@@ -360,6 +506,11 @@ class DbDatabase:
     chip: Optional[DbChip] = None
     tech: Optional[DbTech] = None
     libs: Dict[str, DbLib] = field(default_factory=dict)
+    tech_layers: Dict[str, DbTechLayer] = field(default_factory=dict)
+    wires: Dict[str, DbWire] = field(default_factory=dict)
+    vias: Dict[str, DbVia] = field(default_factory=dict)
+    mterms: Dict[str, DbMTerm] = field(default_factory=dict)
+    iterms: Dict[str, DbITerm] = field(default_factory=dict)
 
     def ensure_chip(self) -> DbChip:
         """没有 chip 时自动创建。"""
@@ -388,6 +539,41 @@ class DbDatabase:
         lib = DbLib(name=name)
         self.libs[name] = lib
         return lib
+
+    def create_tech_layer(self, name: str) -> DbTechLayer:
+        """创建工艺层对象。"""
+
+        layer = DbTechLayer(name=name)
+        self.tech_layers[name] = layer
+        return layer
+
+    def create_wire(self, name: str) -> DbWire:
+        """创建 wire 对象。"""
+
+        wire = DbWire()
+        self.wires[name] = wire
+        return wire
+
+    def create_via(self, name: str) -> DbVia:
+        """创建 via 对象。"""
+
+        via = DbVia(name=name)
+        self.vias[name] = via
+        return via
+
+    def create_mterm(self, name: str) -> DbMTerm:
+        """创建 master terminal。"""
+
+        mterm = DbMTerm(name=name)
+        self.mterms[name] = mterm
+        return mterm
+
+    def create_iterm(self, name: str) -> DbITerm:
+        """创建 instance terminal。"""
+
+        iterm = DbITerm(inst=name)
+        self.iterms[name] = iterm
+        return iterm
 
     def is_schema(self, rev: int) -> bool:
         """对应 OpenDB 的 isSchema(rev)。"""
@@ -428,3 +614,33 @@ def create_lib(db: DbDatabase, name: str) -> DbLib:
     """创建并返回 lib。"""
 
     return db.create_lib(name)
+
+
+def create_tech_layer(db: DbDatabase, name: str) -> DbTechLayer:
+    """创建并返回 tech layer。"""
+
+    return db.create_tech_layer(name)
+
+
+def create_wire(db: DbDatabase, name: str) -> DbWire:
+    """创建并返回 wire。"""
+
+    return db.create_wire(name)
+
+
+def create_via(db: DbDatabase, name: str) -> DbVia:
+    """创建并返回 via。"""
+
+    return db.create_via(name)
+
+
+def create_mterm(db: DbDatabase, name: str) -> DbMTerm:
+    """创建并返回 mterm。"""
+
+    return db.create_mterm(name)
+
+
+def create_iterm(db: DbDatabase, name: str) -> DbITerm:
+    """创建并返回 iterm。"""
+
+    return db.create_iterm(name)
