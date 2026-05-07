@@ -1,0 +1,196 @@
+"""Setup timing repair flow boundary for :mod:`winroad.rsz`."""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Sequence, Set
+
+from .common import MoveType, OptoParams, _not_translated, _obj_key
+from .moves import (
+    BaseMove,
+    BufferMove,
+    CloneMove,
+    MoveTracker,
+    SizeDownMove,
+    SizeUpMatchMove,
+    SizeUpMove,
+    SplitLoadMove,
+    SwapPinsMove,
+    UnbufferMove,
+    VTSwapSpeedMove,
+)
+
+
+class RepairSetup:
+    """setup timing repair 主流程边界。"""
+
+    initial_decreasing_slack_max_passes_ = 6
+    pass_limit_increment_ = 5
+    print_interval_ = 10
+    opto_small_interval_ = 100
+    opto_large_interval_ = 1000
+    inc_fix_rate_threshold_ = 0.0001
+    max_last_gasp_passes_ = 10
+
+    def __init__(self, resizer: Resizer) -> None:
+        self.resizer_ = resizer
+        self.logger_ = resizer.logger_
+        self.db_network_ = resizer.db_network_
+        self.estimate_parasitics_ = resizer.estimate_parasitics_
+        self.violator_collector_ = None
+        self.move_tracker_: Optional[MoveTracker] = None
+        self.fallback_ = False
+        self.min_viol_ = 0.0
+        self.max_viol_ = 0.0
+        self.max_repairs_per_pass_ = 1
+        self.removed_buffer_count_ = 0
+        self.initial_design_area_ = 0.0
+        self.move_sequence_: List[BaseMove] = []
+        self.move_sequence_types_: List[MoveType] = []
+        self.buffer_move_ = BufferMove(resizer)
+        self.unbuffer_move_ = UnbufferMove(resizer)
+        self.swap_pins_move_ = SwapPinsMove(resizer)
+        self.sizeup_move_ = SizeUpMove(resizer)
+        self.sizeup_match_move_ = SizeUpMatchMove(resizer)
+        self.sizedown_move_ = SizeDownMove(resizer)
+        self.clone_move_ = CloneMove(resizer)
+        self.split_load_move_ = SplitLoadMove(resizer)
+        self.vt_swap_move_ = VTSwapSpeedMove(resizer)
+        self.endpoint_pass_counts_phase1_: Dict[Any, int] = {}
+        self.wns_no_progress_count_ = 0
+        self.rejected_pin_moves_current_endpoint_: Dict[Any, Set[BaseMove]] = {}
+        self.overall_no_progress_count_ = 0
+        self.max_end_repairs_ = -1
+        self.equiv_pin_map_: Dict[Any, Set[Any]] = {}
+
+    def init(self) -> None:
+        self.db_network_ = self.resizer_.db_network_
+        for move in self.allMoves():
+            move.init()
+
+    def allMoves(self) -> List[BaseMove]:
+        return [
+            self.buffer_move_,
+            self.unbuffer_move_,
+            self.swap_pins_move_,
+            self.sizeup_move_,
+            self.sizeup_match_move_,
+            self.sizedown_move_,
+            self.clone_move_,
+            self.split_load_move_,
+            self.vt_swap_move_,
+        ]
+
+    def setupMoveSequence(
+        self,
+        sequence: Sequence[MoveType],
+        skip_pin_swap: bool,
+        skip_gate_cloning: bool,
+        skip_size_down: bool,
+        skip_buffering: bool,
+        skip_buffer_removal: bool,
+        skip_vt_swap: bool,
+    ) -> None:
+        """保存 move sequence 边界。
+
+        C++ 会创建具体 BaseMove 派生类；这些派生动作尚未翻译，所以这里先只
+        保留筛选后的枚举序列，供文档/测试确认入口参数。
+        """
+
+        skipped = set()
+        if skip_pin_swap:
+            skipped.add(MoveType.SWAP)
+        if skip_gate_cloning:
+            skipped.add(MoveType.CLONE)
+        if skip_size_down:
+            skipped.add(MoveType.SIZEDOWN)
+        if skip_buffering:
+            skipped.update({MoveType.BUFFER, MoveType.SPLIT})
+        if skip_buffer_removal:
+            skipped.add(MoveType.UNBUFFER)
+        if skip_vt_swap:
+            skipped.add(MoveType.VTSWAP_SPEED)
+        move_map: Dict[MoveType, BaseMove] = {
+            MoveType.BUFFER: self.buffer_move_,
+            MoveType.UNBUFFER: self.unbuffer_move_,
+            MoveType.SWAP: self.swap_pins_move_,
+            MoveType.SIZE: self.sizeup_move_,
+            MoveType.SIZEUP: self.sizeup_move_,
+            MoveType.SIZEUP_MATCH: self.sizeup_match_move_,
+            MoveType.SIZEDOWN: self.sizedown_move_,
+            MoveType.CLONE: self.clone_move_,
+            MoveType.SPLIT: self.split_load_move_,
+            MoveType.VTSWAP_SPEED: self.vt_swap_move_,
+        }
+        self.move_sequence_types_ = [move for move in sequence if move not in skipped]
+        self.move_sequence_ = [move_map[move] for move in self.move_sequence_types_]
+
+    def moveSequenceTypes(self) -> List[MoveType]:
+        return list(self.move_sequence_types_)
+
+    def setMoveTracker(self, tracker: Optional[MoveTracker]) -> None:
+        self.move_tracker_ = tracker
+
+    def makeMoveTracker(self) -> MoveTracker:
+        self.move_tracker_ = MoveTracker(
+            self.logger_,
+            self.resizer_.sta_,
+            self.db_network_,
+            self.resizer_.block_,
+        )
+        return self.move_tracker_
+
+    def moveTracker(self) -> Optional[MoveTracker]:
+        return self.move_tracker_
+
+    def beginEndpointRepair(self, endpoint_pin: Any) -> int:
+        """记录当前 endpoint 的一次 repair 尝试，供上层调度/报告使用。"""
+
+        key = _obj_key(endpoint_pin)
+        count = self.endpoint_pass_counts_phase1_.get(key, 0) + 1
+        self.endpoint_pass_counts_phase1_[key] = count
+        self.rejected_pin_moves_current_endpoint_.clear()
+        if self.move_tracker_ is not None:
+            self.move_tracker_.setCurrentEndpoint(endpoint_pin)
+        return count
+
+    def endpointRepairCount(self, endpoint_pin: Any) -> int:
+        return self.endpoint_pass_counts_phase1_.get(_obj_key(endpoint_pin), 0)
+
+    def recordRejectedMove(self, pin: Any, move: BaseMove) -> None:
+        key = _obj_key(pin)
+        self.rejected_pin_moves_current_endpoint_.setdefault(key, set()).add(move)
+
+    def rejectedMovesForPin(self, pin: Any) -> Set[BaseMove]:
+        return set(self.rejected_pin_moves_current_endpoint_.get(_obj_key(pin), set()))
+
+    def removedBufferCount(self) -> int:
+        return self.removed_buffer_count_
+
+    def reportMoveSummary(self) -> Dict[str, Any]:
+        move_counts = {move.name(): move.numMoves() for move in self.allMoves()}
+        return {
+            "move_sequence": [move.value for move in self.move_sequence_types_],
+            "removed_buffers": self.removed_buffer_count_,
+            "endpoint_repairs": dict(self.endpoint_pass_counts_phase1_),
+            "move_counts": move_counts,
+            "tracker": self.move_tracker_.moveSummary() if self.move_tracker_ is not None else None,
+        }
+
+    def repairSetup(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("RepairSetup::repairSetup")
+
+    def repairEndpoint(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("RepairSetup::repairEndpoint")
+
+    def repairPins(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("RepairSetup::repairPins")
+
+    def fanout(self, vertex: Any) -> int:
+        fanout = getattr(vertex, "fanout", 0)
+        return int(fanout() if callable(fanout) else fanout)
+
+    def hasTopLevelOutputPort(self, net: Any) -> bool:
+        _not_translated("RepairSetup::hasTopLevelOutputPort")
+
+    def reportSwappablePins(self) -> None:
+        self.swap_pins_move_.reportSwappablePins()

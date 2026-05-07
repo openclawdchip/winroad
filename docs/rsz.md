@@ -4,6 +4,12 @@
 而是先把顶层对象、入口类和关键函数边界搬到 Python，后续再逐函数补真实
 STA / parasitics / placement 算法。
 
+代码已从单文件拆为 `winroad.rsz` package：公共 enum/dataclass 在
+`common.py`，顶层入口在 `resizer.py`，buffer tree 在 `buffered_net.py`，
+setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
+`repair_setup.py`、`repair_hold.py`、`recover_power.py`。旧
+`winroad/rsz.py` 保留为兼容转发层。
+
 ## 已翻译对象边界
 
 - `Resizer`

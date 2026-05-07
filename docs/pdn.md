@@ -2,7 +2,7 @@
 
 ## 翻译范围
 
-- 本轮只改 `winroad/pdn.py` 和 `docs/pdn.md`。
+- 本轮只改 `winroad/pdn.py`、`winroad/pdn/*` 和 `docs/pdn.md`。
 - 参考本机 OpenROAD `src/pdn`：
   - `include/pdn/PdnGen.hh`
   - `src/domain.h`
@@ -17,6 +17,19 @@
   - `src/power_cells.h`
   - `src/pdn.tcl`
 - Python 侧只建立顶层对象、函数边界、参数保存和对象关系，不写 OpenDB，不生成示例几何。
+
+## Package 拆分
+
+- `winroad/pdn.py` 只保留兼容转发：`from .pdn import *`。
+- `winroad/pdn/types.py`：枚举、`Rect`/`Halo`、`SplitCut`、`Shape` 和共享 helper。
+- `winroad/pdn/via.py`：`Via`、db via wrapper、via generator、`Connect`。
+- `winroad/pdn/component.py`：`GridComponent`、ring/strap/followpin/pad/repair channel。
+- `winroad/pdn/grid.py`：`Grid`、`CoreGrid`、`InstanceGrid`、`BumpGrid`、`ExistingGrid`。
+- `winroad/pdn/domain.py`：`VoltageDomain`、`PowerCell`、`GridSwitchedPower`。
+- `winroad/pdn/sroute.py`：`SRoute`。
+- `winroad/pdn/renderer.py`：`PDNRenderer`。
+- `winroad/pdn/pdngen.py`：`PdnGen` 和 Tcl 风格顶层函数。
+- `winroad/pdn/__init__.py` 聚合导出，`import winroad.pdn` 仍可直接访问原 `pdn.py` 中的公开类和函数。
 
 ## 已实现边界
 

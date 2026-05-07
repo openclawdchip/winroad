@@ -3,8 +3,21 @@
 ## 第一轮翻译补位
 
 - 已按本机 OpenROAD `src/drt` C++ 源码边界建立 Python 顶层骨架。
-- 只修改 `winroad/drt.py` 与本文档；本轮不触碰 `odb`。
+- `winroad.drt` 已从历史单文件拆分为 package；`winroad/drt.py` 仅保留兼容转发。
+- 本轮不触碰 `odb`。
 - 目标是建立等价对象和入口边界，不实现 demo detailed routing。
+
+## Package 结构
+
+- `winroad/drt/__init__.py`：保留原 `winroad.drt` 的公共导出面。
+- `winroad/drt/types.py`：基础类型、enum、配置、debug 和共享 helper。
+- `winroad/drt/fr.py`：drt 私有设计数据库对象，包括 tech/block/net/via/guide/marker/region query/design。
+- `winroad/drt/grid_graph.py`：`FlexMazeIdx`、`FlexGridGraphNode`、`FlexGridGraph`。
+- `winroad/drt/flex_dr.py`：`FlexDR`、`FlexDRViaData`、`FlexDRSearchRepairArgs`。
+- `winroad/drt/flex_gr.py`：`FlexGR`。
+- `winroad/drt/flex_pa.py`：`FlexPA`。
+- `winroad/drt/gc.py`：`FlexGCWorker`。
+- `winroad/drt/triton_route.py`：`TritonRoute` 与 `create_triton_route()`。
 
 ## 已实现对象边界
 

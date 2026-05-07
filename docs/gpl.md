@@ -1,5 +1,22 @@
 # gpl
 
+## 包结构
+
+`winroad.gpl` 已从原先的单文件实现拆分为 package，公开 API 仍通过
+`import winroad.gpl` 统一转发：
+
+- `options.py`：`PlaceOptions`
+- `placer_base.py`：`PlacerBaseVars`、`Die`、`Instance`、`Pin`、`Net`、`PlacerBaseCommon`、`PlacerBase`
+- `initial_place.py`：`InitialPlaceVars`、`InitialPlace`
+- `nesterov.py`：`FloatPoint`、`GCell*`、`GPin`、`GNet`、`Bin*`、`NesterovBase*`、`NesterovPlace*`、`nesterovDbCbk`
+- `route_base.py`：`RouteBaseVars`、`Tile`、`TileGrid`、`RouteBase`
+- `timing_base.py`：`TimingBase`
+- `graphics.py`：`AbstractGraphics`、`GraphicsNone`
+- `replace.py`：`Replace`、`isValidSigType()`、`make_replace()`
+- `common.py`：包内共享类型与 ODB 兼容辅助函数
+
+旧 `winroad/gpl.py` 仅保留兼容转发，不再保存完整实现。
+
 ## 已实现
 
 - `PlaceOptions`

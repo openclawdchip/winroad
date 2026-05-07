@@ -3,6 +3,17 @@
 ## 已实现
 
 - 模块入口从空壳扩展为 OpenROAD `src/cts` 核心对象边界翻译。
+- `winroad.cts` 已从单文件拆分为 package，旧 `winroad/cts.py` 只保留兼容转发。
+- package 模块按现有类边界组织：
+  - `types.py`：共享枚举、几何类型和未翻译算法标记。
+  - `clock.py`：`ClockInst`、`ClockSubNet`、`Clock`。
+  - `options.py`：`CtsOptions`。
+  - `tech_char.py`：`TechChar`、`WireSegment` 和 characterization 数据载体。
+  - `tree_builder.py`：`TreeBuilder`、`HTreeBuilder` 和 H-tree segment/topology 边界。
+  - `clustering.py`：`Matching`、`SinkClustering`。
+  - `latency.py`：`GraphNode`、`LatencyBalancer`。
+  - `triton_cts.py`：`TritonCTS`、`initTritonCts`。
+  - `__init__.py`：聚合导出原 `winroad.cts` 对外 API。
 - 第二轮继续按 OpenROAD `src/cts` 当前源码边界深化，范围仍限 CTS 顶层 Python 骨架，不翻译/引入 `odb` 实现。
 - 第三轮继续深化 OpenROAD `src/cts` 边界，重点覆盖 TritonCTS clock root/tree init、DB write/report、NDR、dummy load、repair clock nets、latency balance；TreeBuilder legality/blockage APIs；TechChar compile/report LUT。
 - 翻译 `Util.h` 基础几何工具：

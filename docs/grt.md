@@ -1,5 +1,17 @@
 # grt
 
+## Package 拆分
+
+- `winroad/grt.py` 已拆为 `winroad/grt/` package，旧文件仅保留兼容转发。
+- 拆分边界：
+  - `types.py`：公共类型别名、枚举、`RoutePt` 和内部辅助函数。
+  - `guide.py`：`GSegment`、guide 行/字典转换、`print_groute()`。
+  - `congestion.py`：拥塞、容量调整和 region adjustment 数据结构。
+  - `grid.py`：`Pin`、`Net`、`Grid`、`RoutingTracks` 等 pin/net/grid 边界对象。
+  - `fast_route.py`：`DebugSetting`、`CostParams`、`Parent3D`、`FastRouteCore`。
+  - `global_router.py`：`GlobalRouter`、`GRouteDbCbk`、`IncrementalGRoute` 和模块级便利入口。
+  - `__init__.py`：重新导出原 `winroad.grt` 公共 API，保持 `from winroad.grt import ...` 兼容。
+
 ## 已实现
 
 - 已建立 OpenROAD `src/grt` 顶层 Python 复刻骨架。
@@ -118,6 +130,23 @@ r.updateResources(0, 0, 1, 0, 1, 2, net)
 assert r.getCongestionReport()["congested_tile_count"] == 1
 r.fastroute().saveResourcesBeforeAdjustments()
 assert r.getResourceSnapshot()["total_usage_per_layer"][1] == 2
+'@ | python -
+```
+
+## Package 拆分验证命令
+
+```powershell
+python -m py_compile D:\winroad_py\winroad\grt.py D:\winroad_py\winroad\grt\types.py D:\winroad_py\winroad\grt\guide.py D:\winroad_py\winroad\grt\congestion.py D:\winroad_py\winroad\grt\grid.py D:\winroad_py\winroad\grt\fast_route.py D:\winroad_py\winroad\grt\global_router.py D:\winroad_py\winroad\grt\__init__.py
+@'
+from winroad.grt import GSegment, GlobalRouter, Net
+
+r = GlobalRouter()
+net = "n1"
+r.routes[net] = [GSegment(0, 0, 1, 2, 0, 1)]
+r.db_net_map[net] = Net(net)
+r.setNetAlphaBetaGamma(net, 0.2, 0.3, 0.4)
+assert r.getNetAlphaBetaGamma(net) == (0.2, 0.3, 0.4)
+print("smoke ok")
 '@ | python -
 ```
 
