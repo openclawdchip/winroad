@@ -111,48 +111,47 @@ class RepairDesign:
         max_slew: Optional[float] = None,
         max_cap: Optional[float] = None,
         max_fanout: Optional[int] = None,
-        slew_margin: float = 0.0,
-        cap_margin: float = 0.0,
+        slew_margin: Optional[float] = None,
+        cap_margin: Optional[float] = None,
         corner: Any = None,
         buffer_cells: Optional[Sequence[Any]] = None,
     ) -> RepairDesignLimits:
-        """记录 repair_design 的 violation 参数，不触发真实 STA/DB 修复。"""
+        """合并 repair_design violation 参数，不触发真实 STA/DB 修复。"""
 
+        prev = self.limits_
         self.limits_ = RepairDesignLimits(
-            max_wire_length=max_wire_length,
-            max_slew=max_slew,
-            max_cap=max_cap,
-            max_fanout=max_fanout,
-            slew_margin=slew_margin,
-            cap_margin=cap_margin,
-            corner=corner,
-            buffer_cells=list(buffer_cells or []),
+            max_wire_length=prev.max_wire_length if max_wire_length is None else max_wire_length,
+            max_slew=prev.max_slew if max_slew is None else max_slew,
+            max_cap=prev.max_cap if max_cap is None else max_cap,
+            max_fanout=prev.max_fanout if max_fanout is None else max_fanout,
+            slew_margin=prev.slew_margin if slew_margin is None else slew_margin,
+            cap_margin=prev.cap_margin if cap_margin is None else cap_margin,
+            corner=prev.corner if corner is None else corner,
+            buffer_cells=list(prev.buffer_cells if buffer_cells is None else buffer_cells),
         )
-        self.max_wire_length_ = float(max_wire_length or 0.0)
-        self.max_length_ = int(max_wire_length or 0)
-        self.max_slew_ = float(max_slew or 0.0)
-        self.max_cap_ = float(max_cap or 0.0)
-        self.max_fanout_ = int(max_fanout or 0)
-        self.slew_margin_ = slew_margin
-        self.cap_margin_ = cap_margin
-        self.corner_ = corner
-        self.buffer_sizes_ = list(buffer_cells or [])
+        self._applyLimits()
         return self.limits_
+
+    def _applyLimits(self) -> None:
+        self.max_wire_length_ = float(self.limits_.max_wire_length or 0.0)
+        self.max_length_ = int(self.limits_.max_wire_length or 0)
+        self.max_slew_ = float(self.limits_.max_slew or 0.0)
+        self.max_cap_ = float(self.limits_.max_cap or 0.0)
+        self.max_fanout_ = int(self.limits_.max_fanout or 0)
+        self.slew_margin_ = self.limits_.slew_margin
+        self.cap_margin_ = self.limits_.cap_margin
+        self.corner_ = self.limits_.corner
+        self.buffer_sizes_ = list(self.limits_.buffer_cells)
+
+    def resetLimits(self) -> None:
+        self.limits_ = RepairDesignLimits()
+        self._applyLimits()
 
     def limits(self) -> RepairDesignLimits:
         return self.limits_
 
     def reportLimits(self) -> Dict[str, Any]:
-        return {
-            "max_wire_length": self.limits_.max_wire_length,
-            "max_slew": self.limits_.max_slew,
-            "max_cap": self.limits_.max_cap,
-            "max_fanout": self.limits_.max_fanout,
-            "slew_margin": self.limits_.slew_margin,
-            "cap_margin": self.limits_.cap_margin,
-            "corner": self.limits_.corner,
-            "buffer_cells": list(self.limits_.buffer_cells),
-        }
+        return self.limits_.as_dict()
 
     def resetViolationCounters(self) -> None:
         self.resize_count_ = 0

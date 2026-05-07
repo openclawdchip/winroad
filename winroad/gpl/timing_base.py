@@ -25,6 +25,9 @@ class TimingBase:
         self.net_weight_max_ = 5.0
         self.timing_driven_nets_: List[GNet] = []
         self.prev_timing_weights_: Dict[int, float] = {}
+        self.prev_timing_weights_by_id_: Dict[int, float] = {}
+        self.restore_count_ = 0
+        self.last_restored_weights_ = 0
         self.run_journal_restore_ = False
         self.timing_driven_iter_ = 0
         self.last_overflow_ = 0.0
@@ -63,10 +66,7 @@ class TimingBase:
     def executeTimingDriven(self, run_journal_restore: bool) -> bool:
         self.run_journal_restore_ = run_journal_restore
         self.timing_driven_iter_ += 1
-        self.prev_timing_weights_ = {}
-        if self.nbc_ is not None:
-            for index, gnet in enumerate(self.nbc_.getGNets()):
-                self.prev_timing_weights_[index] = gnet.getTimingWeight()
+        self.snapshotTimingWeights()
         raise NotImplementedError("OpenROAD timing-driven net reweight has not been translated yet")
 
     def resetTimingDrivenNets(self) -> None:
@@ -95,9 +95,28 @@ class TimingBase:
     def restorePrevTimingWeights(self) -> None:
         if self.nbc_ is None:
             return
+        restored = 0
         for index, gnet in enumerate(self.nbc_.getGNets()):
-            if index in self.prev_timing_weights_:
-                gnet.setTimingWeight(self.prev_timing_weights_[index])
+            weight = self.prev_timing_weights_by_id_.get(id(gnet), self.prev_timing_weights_.get(index))
+            if weight is not None:
+                gnet.setTimingWeight(weight)
+                restored += 1
+        self.restore_count_ += 1
+        self.last_restored_weights_ = restored
+
+    def snapshotTimingWeights(self) -> None:
+        self.prev_timing_weights_ = {}
+        self.prev_timing_weights_by_id_ = {}
+        if self.nbc_ is None:
+            return
+        for index, gnet in enumerate(self.nbc_.getGNets()):
+            weight = gnet.getTimingWeight()
+            self.prev_timing_weights_[index] = weight
+            self.prev_timing_weights_by_id_[id(gnet)] = weight
+
+    def clearTimingWeightSnapshot(self) -> None:
+        self.prev_timing_weights_.clear()
+        self.prev_timing_weights_by_id_.clear()
 
     def reportTimingDriven(self) -> Dict[str, Any]:
         return {
@@ -108,6 +127,9 @@ class TimingBase:
             "timing_driven_nets": len(self.timing_driven_nets_),
             "last_overflow": self.last_overflow_,
             "run_journal_restore": self.run_journal_restore_,
+            "snapshot_weights": len(self.prev_timing_weights_),
+            "restore_count": self.restore_count_,
+            "last_restored_weights": self.last_restored_weights_,
         }
 
 

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any, Dict
 
-from .common import RepairHoldConfig, _not_translated
+from .common import RepairHoldConfig, _json_value, _not_translated
 
 
 class RepairHold:
@@ -45,17 +46,22 @@ class RepairHold:
     def configure(
         self,
         buffer_cell: Any = None,
-        max_passes: int = 0,
-        max_repairs_per_pass: int = 0,
-        allow_setup_violations: bool = False,
-        setup_slack_margin: float = 0.0,
+        max_passes: Any = None,
+        max_repairs_per_pass: Any = None,
+        allow_setup_violations: Any = None,
+        setup_slack_margin: Any = None,
     ) -> RepairHoldConfig:
+        prev = self.config_
         if buffer_cell is not None:
             self.buffer_cell_ = buffer_cell
-        self.max_passes_ = int(max_passes)
-        self.max_repairs_per_pass_ = int(max_repairs_per_pass)
-        self.allow_setup_violations_ = allow_setup_violations
-        self.setup_slack_margin_ = setup_slack_margin
+        self.max_passes_ = int(prev.max_passes if max_passes is None else max_passes)
+        self.max_repairs_per_pass_ = int(
+            prev.max_repairs_per_pass if max_repairs_per_pass is None else max_repairs_per_pass
+        )
+        self.allow_setup_violations_ = (
+            prev.allow_setup_violations if allow_setup_violations is None else bool(allow_setup_violations)
+        )
+        self.setup_slack_margin_ = prev.setup_slack_margin if setup_slack_margin is None else setup_slack_margin
         self.config_ = RepairHoldConfig(
             buffer_cell=self.buffer_cell_,
             max_passes=self.max_passes_,
@@ -64,6 +70,14 @@ class RepairHold:
             setup_slack_margin=self.setup_slack_margin_,
         )
         return self.config_
+
+    def resetConfig(self) -> None:
+        self.buffer_cell_ = None
+        self.max_passes_ = 0
+        self.max_repairs_per_pass_ = 0
+        self.allow_setup_violations_ = False
+        self.setup_slack_margin_ = 0.0
+        self.config_ = RepairHoldConfig()
 
     def config(self) -> RepairHoldConfig:
         return self.config_
@@ -105,8 +119,18 @@ class RepairHold:
             "inserted_buffers": self.inserted_buffer_count_,
             "resized_drivers": self.resize_count_,
             "cloned_gates": self.cloned_gate_count_,
-            "buffer_cell": self.buffer_cell_,
+            "buffer_cell": _json_value(self.buffer_cell_),
         }
+
+    def statistics(self) -> Dict[str, Any]:
+        data = self.reportCounters()
+        data["config"] = self.reportConfig()
+        return data
+
+    def to_json(self, **json_kwargs: Any) -> str:
+        kwargs = {"sort_keys": True}
+        kwargs.update(json_kwargs)
+        return json.dumps(self.statistics(), **kwargs)
 
     def resizeCount(self) -> int:
         return self.resize_count_

@@ -210,3 +210,34 @@
 
 - `python -m py_compile` 已覆盖 `winroad/pdn.py` 和 `winroad/pdn/*.py`。
 - smoke 覆盖 `PdnGen -> VoltageDomain -> CoreGrid -> Ring/Strap/Connect -> Shape/Via` 对象树、lookup、report、sroute 参数保存、renderer 状态，并确认 `buildGrids()` 仍抛 `NotImplementedError`。
+
+## 第六轮补充重点
+
+- PdnGen config/state export-import
+  - `PdnGen.exportConfig()` 导出可复建的纯配置字典：domain、grid、ring/strap/followpin/repair/pad component、connect、sroute、renderer 开关与选择快照。
+  - `PdnGen.importConfig()` 从上述配置复建 Python 对象树；引用对象默认按名称字符串保存，可传入 resolver 将名称恢复成本地对象。
+  - `PdnGen.exportState()` 在 config 外追加 runtime 状态：component shapes、connect vias、failed vias、summary。
+  - `PdnGen.importState()` 先导入配置，再恢复 shape/via/failure runtime 状态；不触发几何生成和 OpenDB 写回。
+  - 增加 Tcl/Python 便捷包装：`export_power_grid_config()`、`import_power_grid_config()`、`export_power_grid_state()`、`import_power_grid_state()`。
+- report 汇总
+  - `PdnGen.reportSummary()` 汇总 domain/grid/shape/via/failed-via/sroute/renderer。
+  - `VoltageDomain.summary()`、`Grid.summary()` 提供 domain/grid 级聚合。
+  - `PdnGen.report()` 增加 `summary`、结构化 `sroute` 报告和 renderer snapshot。
+  - 增加 `report_power_grid_summary()`。
+- via failure report
+  - `Connect.failedViaReport()` 展开 reason/net/rect 明细。
+  - `Grid.viaFailureReport()` 和 `PdnGen.viaFailureReport()` 按层级聚合 failure 总数和 reason 计数。
+  - 增加 `report_pdn_via_failures()`。
+- renderer selection snapshot
+  - `PDNRenderer.selectionSnapshot()` 保存 selected item 的类型和名称。
+  - `PDNRenderer.snapshot()` 保存 enabled/block/grids/selected，供 config/state 导出。
+- sroute summary
+  - `SRoute.summary()` 汇总 connect 数量、包含 net/layer 参数的 connect 数量和参数 key 集。
+  - `SRoute.report()` 保留原始参数列表并追加 summary 字段。
+- 真实算法边界
+  - `buildGrids()`、`writeToDb()`、`repairVias()`、`createSrouteWires()`、renderer `redraw()`、真实 via/shape/db 构造继续显式抛 `NotImplementedError`。
+
+## 第六轮验证
+
+- `python -m py_compile` 已覆盖 `winroad/pdn/*.py`。
+- smoke 覆盖 config/state export-import round trip、shape/via/failure 恢复、summary、via failure report、sroute summary、renderer selection snapshot，并确认 `buildGrids()` 仍抛 `NotImplementedError`。

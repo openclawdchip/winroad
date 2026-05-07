@@ -116,6 +116,12 @@ class PlaceOptions:
 
         return {
             "initial_place_max_iter": self.initialPlaceMaxIter,
+            "initial_place_min_diff_length": self.initialPlaceMinDiffLength,
+            "initial_place_max_solver_iter": self.initialPlaceMaxSolverIter,
+            "initial_place_max_fanout": self.initialPlaceMaxFanout,
+            "initial_place_net_weight_scale": self.initialPlaceNetWeightScale,
+            "force_center_initial_place": self.forceCenterInitialPlace,
+            "skip_io": self.skipIoMode,
             "nesterov_place_max_iter": self.nesterovPlaceMaxIter,
             "density": self.density,
             "overflow": self.overflow,
@@ -124,6 +130,29 @@ class PlaceOptions:
             "uniform_target_density": self.uniformTargetDensityMode,
             "bin_grid": (self.binGridCntX, self.binGridCntY),
             "pad": (self.padLeft, self.padRight),
+            "timing_net_weight_overflows": list(self.timingNetWeightOverflows),
+            "timing_net_weight_max": self.timingNetWeightMax,
+            "keep_resize_below_overflow": self.keepResizeBelowOverflow,
+            "routability_use_rudy": self.routabilityUseRudy,
+            "disable_revert_if_diverge": self.disableRevertIfDiverge,
+            "disable_pin_density_adjust": self.disablePinDensityAdjust,
+            "enable_routing_congestion": self.enable_routing_congestion,
+            "phi_coef": (self.minPhiCoef, self.maxPhiCoef),
+            "init_density_penalty_factor": self.initDensityPenaltyFactor,
+            "init_wire_length_coef": self.initWireLengthCoef,
+            "reference_hpwl": self.referenceHpwl,
+            "routability_check_overflow": self.routabilityCheckOverflow,
+            "routability_snapshot_overflow": self.routabilitySnapshotOverflow,
+            "routability_max_density": self.routabilityMaxDensity,
+            "routability_target_rc_metric": self.routabilityTargetRcMetric,
+            "routability_inflation_ratio_coef": self.routabilityInflationRatioCoef,
+            "routability_max_inflation_ratio": self.routabilityMaxInflationRatio,
+            "routability_rc_coefficients": (
+                self.routabilityRcK1,
+                self.routabilityRcK2,
+                self.routabilityRcK3,
+                self.routabilityRcK4,
+            ),
         }
 
 

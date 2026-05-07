@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Set
 
-from .common import MoveType, OptoParams, RepairSetupConfig, _not_translated, _obj_key
+from .common import MoveType, OptoParams, RepairSetupConfig, _json_value, _not_translated, _obj_key
 from .moves import (
     BaseMove,
     BufferMove,
@@ -134,22 +134,32 @@ class RepairSetup:
 
     def configure(
         self,
-        setup_slack_margin: float = 0.0,
-        verbose: bool = False,
-        skip_pin_swap: bool = False,
-        skip_gate_cloning: bool = False,
-        skip_size_down: bool = False,
-        skip_buffering: bool = False,
-        skip_buffer_removal: bool = False,
-        skip_vt_swap: bool = False,
+        setup_slack_margin: Optional[float] = None,
+        verbose: Optional[bool] = None,
+        skip_pin_swap: Optional[bool] = None,
+        skip_gate_cloning: Optional[bool] = None,
+        skip_size_down: Optional[bool] = None,
+        skip_buffering: Optional[bool] = None,
+        skip_buffer_removal: Optional[bool] = None,
+        skip_vt_swap: Optional[bool] = None,
         max_repairs_per_pass: Optional[int] = None,
         max_end_repairs: Optional[int] = None,
         move_sequence: Optional[Sequence[MoveType]] = None,
     ) -> RepairSetupConfig:
+        prev = self.config_
+        setup_slack_margin = prev.setup_slack_margin if setup_slack_margin is None else setup_slack_margin
+        verbose = prev.verbose if verbose is None else verbose
+        skip_pin_swap = prev.skip_pin_swap if skip_pin_swap is None else skip_pin_swap
+        skip_gate_cloning = prev.skip_gate_cloning if skip_gate_cloning is None else skip_gate_cloning
+        skip_size_down = prev.skip_size_down if skip_size_down is None else skip_size_down
+        skip_buffering = prev.skip_buffering if skip_buffering is None else skip_buffering
+        skip_buffer_removal = prev.skip_buffer_removal if skip_buffer_removal is None else skip_buffer_removal
+        skip_vt_swap = prev.skip_vt_swap if skip_vt_swap is None else skip_vt_swap
         if max_repairs_per_pass is not None:
             self.max_repairs_per_pass_ = int(max_repairs_per_pass)
         if max_end_repairs is not None:
             self.max_end_repairs_ = int(max_end_repairs)
+        selected_sequence = list(move_sequence) if move_sequence is not None else list(prev.move_sequence or self.move_sequence_types_)
         self.config_ = RepairSetupConfig(
             setup_slack_margin=setup_slack_margin,
             verbose=verbose,
@@ -161,7 +171,7 @@ class RepairSetup:
             skip_vt_swap=skip_vt_swap,
             max_repairs_per_pass=self.max_repairs_per_pass_,
             max_end_repairs=self.max_end_repairs_,
-            move_sequence=list(move_sequence or self.move_sequence_types_),
+            move_sequence=selected_sequence,
         )
         if move_sequence is not None:
             self.setupMoveSequence(
@@ -174,6 +184,13 @@ class RepairSetup:
                 skip_vt_swap,
             )
         return self.config_
+
+    def resetConfig(self) -> None:
+        self.max_repairs_per_pass_ = 1
+        self.max_end_repairs_ = -1
+        self.move_sequence_.clear()
+        self.move_sequence_types_.clear()
+        self.config_ = RepairSetupConfig()
 
     def config(self) -> RepairSetupConfig:
         return self.config_
@@ -246,7 +263,7 @@ class RepairSetup:
     def reportCounters(self) -> Dict[str, Any]:
         return {
             "removed_buffers": self.removed_buffer_count_,
-            "endpoint_repairs": dict(self.endpoint_pass_counts_phase1_),
+            "endpoint_repairs": _json_value(self.endpoint_pass_counts_phase1_),
             "wns_no_progress": self.wns_no_progress_count_,
             "overall_no_progress": self.overall_no_progress_count_,
             "move_counts": {move.name(): move.moveCounters() for move in self.allMoves()},
@@ -257,7 +274,7 @@ class RepairSetup:
         return {
             "move_sequence": [move.value for move in self.move_sequence_types_],
             "removed_buffers": self.removed_buffer_count_,
-            "endpoint_repairs": dict(self.endpoint_pass_counts_phase1_),
+            "endpoint_repairs": _json_value(self.endpoint_pass_counts_phase1_),
             "move_counts": move_counts,
             "tracker": self.move_tracker_.report() if self.move_tracker_ is not None else None,
             "config": self.reportConfig(),

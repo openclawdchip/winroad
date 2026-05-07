@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Set
+import json
+from typing import Any, Dict, Optional, Set
 
-from .common import RecoverPowerConfig, _not_translated, _obj_key
+from .common import RecoverPowerConfig, _json_value, _not_translated, _obj_key
 
 
 class RecoverPower:
@@ -45,12 +46,22 @@ class RecoverPower:
 
     def configure(
         self,
-        recover_power_percent: float = 0.0,
-        match_cell_footprint: bool = False,
-        verbose: bool = False,
+        recover_power_percent: Optional[float] = None,
+        match_cell_footprint: Optional[bool] = None,
+        verbose: Optional[bool] = None,
         scene: Any = None,
-        setup_slack_margin: float = setup_slack_margin_,
+        setup_slack_margin: Optional[float] = None,
     ) -> RecoverPowerConfig:
+        prev = self.config_
+        recover_power_percent = (
+            prev.recover_power_percent if recover_power_percent is None else recover_power_percent
+        )
+        match_cell_footprint = (
+            prev.match_cell_footprint if match_cell_footprint is None else match_cell_footprint
+        )
+        verbose = prev.verbose if verbose is None else verbose
+        scene = prev.scene if scene is None else scene
+        setup_slack_margin = prev.setup_slack_margin if setup_slack_margin is None else setup_slack_margin
         self.match_cell_footprint_ = match_cell_footprint
         self.verbose_ = verbose
         self.scene_ = scene
@@ -63,6 +74,13 @@ class RecoverPower:
             setup_slack_margin=setup_slack_margin,
         )
         return self.config_
+
+    def resetConfig(self) -> None:
+        self.scene_ = None
+        self.match_cell_footprint_ = False
+        self.verbose_ = False
+        self.setup_slack_margin_ = type(self).setup_slack_margin_
+        self.config_ = RecoverPowerConfig(setup_slack_margin=self.setup_slack_margin_)
 
     def config(self) -> RecoverPowerConfig:
         return self.config_
@@ -123,3 +141,14 @@ class RecoverPower:
             "match_cell_footprint": self.match_cell_footprint_,
             "verbose": self.verbose_,
         }
+
+    def statistics(self) -> Dict[str, Any]:
+        data = self.reportCounters()
+        data["config"] = self.reportConfig()
+        data["bad_vertices_detail"] = _json_value(self.bad_vertices_)
+        return data
+
+    def to_json(self, **json_kwargs: Any) -> str:
+        kwargs = {"sort_keys": True}
+        kwargs.update(json_kwargs)
+        return json.dumps(self.statistics(), **kwargs)

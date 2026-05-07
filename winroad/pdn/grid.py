@@ -179,6 +179,38 @@ class Grid:
             "switched_power_cell": self.switched_power_cell.report() if self.switched_power_cell is not None else None,
         }
 
+    def summary(self) -> Dict[str, Any]:
+        failures = self.viaFailureReport(include_locations=False)
+        return {
+            "name": self.getLongName(),
+            "type": self.type().value,
+            "domain": self.domain.getName(),
+            "ring_count": len(self.rings),
+            "strap_count": len(self.straps),
+            "connect_count": len(self.connect),
+            "shape_count": len(self.getShapes()),
+            "via_count": len(self.getVias()),
+            "failed_via_count": failures["total"],
+            "failed_vias_by_reason": failures["by_reason"],
+            "component_count_by_type": {
+                component_type.value: len(self.findComponent(component_type))
+                for component_type in GridComponentType
+            },
+        }
+
+    def viaFailureReport(self, include_locations: bool = True) -> Dict[str, Any]:
+        reports = [connect.failedViaReport(include_locations=include_locations) for connect in self.connect]
+        by_reason: Dict[str, int] = {}
+        for report in reports:
+            for reason, count in report["by_reason"].items():
+                by_reason[reason] = by_reason.get(reason, 0) + count
+        return {
+            "grid": self.getLongName(),
+            "total": sum(by_reason.values()),
+            "by_reason": by_reason,
+            "connects": reports,
+        }
+
 
 @dataclass
 class CoreGrid(Grid):
@@ -272,4 +304,3 @@ class ExistingGrid(Grid):
         data = super().report()
         data.update({"existing_shape_count": len(self.shapes)})
         return data
-

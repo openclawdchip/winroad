@@ -54,6 +54,12 @@
   - 第四轮新增可落盘报告：`FastRouteCore.createCongestionReport()`、`writeCongestionMap()`、`writeResourceReport()`、`saveCongestion()`、`GlobalRouter.createCongestionReport()`、`writeCongestionReport()`、`createResourceSnapshot()`、`writeResourceReport()`；报告使用 JSON 安全的 edge/tile records，不依赖 OpenDB。
   - 第四轮新增 route/core 状态管理：`GlobalRouter.setRoute()`、`getRoute()`、`clearRoute()`、`clearRoutes()`、`updateFastRouteGridsLayer()`、`toStateDict()`、`loadStateDict()`、`saveState()`、`loadState()`；`FastRouteCore` edge capacity/usage key 规范化为无向 grid edge，正反方向查询一致。
   - report 函数边界：`GlobalRouter.reportNetLayerWirelengths()`、`reportLayerWireLengths()`、`getLastLayerWirelengthReport()`、`reportNetWireLength()`、`createWLReportFile()`
+- 第六轮继续补齐可落地状态逻辑：
+  - guide 批量读写：`GlobalRouter.readGuideFiles()`、`writeGuideFiles()`、`splitGuidesByNet()`，仍只处理 WinRoad 轻量 JSON/guide 文本，不触碰 OpenDB wire。
+  - adjustment 查询删除：`findRegionAdjustments()`、`getRegionAdjustment()`、`removeAdjustments()`，可按 layer、region、layer-only 条件过滤，并同步 `FastRouteCore` adjustment 状态。
+  - resource/congestion JSON schema：`FastRouteCore.getResourceSnapshotSchema()`、`getCongestionReportSchema()`，报告新增 `format`、`version`、`schema`，congestion tile record 新增 `overflow`。
+  - `GlobalRouter` 状态差异与合并：`diffStateDict()`、`diffState()`、`mergeStateDict()`、`mergeState()`，支持 route replace/append/keep、adjustment replace/append/keep 以及 config/resources 合并开关。
+  - Net route metrics：`getNetRouteMetrics()`、`getRouteMetrics()`，统计 segment、wirelength、layer wirelength、via、jumper、bbox、连通性和 pin 数。
 - 已提供基础便利函数：
   - `create_global_router()`
   - `print_groute()`
@@ -93,6 +99,71 @@
 - 第二轮已继续补齐的边界包括：
   - `FastRouteCore` 的 `getDbNetLayerEdgeCost()`、`initEdgesCapacityPerLayer()`、`setNumAdjustments()`、`addAdjustment()`、`saveResourcesBeforeAdjustments()`、`initAuxVar()`、`getCongestionGrid()`、`getCongestionNets()`、`getOriginalResources()`、`getTotalCapacityPerLayer()`、`getTotalUsagePerLayer()`、`getTotalOverflowPerLayer()`、`getMaxHorizontalOverflows()`、`getMaxVerticalOverflows()`、`clearNDRnets()` 等状态与报告入口
   - `GlobalRouter` 的 guide/report/resistance 入口名和增量辅助方法边界
+
+## 第六轮验证命令
+
+```powershell
+python -m py_compile D:\winroad_py\winroad\grt\types.py D:\winroad_py\winroad\grt\guide.py D:\winroad_py\winroad\grt\congestion.py D:\winroad_py\winroad\grt\grid.py D:\winroad_py\winroad\grt\fast_route.py D:\winroad_py\winroad\grt\global_router.py D:\winroad_py\winroad\grt\__init__.py
+@'
+from pathlib import Path
+from winroad.grt import GSegment, GlobalRouter, Net
+
+base = Path("D:/winroad_py")
+r = GlobalRouter()
+r.grid.init((0, 0, 100, 100), 10, 10, 10, True, True, 3)
+r.fastroute().setGridsAndLayers(2, 2, 3)
+r.fastroute().setEdgeCapacity(0, 0, 1, 0, 1, 1)
+
+n1 = "n1"
+n2 = "n2"
+r.db_net_map[n1] = Net(n1)
+r.setRoute(n1, [GSegment(0, 0, 1, 2, 0, 1), GSegment(2, 0, 1, 2, 0, 3)])
+r.setRoute(n2, [GSegment(0, 1, 2, 1, 1, 2, is_jumper=True)])
+r.updateResources(1, 0, 0, 0, 1, 2, n1)
+
+r.addLayerAdjustment(2, 0.5)
+r.addRegionAdjustment(0, 0, 10, 10, 3, 0.7)
+assert r.getRegionAdjustment(0, 0, 10, 10, 3) == 0.7
+assert len(r.findRegionAdjustments(layer=2)) == 1
+assert r.removeAdjustments(layer=2, layer_only=True) == 1
+
+assert r.getNetRouteMetrics(n1)["via_count"] == 2
+assert r.getRouteMetrics()["net_count"] == 2
+assert r.createCongestionReport()["format"] == "winroad-grt-congestion"
+assert r.createResourceSnapshot()["format"] == "winroad-grt-resource"
+
+json1 = base / ".grt_batch_n1.json"
+json2 = base / ".grt_batch_n2.json"
+split_dir = base / ".grt_split_guides"
+r.writeGuideFiles({str(json1): [n1], str(json2): [n2]})
+r2 = GlobalRouter()
+r2.readGuideFiles([str(json1), str(json2)])
+assert len(r2.getRoute(n1)) == 2
+assert len(r2.getRoute(n2)) == 1
+assert "n1" in r.splitGuidesByNet(str(split_dir))
+
+state1 = r.toStateDict()
+r.setRoute(n1, [GSegment(0, 0, 1, 1, 0, 1)])
+assert "n1" in r.diffStateDict(state1)["routes_changed"]
+r.mergeStateDict(state1, routes="replace", adjustments="replace")
+assert len(r.getRoute(n1)) == 2
+
+for call in (r.fastroute().run, r.globalRoute):
+    try:
+        call()
+    except NotImplementedError:
+        pass
+    else:
+        raise AssertionError("routing algorithms must stay unsupported")
+
+for path in (json1, json2):
+    path.unlink(missing_ok=True)
+for path in split_dir.glob("*"):
+    path.unlink()
+split_dir.rmdir()
+print("smoke ok")
+'@ | python -
+```
 
 ## 第四轮验证命令
 

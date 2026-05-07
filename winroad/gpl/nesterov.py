@@ -192,6 +192,9 @@ class GCell:
     def dy(self) -> int:
         return self.uy_ - self.ly_
 
+    def area(self) -> int:
+        return _area((self.lx_, self.ly_, self.ux_, self.uy_))
+
     def dLx(self) -> int:
         return self.dLx_
 
@@ -216,6 +219,13 @@ class GCell:
     def dDy(self) -> int:
         return self.dUy_ - self.dLy_
 
+    def densityArea(self) -> int:
+        return _area((self.dLx_, self.dLy_, self.dUx_, self.dUy_))
+
+    def setLocation(self, lx: int, ly: int) -> None:
+        dx, dy = self.dx(), self.dy()
+        self.lx_, self.ly_, self.ux_, self.uy_ = lx, ly, lx + dx, ly + dy
+
     def setCenterLocation(self, cx: int, cy: int) -> None:
         dx, dy = self.dx(), self.dy()
         self.lx_, self.ly_, self.ux_, self.uy_ = cx - dx // 2, cy - dy // 2, cx - dx // 2 + dx, cy - dy // 2 + dy
@@ -223,6 +233,7 @@ class GCell:
     def setSize(self, dx: int, dy: int, change: GCellChange = GCellChange.kNone) -> None:
         cx, cy = self.cx(), self.cy()
         self.lx_, self.ly_, self.ux_, self.uy_ = cx - dx // 2, cy - dy // 2, cx - dx // 2 + dx, cy - dy // 2 + dy
+        self.setDensitySize(dx, dy)
         self.change_ = change
 
     def setAreaChangeType(self, change: GCellChange) -> None:
@@ -233,6 +244,9 @@ class GCell:
 
     def setAllLocations(self, lx: int, ly: int, ux: int, uy: int) -> None:
         self.lx_, self.ly_, self.ux_, self.uy_ = lx, ly, ux, uy
+
+    def setDensityBox(self, dLx: int, dLy: int, dUx: int, dUy: int) -> None:
+        self.dLx_, self.dLy_, self.dUx_, self.dUy_ = dLx, dLy, dUx, dUy
 
     def setDensityLocation(self, dLx: int, dLy: int) -> None:
         dx, dy = self.dDx() or self.dx(), self.dDy() or self.dy()
@@ -675,6 +689,32 @@ class Bin:
     def getFillerArea(self) -> int:
         return self.fillerArea_
 
+    def getPlaceArea(self) -> int:
+        return self.instPlacedArea_ + self.fillerArea_
+
+    def getAvailableArea(self) -> int:
+        return max(0, self.getBinArea() - self.nonPlaceArea_)
+
+    def getOverflowArea(self) -> int:
+        allowed = int(round(self.getBinArea() * self.targetDensity_))
+        return max(0, self.getPlaceArea() + self.nonPlaceArea_ - allowed)
+
+    def getUtilization(self) -> float:
+        return self.getPlaceArea() / max(1, self.getBinArea())
+
+    def resetAreas(self) -> None:
+        self.nonPlaceArea_ = 0
+        self.instPlacedArea_ = 0
+        self.instPlacedAreaUnscaled_ = 0
+        self.nonPlaceAreaUnscaled_ = 0
+        self.fillerArea_ = 0
+        self.density_ = 0.0
+
+    def resetElectro(self) -> None:
+        self.electroPhi_ = 0.0
+        self.electroFieldX_ = 0.0
+        self.electroFieldY_ = 0.0
+
 
 @dataclass
 class BinGrid:
@@ -862,6 +902,46 @@ class BinGrid:
                     overlap = self._overlap_area(inst_rect, (bin_obj.lx(), bin_obj.ly(), bin_obj.ux(), bin_obj.uy()))
                     bin_obj.addNonPlaceArea(overlap)
                     bin_obj.addNonPlaceAreaUnscaled(overlap)
+
+    def resetBinAreas(self) -> None:
+        for bin_obj in self.bins_:
+            bin_obj.resetAreas()
+        self.sumOverflowArea_ = 0
+        self.sumOverflowAreaUnscaled_ = 0
+
+    def resetElectro(self) -> None:
+        for bin_obj in self.bins_:
+            bin_obj.resetElectro()
+
+    def getAverageDensity(self) -> float:
+        if not self.bins_:
+            return 0.0
+        return sum(bin_obj.getDensity() for bin_obj in self.bins_) / len(self.bins_)
+
+    def getMaxDensity(self) -> float:
+        return max((bin_obj.getDensity() for bin_obj in self.bins_), default=0.0)
+
+    def getTotalPlaceArea(self) -> int:
+        return sum(bin_obj.getPlaceArea() for bin_obj in self.bins_)
+
+    def getTotalNonPlaceArea(self) -> int:
+        return sum(bin_obj.getNonPlaceArea() for bin_obj in self.bins_)
+
+    def reportStatus(self) -> Dict[str, Any]:
+        return {
+            "bin_count": len(self.bins_),
+            "bin_count_x": self.binCntX_,
+            "bin_count_y": self.binCntY_,
+            "bin_size_x": self.binSizeX_,
+            "bin_size_y": self.binSizeY_,
+            "target_density": self.targetDensity_,
+            "average_density": self.getAverageDensity(),
+            "max_density": self.getMaxDensity(),
+            "overflow_area": self.sumOverflowArea_,
+            "overflow_area_unscaled": self.sumOverflowAreaUnscaled_,
+            "place_area": self.getTotalPlaceArea(),
+            "non_place_area": self.getTotalNonPlaceArea(),
+        }
 
 
 class NesterovBaseCommon:
@@ -1068,6 +1148,8 @@ class NesterovBaseCommon:
             "new_gcells": self.new_gcells_count_,
             "deleted_gcells": self.deleted_gcells_count_,
             "hpwl": self.getHpwl(),
+            "timing_weighted_nets": sum(1 for gnet in self.gNets_ if gnet.getTimingWeight() != 1.0),
+            "custom_weighted_nets": sum(1 for gnet in self.gNets_ if gnet.getCustomWeight() != 1.0),
         }
 
     def getNumThreads(self) -> int:
@@ -1239,8 +1321,8 @@ class NesterovBase:
         self.movableArea_ = area
 
     def updateAreas(self) -> None:
-        self.movableArea_ = sum(cell.dx() * cell.dy() for cell in self.nb_gcells_ if cell.isInstance())
-        self.totalFillerArea_ = sum(cell.dx() * cell.dy() for cell in self.fillerStor_)
+        self.movableArea_ = sum(cell.area() for cell in self.nb_gcells_ if cell.isInstance())
+        self.totalFillerArea_ = sum(cell.area() for cell in self.fillerStor_)
         self.whiteSpaceArea_ = max(0, self.pb_.getRegionArea() - self.pb_.nonPlaceInstsArea())
 
     def initFillerGCells(self) -> None:
@@ -1356,6 +1438,12 @@ class NesterovBase:
         self.sum_overflow_ = self.bg_.getOverflowArea() / area
         self.sum_overflow_unscaled_ = self.bg_.getOverflowAreaUnscaled() / area
 
+    def refreshState(self) -> None:
+        self.updateAreas()
+        self.updateDensitySize()
+        self.updateGCellDensityCenterLocation()
+        self.refreshDensityMetrics()
+
     def getBinGrid(self) -> BinGrid:
         return self.bg_
 
@@ -1423,6 +1511,27 @@ class NesterovBase:
 
     def getGroup(self) -> Any:
         return self.pb_.getGroup()
+
+    def reportStatus(self) -> Dict[str, Any]:
+        return {
+            "gcells": len(self.nb_gcells_),
+            "fillers": len(self.fillerStor_),
+            "target_density": self.targetDensity_,
+            "uniform_target_density": self.uniformTargetDensity_,
+            "sum_overflow": self.sum_overflow_,
+            "sum_overflow_unscaled": self.sum_overflow_unscaled_,
+            "movable_area": self.movableArea_,
+            "filler_area": self.totalFillerArea_,
+            "white_space_area": self.whiteSpaceArea_,
+            "density_penalty": self.densityPenalty_,
+            "base_wire_length_coef": self.baseWireLengthCoef_,
+            "wire_length_grad_sum": self.wireLengthGradSum_,
+            "density_grad_sum": self.densityGradSum_,
+            "iter": self.iter_,
+            "converged": self.isConverged_,
+            "diverged": self.isDiverged_,
+            "bin_grid": self.bg_.reportStatus(),
+        }
 
 
 class NesterovPlace:
@@ -1633,6 +1742,7 @@ class NesterovPlace:
             "diverge_code": self.divergeCode_,
             "diverge_message": self.divergeMsg_,
             "base_common": self.nbc_.reportStatus() if self.nbc_ is not None else {},
+            "bases": [nb.reportStatus() for nb in self.nbVec_],
         }
         return self.last_report_
 

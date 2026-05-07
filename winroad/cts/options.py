@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import dataclass, field, fields
 from typing import Any, Dict, Iterable, List, Optional
 
 from .types import MasterType, NdrStrategy
@@ -571,3 +572,66 @@ class CtsOptions:
         if master in self.dummy_count:
             return MasterType.DUMMY
         return MasterType.TREE
+
+    def toProfile(self) -> Dict[str, Any]:
+        profile: Dict[str, Any] = {}
+        skip_fields = {"logger", "stt_builder", "observer", "clock_nets_objs", "skip_nets"}
+        for item in fields(self):
+            if item.name in skip_fields:
+                continue
+            value = getattr(self, item.name)
+            if isinstance(value, NdrStrategy):
+                profile[item.name] = value.value
+            elif item.name in {"buffer_count", "dummy_count"}:
+                profile[item.name] = {self._profileKey(key): count for key, count in value.items()}
+            else:
+                profile[item.name] = value
+        profile["clock_nets_objs"] = [self._profileKey(net) for net in self.clock_nets_objs]
+        profile["skip_nets"] = [self._profileKey(net) for net in self.skip_nets]
+        return profile
+
+    def loadProfile(self, profile_or_path: Any) -> None:
+        if isinstance(profile_or_path, str):
+            with open(profile_or_path, "r", encoding="utf-8") as stream:
+                profile_or_path = json.load(stream)
+        for key, value in dict(profile_or_path).items():
+            if not hasattr(self, key) or key in {"logger", "stt_builder", "observer"}:
+                continue
+            if key == "ndr_strategy":
+                self.ndr_strategy = value if isinstance(value, NdrStrategy) else NdrStrategy(value)
+            elif key in {"buffer_count", "dummy_count"}:
+                setattr(self, key, dict(value))
+            elif key in {"clock_nets_objs", "skip_nets"}:
+                setattr(self, key, list(value))
+            else:
+                setattr(self, key, value)
+
+    def dumpProfile(self, path: str) -> Dict[str, Any]:
+        profile = self.toProfile()
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(profile, stream, indent=2, sort_keys=True)
+        return profile
+
+    @classmethod
+    def fromProfile(cls, profile_or_path: Any) -> "CtsOptions":
+        options = cls()
+        options.loadProfile(profile_or_path)
+        return options
+
+    @classmethod
+    def readProfile(cls, path: str) -> "CtsOptions":
+        return cls.fromProfile(path)
+
+    def reportProfile(self) -> Dict[str, Any]:
+        profile = self.toProfile()
+        profile["summary"] = {
+            "num_buffers": len(self.buffer_list),
+            "num_clock_net_objs": len(self.clock_nets_objs),
+            "num_skip_nets": len(self.skip_nets),
+            "num_buffer_count_entries": len(self.buffer_count),
+            "num_dummy_count_entries": len(self.dummy_count),
+        }
+        return profile
+
+    def _profileKey(self, value: Any) -> str:
+        return str(getattr(value, "name", value))

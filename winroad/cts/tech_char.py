@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import json
+from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 from .options import CtsOptions
@@ -327,6 +328,74 @@ class TechChar:
     def initCharacterization(self) -> None:
         self.characterization_initialized = True
 
+    def exportLut(self, path: Optional[str] = None) -> Dict[str, Any]:
+        data = {
+            "delay_lut": self._encodeLut(self.delay_lut),
+            "slew_lut": self._encodeLut(self.slew_lut),
+            "key_to_wire_segments": self._encodeLut(self.key_to_wire_segments),
+            "wire_segments": [segment.toDict() for segment in self.wire_segments],
+            "bounds": self.reportCharacterizationBounds(),
+            "length_unit": self.length_unit,
+            "length_unit_ratio": self.length_unit_ratio,
+            "actual_min_input_cap": self.actual_min_input_cap,
+            "res_per_dbu": self.res_per_dbu,
+            "cap_per_dbu": self.cap_per_dbu,
+            "char_slew_step_size": self.char_slew_step_size,
+            "char_cap_step_size": self.char_cap_step_size,
+            "master_names": list(self.master_names),
+            "wirelengths_to_test": list(self.wirelengths_to_test),
+            "loads_to_test": list(self.loads_to_test),
+            "slews_to_test": list(self.slews_to_test),
+            "result_data": [asdict(result) for result in self.result_data],
+            "solution_data": [asdict(solution) for solution in self.solution_data],
+            "characterization_initialized": self.characterization_initialized,
+        }
+        if path is not None:
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(data, stream, indent=2, sort_keys=True)
+        return data
+
+    def importLut(self, data_or_path: Any, clear: bool = True) -> None:
+        if isinstance(data_or_path, str):
+            with open(data_or_path, "r", encoding="utf-8") as stream:
+                data_or_path = json.load(stream)
+        data = dict(data_or_path)
+        if clear:
+            self.reset()
+        self.delay_lut.update(self._decodeLut(data.get("delay_lut", {})))
+        self.slew_lut.update(self._decodeLut(data.get("slew_lut", {})))
+        self.key_to_wire_segments.update(self._decodeLut(data.get("key_to_wire_segments", {})))
+        self.wire_segments.extend(WireSegment.fromDict(item) for item in data.get("wire_segments", []))
+        bounds = data.get("bounds", {})
+        self.min_segment_length = int(bounds.get("min_segment_length", self.min_segment_length))
+        self.max_segment_length = int(bounds.get("max_segment_length", self.max_segment_length))
+        self.min_capacitance = int(bounds.get("min_capacitance", self.min_capacitance))
+        self.max_capacitance = int(bounds.get("max_capacitance", self.max_capacitance))
+        self.min_slew = int(bounds.get("min_slew", self.min_slew))
+        self.max_slew = int(bounds.get("max_slew", self.max_slew))
+        self.length_unit = int(data.get("length_unit", self.length_unit))
+        self.length_unit_ratio = int(data.get("length_unit_ratio", self.length_unit_ratio))
+        self.actual_min_input_cap = int(data.get("actual_min_input_cap", self.actual_min_input_cap))
+        self.res_per_dbu = float(data.get("res_per_dbu", self.res_per_dbu))
+        self.cap_per_dbu = float(data.get("cap_per_dbu", self.cap_per_dbu))
+        self.char_slew_step_size = float(data.get("char_slew_step_size", self.char_slew_step_size))
+        self.char_cap_step_size = float(data.get("char_cap_step_size", self.char_cap_step_size))
+        self.master_names = list(data.get("master_names", self.master_names))
+        self.wirelengths_to_test = list(data.get("wirelengths_to_test", self.wirelengths_to_test))
+        self.loads_to_test = list(data.get("loads_to_test", self.loads_to_test))
+        self.slews_to_test = list(data.get("slews_to_test", self.slews_to_test))
+        self.result_data.extend(TechCharResultData(**item) for item in data.get("result_data", []))
+        self.solution_data.extend(TechCharSolutionData(**item) for item in data.get("solution_data", []))
+        self.characterization_initialized = bool(
+            data.get("characterization_initialized", self.characterization_initialized)
+        )
+
+    def dumpLut(self, path: str) -> Dict[str, Any]:
+        return self.exportLut(path)
+
+    def loadLut(self, path: str) -> None:
+        self.importLut(path)
+
     def finalizeRootSinkBuffers(self) -> None:
         _not_translated("TechChar::finalizeRootSinkBuffers")
 
@@ -415,6 +484,21 @@ class TechChar:
             else:
                 setattr(self, attr, max(current, value))
 
+    def _encodeLut(self, lut: Dict[Tuple[int, int, int], List[int]]) -> Dict[str, List[int]]:
+        return {self._keyToString(key): list(values) for key, values in lut.items()}
+
+    def _decodeLut(self, lut: Dict[str, List[int]]) -> Dict[Tuple[int, int, int], List[int]]:
+        return {self._stringToKey(key): list(values) for key, values in lut.items()}
+
+    def _keyToString(self, key: Tuple[int, int, int]) -> str:
+        return ",".join(str(part) for part in key)
+
+    def _stringToKey(self, key: str) -> Tuple[int, int, int]:
+        parts = [int(part) for part in key.split(",")]
+        if len(parts) != 3:
+            raise ValueError(f"无效 TechChar LUT key: {key}")
+        return (parts[0], parts[1], parts[2])
+
 
 @dataclass
 class WireSegment:
@@ -492,3 +576,42 @@ class WireSegment:
 
     def getBufferMaster(self, idx: int) -> str:
         return self.buffer_masters[idx]
+
+    def toDict(self) -> Dict[str, Any]:
+        return {
+            "length": self.length,
+            "power": self.power,
+            "segment_delay": self.segment_delay,
+            "input_cap": self.input_cap,
+            "input_slew": self.input_slew,
+            "load": self.load,
+            "output_slew": self.output_slew,
+            "cap": self.cap,
+            "res": self.res,
+            "delay": self.delay,
+            "slew": self.slew,
+            "buffer_locations": list(self.buffer_locations),
+            "buffer_masters": list(self.buffer_masters),
+            "wl2_first_buffer": self.wl2_first_buffer,
+            "last_wl": self.last_wl,
+        }
+
+    @classmethod
+    def fromDict(cls, data: Dict[str, Any]) -> "WireSegment":
+        return cls(
+            length=float(data.get("length", 0.0)),
+            power=float(data.get("power", 0.0)),
+            segment_delay=int(data.get("segment_delay", 0)),
+            input_cap=int(data.get("input_cap", 0)),
+            input_slew=int(data.get("input_slew", 0)),
+            load=int(data.get("load", 0)),
+            output_slew=int(data.get("output_slew", 0)),
+            cap=float(data.get("cap", 0.0)),
+            res=float(data.get("res", 0.0)),
+            delay=float(data.get("delay", 0.0)),
+            slew=float(data.get("slew", 0.0)),
+            buffer_locations=list(data.get("buffer_locations", [])),
+            buffer_masters=list(data.get("buffer_masters", [])),
+            wl2_first_buffer=int(data.get("wl2_first_buffer", 0)),
+            last_wl=int(data.get("last_wl", 0)),
+        )

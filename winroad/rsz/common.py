@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, is_dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -28,6 +28,32 @@ def _name_of(obj: Any) -> str:
     """提取对象名，模拟 C++ 日志里常见的 network/db name 查询。"""
 
     return str(getattr(obj, "name", obj))
+
+def _json_value(obj: Any) -> Any:
+    """把 rsz 状态报告压成 JSON-safe 值。
+
+    rsz 当前保存的 pin/cell/net 往往还是外部 STA/DB 对象；报告面只承诺状态
+    可导出，不承诺序列化这些对象本体，所以对象统一退化为可读名称。
+    """
+
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, Enum):
+        return obj.value
+    if isinstance(obj, tuple):
+        return [_json_value(item) for item in obj]
+    if isinstance(obj, list):
+        return [_json_value(item) for item in obj]
+    if isinstance(obj, set):
+        return sorted(_json_value(item) for item in obj)
+    if isinstance(obj, dict):
+        return {str(_json_value(key)): _json_value(value) for key, value in obj.items()}
+    as_dict = getattr(obj, "as_dict", None)
+    if callable(as_dict):
+        return _json_value(as_dict())
+    if is_dataclass(obj):
+        return _json_value(obj.__dict__)
+    return _name_of(obj)
 
 def _not_translated(name: str) -> None:
     """尚未从 OpenROAD C++ 翻译的真实算法边界。"""
@@ -169,6 +195,18 @@ class RepairDesignLimits:
     corner: Any = None
     buffer_cells: List[Any] = field(default_factory=list)
 
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "max_wire_length": self.max_wire_length,
+            "max_slew": self.max_slew,
+            "max_cap": self.max_cap,
+            "max_fanout": self.max_fanout,
+            "slew_margin": self.slew_margin,
+            "cap_margin": self.cap_margin,
+            "corner": _json_value(self.corner),
+            "buffer_cells": _json_value(self.buffer_cells),
+        }
+
 @dataclass
 class RepairDesignViolationCounters:
     """RepairDesign 的 long wire / max transition / cap / fanout 计数。"""
@@ -235,7 +273,7 @@ class RepairHoldConfig:
 
     def as_dict(self) -> Dict[str, Any]:
         return {
-            "buffer_cell": self.buffer_cell,
+            "buffer_cell": _json_value(self.buffer_cell),
             "max_passes": self.max_passes,
             "max_repairs_per_pass": self.max_repairs_per_pass,
             "allow_setup_violations": self.allow_setup_violations,
@@ -257,7 +295,7 @@ class RecoverPowerConfig:
             "recover_power_percent": self.recover_power_percent,
             "match_cell_footprint": self.match_cell_footprint,
             "verbose": self.verbose,
-            "scene": self.scene,
+            "scene": _json_value(self.scene),
             "setup_slack_margin": self.setup_slack_margin,
         }
 

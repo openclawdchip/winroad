@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from math import inf
 from typing import Any, Dict, List, Optional, Sequence, Set
 
-from .common import MoveStateData, MoveStateType, PinInfo, RiseFallArray, _not_translated, _obj_key
+from .common import MoveStateData, MoveStateType, PinInfo, RiseFallArray, _json_value, _not_translated, _obj_key
 
 
 class BaseMove:
@@ -362,11 +363,50 @@ class MoveTracker:
             summary[move.move_type]["pending"] += 1
         return summary
 
-    def report(self) -> Dict[str, Any]:
+    def _move_as_dict(self, move: MoveStateData) -> Dict[str, Any]:
         return {
-            "current_endpoint": self.current_endpoint_,
-            "critical_pins": list(self.critical_pins_),
-            "violators": list(self.violators_),
+            "pin": _json_value(move.pin),
+            "move_type": move.move_type,
+            "state": move.state.name.lower(),
+            "order": move.order,
+        }
+
+    def _pin_info_as_dict(self, info: PinInfo) -> Dict[str, Any]:
+        return {
+            "endpoint": _json_value(info.endpoint),
+            "gate_type": info.gate_type,
+            "load_delay": info.load_delay,
+            "intrinsic_delay": info.intrinsic_delay,
+            "pin_slack": info.pin_slack,
+            "endpoint_slack": info.endpoint_slack,
+        }
+
+    def as_dict(self, include_moves: bool = True) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
+            "current_endpoint": _json_value(self.current_endpoint_),
+            "critical_pins": _json_value(self.critical_pins_),
+            "violators": _json_value(self.violators_),
+            "pin_infos": {str(_json_value(key)): self._pin_info_as_dict(info) for key, info in self.pin_infos_.items()},
             "move_summary": self.moveSummary(),
             "move_summary_by_type": self.moveSummaryByType(),
+            "pending_count": len(self.pending_moves_),
+        }
+        if include_moves:
+            data["moves"] = [self._move_as_dict(move) for move in self.moves_]
+            data["pending_moves"] = [self._move_as_dict(move) for move in self.pending_moves_]
+        return data
+
+    def to_json(self, include_moves: bool = True, **json_kwargs: Any) -> str:
+        kwargs = {"sort_keys": True}
+        kwargs.update(json_kwargs)
+        return json.dumps(self.as_dict(include_moves), **kwargs)
+
+    def report(self) -> Dict[str, Any]:
+        return {
+            "current_endpoint": _json_value(self.current_endpoint_),
+            "critical_pins": _json_value(self.critical_pins_),
+            "violators": _json_value(self.violators_),
+            "move_summary": self.moveSummary(),
+            "move_summary_by_type": self.moveSummaryByType(),
+            "moves": [self._move_as_dict(move) for move in self.moves_],
         }

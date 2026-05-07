@@ -207,6 +207,9 @@ class Resizer:
     def configureRepairSetup(self, *args: Any, **kwargs: Any) -> Any:
         return self.repair_setup_.configure(*args, **kwargs)
 
+    def resetRepairSetupConfig(self) -> None:
+        self.repair_setup_.resetConfig()
+
     def reportRepairSetupConfig(self) -> Dict[str, Any]:
         return self.repair_setup_.reportConfig()
 
@@ -228,8 +231,14 @@ class Resizer:
     def configureRepairHold(self, *args: Any, **kwargs: Any) -> Any:
         return self.repair_hold_.configure(*args, **kwargs)
 
+    def resetRepairHoldConfig(self) -> None:
+        self.repair_hold_.resetConfig()
+
     def reportRepairHoldConfig(self) -> Dict[str, Any]:
         return self.repair_hold_.reportConfig()
+
+    def reportRepairHoldStats(self) -> Dict[str, Any]:
+        return self.repair_hold_.statistics()
 
     def recoverPower(self, recover_power_percent: float, match_cell_footprint: bool = False, verbose: bool = False) -> bool:
         return self.recover_power_.recoverPower(recover_power_percent, match_cell_footprint, verbose)
@@ -240,8 +249,14 @@ class Resizer:
     def configureRecoverPower(self, *args: Any, **kwargs: Any) -> Any:
         return self.recover_power_.configure(*args, **kwargs)
 
+    def resetRecoverPowerConfig(self) -> None:
+        self.recover_power_.resetConfig()
+
     def reportRecoverPowerConfig(self) -> Dict[str, Any]:
         return self.recover_power_.reportConfig()
+
+    def reportRecoverPowerStats(self) -> Dict[str, Any]:
+        return self.recover_power_.statistics()
 
     def swapArithModules(self, path_count: int, target: str, slack_margin: float) -> None:
         _not_translated("Resizer::swapArithModules")
@@ -290,6 +305,9 @@ class Resizer:
 
     def configureRepairDesign(self, *args: Any, **kwargs: Any) -> Any:
         return self.repair_design_.configureLimits(*args, **kwargs)
+
+    def resetRepairDesignLimits(self) -> None:
+        self.repair_design_.resetLimits()
 
     def reportRepairDesignLimits(self) -> Dict[str, Any]:
         return self.repair_design_.reportLimits()

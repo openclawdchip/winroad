@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
@@ -138,6 +139,17 @@ class GlobalRouter:
         with open(file_name, "w", encoding="utf-8") as out:
             out.write(routes_to_guide_file(selected_routes, _object_name).toGuideText())
 
+    @staticmethod
+    def _adjustment_to_dict(adjustment: RegionAdjustment) -> Dict[str, Any]:
+        return {
+            "min_x": adjustment.min_x,
+            "min_y": adjustment.min_y,
+            "max_x": adjustment.max_x,
+            "max_y": adjustment.max_y,
+            "layer": adjustment.layer,
+            "adjustment": adjustment.adjustment,
+        }
+
     def getRegionAdjustments(self) -> List[RegionAdjustment]:
         """返回用户配置的 region/layer adjustments。"""
 
@@ -151,6 +163,43 @@ class GlobalRouter:
             for adjustment in self.region_adjustments
             if adjustment.region == (0, 0, 0, 0)
         }
+
+    def findRegionAdjustments(
+        self,
+        *,
+        layer: Optional[int] = None,
+        region: Optional[Rect] = None,
+        include_layer_only: bool = True,
+    ) -> List[RegionAdjustment]:
+        """按 layer/region 查询 adjustment。"""
+
+        matches: List[RegionAdjustment] = []
+        for adjustment in self.region_adjustments:
+            if layer is not None and adjustment.layer != layer:
+                continue
+            if region is not None and adjustment.region != region:
+                continue
+            if not include_layer_only and adjustment.region == (0, 0, 0, 0):
+                continue
+            matches.append(adjustment)
+        return matches
+
+    def getRegionAdjustment(
+        self,
+        min_x: int,
+        min_y: int,
+        max_x: int,
+        max_y: int,
+        layer: int,
+        default: Optional[float] = None,
+    ) -> Optional[float]:
+        """返回指定 region/layer 的 adjustment 值。"""
+
+        region = (min_x, min_y, max_x, max_y)
+        for adjustment in self.region_adjustments:
+            if adjustment.region == region and adjustment.layer == layer:
+                return adjustment.adjustment
+        return default
 
     def clearAdjustments(self) -> None:
         """清空 GlobalRouter/FastRouteCore 中的 capacity adjustments。"""
@@ -178,6 +227,36 @@ class GlobalRouter:
             if not (adjustment.region == target and adjustment.layer == layer)
         ]
         self._syncFastRouteAdjustments()
+
+    def removeAdjustments(
+        self,
+        *,
+        layer: Optional[int] = None,
+        region: Optional[Rect] = None,
+        layer_only: Optional[bool] = None,
+    ) -> int:
+        """按条件删除 adjustments，返回删除数量。"""
+
+        before = len(self.region_adjustments)
+
+        def should_remove(adjustment: RegionAdjustment) -> bool:
+            if layer is not None and adjustment.layer != layer:
+                return False
+            if region is not None and adjustment.region != region:
+                return False
+            if layer_only is True and adjustment.region != (0, 0, 0, 0):
+                return False
+            if layer_only is False and adjustment.region == (0, 0, 0, 0):
+                return False
+            return layer is not None or region is not None or layer_only is not None
+
+        self.region_adjustments = [
+            adjustment for adjustment in self.region_adjustments if not should_remove(adjustment)
+        ]
+        removed = before - len(self.region_adjustments)
+        if removed:
+            self._syncFastRouteAdjustments()
+        return removed
 
     def _syncFastRouteAdjustments(self) -> None:
         """把 GlobalRouter adjustment 列表同步到 FastRouteCore。"""
@@ -354,6 +433,56 @@ class GlobalRouter:
         else:
             raise ValueError("format 必须是 'json'、'guide' 或 'text'")
 
+    def readGuideFiles(self, file_names: Sequence[str], *, clear: bool = False) -> List[str]:
+        """批量读取 guide/segment 文件，返回已读取文件列表。"""
+
+        if clear:
+            self.clearRoutes()
+        loaded: List[str] = []
+        for file_name in file_names:
+            self.readGuides(file_name)
+            loaded.append(file_name)
+        return loaded
+
+    def writeGuideFiles(
+        self,
+        outputs: Dict[str, Optional[Sequence[Any]]],
+        *,
+        format: str = "json",
+    ) -> List[str]:
+        """批量写 guide 文件。
+
+        ``outputs`` 的 key 是文件名，value 是该文件要写出的 nets；value 为
+        ``None`` 时写出所有 routes。
+        """
+
+        written: List[str] = []
+        for file_name, nets in outputs.items():
+            self.writeGuides(file_name, nets, format=format)
+            written.append(file_name)
+        return written
+
+    def splitGuidesByNet(
+        self,
+        directory: str,
+        *,
+        suffix: str = ".guide.json",
+        format: str = "json",
+    ) -> Dict[str, str]:
+        """按 net 拆分写出 guide 文件，返回 net 名到文件名的映射。"""
+
+        import os
+
+        os.makedirs(directory, exist_ok=True)
+        result: Dict[str, str] = {}
+        for db_net in self.routes:
+            net_name = _object_name(db_net)
+            safe_name = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in net_name)
+            file_name = os.path.join(directory, safe_name + suffix)
+            self.writeGuides(file_name, [db_net], format=format)
+            result[net_name] = file_name
+        return result
+
     def loadGuidesFromDB(self) -> None:
         """从 block.guides 恢复 guide，不直接访问 OpenDB。"""
 
@@ -519,6 +648,56 @@ class GlobalRouter:
         if not lengths:
             return []
         return [lengths.get(layer, 0) for layer in range(max(lengths) + 1)]
+
+    def getNetRouteMetrics(self, db_net: Any) -> Dict[str, Any]:
+        """返回单 net 当前 route 的可落地指标。"""
+
+        route = self.routes.get(db_net, [])
+        layer_lengths = self.routeLayerLengths(db_net)
+        bbox: Optional[Rect] = None
+        points: List[Tuple[int, int]] = []
+        via_count = 0
+        jumper_count = 0
+        three_d_count = 0
+        for segment in route:
+            points.extend([(segment.init_x, segment.init_y), (segment.final_x, segment.final_y)])
+            if segment.isVia():
+                via_count += abs(segment.final_layer - segment.init_layer) or 1
+            if segment.isJumper():
+                jumper_count += 1
+            if segment.is3DRoute():
+                three_d_count += 1
+        if points:
+            xs = [point[0] for point in points]
+            ys = [point[1] for point in points]
+            bbox = (min(xs), min(ys), max(xs), max(ys))
+        total_wirelength = sum(layer_lengths)
+        return {
+            "net": _object_name(db_net),
+            "segment_count": len(route),
+            "wirelength": total_wirelength,
+            "layer_wirelengths": layer_lengths,
+            "via_count": via_count,
+            "jumper_count": jumper_count,
+            "three_d_segment_count": three_d_count,
+            "bbox": list(bbox) if bbox is not None else None,
+            "connected": self.isConnected(db_net) if route else False,
+            "pin_count": self.db_net_map.get(db_net).getNumPins() if db_net in self.db_net_map else 0,
+        }
+
+    def getRouteMetrics(self) -> Dict[str, Any]:
+        """返回所有 nets 的 route metrics 摘要。"""
+
+        nets = [self.getNetRouteMetrics(db_net) for db_net in self.routes]
+        return {
+            "format": "winroad-grt-route-metrics",
+            "version": 1,
+            "net_count": len(nets),
+            "total_wirelength": sum(item["wirelength"] for item in nets),
+            "total_segments": sum(item["segment_count"] for item in nets),
+            "total_vias": sum(item["via_count"] for item in nets),
+            "nets": nets,
+        }
 
     def startIncremental(self) -> None:
         self.is_incremental = True
@@ -1137,6 +1316,143 @@ class GlobalRouter:
         for rec in fr_state.get("edge_usage", []):
             key = self.fastroute_core._edge_key(rec["x1"], rec["y1"], rec["x2"], rec["y2"], rec["layer"])
             self.fastroute_core.edge_usage[key] = int(rec["value"])
+
+    @staticmethod
+    def _state_route_map(state: Dict[str, Any], key: str = "routes") -> Dict[str, List[Dict[str, Any]]]:
+        routes: Dict[str, List[Dict[str, Any]]] = {}
+        for guide in GuideFile.fromDict(state.get(key, {})).guides:
+            routes[guide.net] = [segment.toDict() for segment in guide.segments]
+        return routes
+
+    @staticmethod
+    def _state_adjustment_map(state: Dict[str, Any]) -> Dict[Tuple[int, int, int, int, int], float]:
+        result: Dict[Tuple[int, int, int, int, int], float] = {}
+        for item in state.get("adjustments", []):
+            key = (
+                int(item.get("min_x", 0)),
+                int(item.get("min_y", 0)),
+                int(item.get("max_x", 0)),
+                int(item.get("max_y", 0)),
+                int(item.get("layer", 0)),
+            )
+            result[key] = float(item.get("adjustment", 0.0))
+        return result
+
+    def diffStateDict(self, other_state: Dict[str, Any]) -> Dict[str, Any]:
+        """比较当前状态和另一个 state dict，返回高层差异。"""
+
+        current = self.toStateDict()
+        current_routes = self._state_route_map(current)
+        other_routes = self._state_route_map(other_state)
+        current_route_names = set(current_routes)
+        other_route_names = set(other_routes)
+        changed_routes = sorted(
+            name
+            for name in current_route_names & other_route_names
+            if current_routes[name] != other_routes[name]
+        )
+
+        current_adjustments = self._state_adjustment_map(current)
+        other_adjustments = self._state_adjustment_map(other_state)
+        adjustment_keys = set(current_adjustments) | set(other_adjustments)
+        changed_adjustments = [
+            {
+                "min_x": key[0],
+                "min_y": key[1],
+                "max_x": key[2],
+                "max_y": key[3],
+                "layer": key[4],
+                "current": current_adjustments.get(key),
+                "other": other_adjustments.get(key),
+            }
+            for key in sorted(adjustment_keys)
+            if current_adjustments.get(key) != other_adjustments.get(key)
+        ]
+
+        config_keys = set(current.get("config", {})) | set(other_state.get("config", {}))
+        changed_config = {
+            key: {
+                "current": current.get("config", {}).get(key),
+                "other": other_state.get("config", {}).get(key),
+            }
+            for key in sorted(config_keys)
+            if current.get("config", {}).get(key) != other_state.get("config", {}).get(key)
+        }
+
+        return {
+            "format": "winroad-grt-state-diff",
+            "version": 1,
+            "routes_added": sorted(current_route_names - other_route_names),
+            "routes_removed": sorted(other_route_names - current_route_names),
+            "routes_changed": changed_routes,
+            "adjustments_changed": changed_adjustments,
+            "config_changed": changed_config,
+            "grid_changed": current.get("grid") != other_state.get("grid"),
+            "fastroute_resource_changed": current.get("fastroute", {}).get("edge_capacities")
+            != other_state.get("fastroute", {}).get("edge_capacities")
+            or current.get("fastroute", {}).get("edge_usage")
+            != other_state.get("fastroute", {}).get("edge_usage"),
+        }
+
+    def diffState(self, file_name: str) -> Dict[str, Any]:
+        """比较当前状态和磁盘 state JSON。"""
+
+        with open(file_name, "r", encoding="utf-8") as src:
+            return self.diffStateDict(json.load(src))
+
+    def mergeStateDict(
+        self,
+        state: Dict[str, Any],
+        *,
+        routes: str = "replace",
+        config: bool = True,
+        resources: bool = True,
+        adjustments: str = "replace",
+    ) -> None:
+        """把另一个 state 合并到当前 GlobalRouter。
+
+        ``routes`` 支持 ``replace``/``append``/``keep``；``adjustments`` 支持
+        ``replace``/``append``/``keep``。
+        """
+
+        if routes not in {"replace", "append", "keep"}:
+            raise ValueError("routes 必须是 'replace'、'append' 或 'keep'")
+        if adjustments not in {"replace", "append", "keep"}:
+            raise ValueError("adjustments 必须是 'replace'、'append' 或 'keep'")
+
+        merged = deepcopy(self.toStateDict())
+        if config:
+            merged["config"].update(state.get("config", {}))
+            merged["grid"] = deepcopy(state.get("grid", merged.get("grid", {})))
+            merged["grid_origin"] = deepcopy(state.get("grid_origin", merged.get("grid_origin", [0, 0])))
+            merged["routing_layers"] = deepcopy(state.get("routing_layers", merged.get("routing_layers", {})))
+        if resources:
+            merged["fastroute"].update(state.get("fastroute", {}))
+
+        if routes == "replace":
+            merged["routes"] = deepcopy(state.get("routes", merged.get("routes", {})))
+            merged["partial_routes"] = deepcopy(state.get("partial_routes", merged.get("partial_routes", {})))
+        elif routes == "append":
+            route_map = self._state_route_map(merged)
+            for name, segments in self._state_route_map(state).items():
+                route_map.setdefault(name, []).extend(segments)
+            merged["routes"] = {
+                "format": "winroad-grt-routes",
+                "version": 1,
+                "routes": [{"net": name, "segments": segments} for name, segments in route_map.items()],
+            }
+        if adjustments == "replace":
+            merged["adjustments"] = deepcopy(state.get("adjustments", merged.get("adjustments", [])))
+        elif adjustments == "append":
+            merged["adjustments"] = list(merged.get("adjustments", [])) + list(state.get("adjustments", []))
+
+        self.loadStateDict(merged)
+
+    def mergeState(self, file_name: str, **kwargs: Any) -> None:
+        """从磁盘 state JSON 合并状态。"""
+
+        with open(file_name, "r", encoding="utf-8") as src:
+            self.mergeStateDict(json.load(src), **kwargs)
 
     def saveState(self, file_name: str) -> None:
         """把当前 grt 状态写成 JSON。"""

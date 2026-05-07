@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
@@ -89,16 +90,36 @@ class TritonCTS:
     def report(self) -> Dict[str, Any]:
         return {
             "metrics": self.reportCtsMetrics(),
-            "options": {
-                "clock_nets": self.options.getClockNets(),
-                "buffer_list": self.options.getBufferList(),
-                "root_buffer": self.options.getRootBuffer(),
-                "sink_buffer": self.options.getSinkBuffer(),
-                "ndr_strategy": self.options.getApplyNdrName(),
-            },
-            "clock_roots": list(self.clock_roots),
+            "options": self.options.toProfile(),
+            "clock_roots": [self._objectName(root) for root in self.clock_roots],
             "builders": [self.reportClockNetwork(builder.getClock()) for builder in self.builders],
         }
+
+    def snapshotState(self, include_lut: bool = False) -> Dict[str, Any]:
+        snapshot = {
+            "metrics": self.reportCtsMetrics(),
+            "options": self.options.toProfile(),
+            "tech_char": self.tech_char.exportLut() if include_lut else self.tech_char.report(),
+            "clock_roots": [self._objectName(root) for root in self.clock_roots],
+            "root_buffers": list(self.root_buffers),
+            "sink_buffers": list(self.sink_buffers),
+            "ndr_strategy": self.ndr_strategy.value,
+            "db_written_builders": [self._builderName(builder) for builder in self.db_written_builders],
+            "ndr_applied_builders": [self._builderName(builder) for builder in self.ndr_applied_builders],
+            "sta_clock_nets": [self._objectName(net) for net in self.sta_clock_nets],
+            "visited_clock_nets": [self._objectName(net) for net in self.visited_clock_nets],
+            "builders": [self._builderSnapshot(builder) for builder in self.builders],
+        }
+        return snapshot
+
+    def dumpStateSnapshot(self, path: str, include_lut: bool = False) -> Dict[str, Any]:
+        snapshot = self.snapshotState(include_lut=include_lut)
+        with open(path, "w", encoding="utf-8") as stream:
+            json.dump(snapshot, stream, indent=2, sort_keys=True)
+        return snapshot
+
+    def reportStateSnapshot(self) -> Dict[str, Any]:
+        return self.snapshotState(include_lut=False)
 
     def getParms(self) -> CtsOptions:
         return self.options
@@ -450,13 +471,7 @@ class TritonCTS:
         _not_translated("TritonCTS::printClockNetwork")
 
     def reportClockNetwork(self, clock_net: Clock) -> Dict[str, Any]:
-        return {
-            "name": clock_net.getName(),
-            "sdc_name": clock_net.getSdcName(),
-            "num_sinks": clock_net.getNumSinks(),
-            "num_buffers": len(clock_net.clock_buffers),
-            "num_subnets": len(clock_net.sub_nets),
-        }
+        return clock_net.report()
 
     def setAllClocksPropagated(self) -> None:
         _not_translated("TritonCTS::setAllClocksPropagated")
@@ -489,6 +504,36 @@ class TritonCTS:
         self.num_clk_nets = 0
         self.num_fixed_nets = 0
         self.dummy_load_index = 0
+
+    def _builderSnapshot(self, builder: TreeBuilder) -> Dict[str, Any]:
+        return {
+            "name": self._builderName(builder),
+            "tree_type": builder.getTreeTypeAsString(),
+            "tree_buf_levels": builder.getTreeBufLevels(),
+            "parent": self._builderName(builder.getParent()) if builder.getParent() else None,
+            "num_children": len(builder.getChildren()),
+            "top_buffer_name": builder.getTopBufferName(),
+            "top_input_net": self._objectName(builder.getTopInputNet()),
+            "driving_net": self._objectName(builder.getDrivingNet()),
+            "ave_sink_arrival": builder.getAveSinkArrival(),
+            "n_dummies": builder.getNDummies(),
+            "clock": builder.getClock().toDict(),
+            "legalization": builder.reportLegalizationState(),
+        }
+
+    def _builderName(self, builder: TreeBuilder) -> str:
+        return builder.getClock().getName()
+
+    def _objectName(self, obj: Any) -> Any:
+        if obj is None:
+            return None
+        for attr in ("name", "getName"):
+            value = getattr(obj, attr, None)
+            if callable(value):
+                return value()
+            if value is not None:
+                return value
+        return str(obj)
 
 
 def initTritonCts() -> TritonCTS:

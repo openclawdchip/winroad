@@ -34,6 +34,17 @@ class PDNRenderer:
     def clear(self) -> None:
         self.selected.clear()
 
+    def selectionSnapshot(self) -> List[Dict[str, Any]]:
+        return [{"type": type(item).__name__, "name": _name(item)} for item in self.selected]
+
+    def snapshot(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "block": _name(self.block) if self.block is not None else None,
+            "grids": [grid.getLongName() for grid in self.grids],
+            "selected": self.selectionSnapshot(),
+        }
+
     def report(self) -> Dict[str, Any]:
         return {
             "enabled": self.enabled,
@@ -41,8 +52,8 @@ class PDNRenderer:
             "grids": [grid.getLongName() for grid in self.grids],
             "selected_count": len(self.selected),
             "selected": [_name(item) for item in self.selected],
+            "selected_snapshot": self.selectionSnapshot(),
         }
 
     def redraw(self) -> None:
         _not_implemented("PDNRenderer::redraw")
-

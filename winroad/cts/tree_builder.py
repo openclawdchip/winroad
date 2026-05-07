@@ -196,6 +196,31 @@ class TreeBuilder:
         self.addCandidatePoint(buffer_loc.x, buffer_loc.y - scaling, buffer_loc, candidates)
         return candidates
 
+    def reportLegalizationCandidates(
+        self, buffer_loc: Point, scaling_factor: int, buffer_name: str = ""
+    ) -> Dict[str, Any]:
+        candidates = self.getLegalizationCandidates(buffer_loc, scaling_factor)
+        return {
+            "buffer_name": buffer_name,
+            "requested_location": self._pointReport(buffer_loc),
+            "scaling_factor": scaling_factor,
+            "candidates": [
+                self._candidateReport(candidate, scaling_factor) for candidate in candidates
+            ],
+        }
+
+    def reportCandidateLegalization(
+        self, buffer_loc: Point, buffer_name: str = ""
+    ) -> Dict[str, Any]:
+        scaling_factor = max(1, int(round(max(self.buffer_width, self.buffer_height, 1.0))))
+        report = self.reportLegalizationCandidates(buffer_loc, scaling_factor, buffer_name)
+        report["selected"] = None
+        for candidate in self.getLegalizationCandidates(buffer_loc, scaling_factor):
+            if self.checkLegalityLoc(candidate, scaling_factor):
+                report["selected"] = self._pointReport(candidate)
+                break
+        return report
+
     def addCandidatePoint(
         self, x: float, y: float, point: Point, candidates: List[Point]
     ) -> None:
@@ -244,6 +269,16 @@ class TreeBuilder:
             "buffer_width": self.buffer_width,
             "buffer_height": self.buffer_height,
             "num_sink_insertion_delays": len(self.sink_insertion_delays),
+            "blockages": [self._boxReport(blockage) for blockage in self.blockages],
+            "occupied_locations": [self._pointReport(point) for point in sorted(
+                self.occupied_locations, key=lambda loc: (loc.x, loc.y)
+            )],
+            "sink_insertion_delays": [
+                {"point": self._pointReport(point), "delay": delay}
+                for point, delay in sorted(
+                    self.sink_insertion_delays.items(), key=lambda item: (item[0].x, item[0].y)
+                )
+            ],
         }
 
     def sinkHasInsertionDelay(self, sink: Point) -> bool:
@@ -278,6 +313,26 @@ class TreeBuilder:
             or lhs.y_max < rhs.y_min
             or lhs.y_min > rhs.y_max
         )
+
+    def _candidateReport(self, candidate: Point, scaling_factor: int) -> Dict[str, Any]:
+        blockage = self.findBlockage(candidate, float(scaling_factor))
+        return {
+            "location": self._pointReport(candidate),
+            "legal": self.checkLegalityLoc(candidate, scaling_factor),
+            "occupied": self.isOccupiedLoc(candidate),
+            "blockage": blockage,
+        }
+
+    def _pointReport(self, point: Point) -> Dict[str, float]:
+        return {"x": point.x, "y": point.y}
+
+    def _boxReport(self, box: Box) -> Dict[str, float]:
+        return {
+            "x_min": box.x_min,
+            "y_min": box.y_min,
+            "x_max": box.x_max,
+            "y_max": box.y_max,
+        }
 
     def getTreeType(self) -> TreeType:
         return self.type

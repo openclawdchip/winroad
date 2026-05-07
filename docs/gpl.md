@@ -46,6 +46,7 @@
   - `InitialPlace`
   - 已保留 `doBicgstabPlace()`、`placeInstsInitialPositions()`、`setPlaceInstExtId()`、`updatePinInfo()`、`createSparseMatrix()`、`updateCoordi()` 边界
   - 第三轮补充初始布局状态：place inst ext id、强制居中初始化、pin 坐标刷新、坐标向 DB 回写、solver/debug 状态与 `reportStatus()`
+  - 第六轮补充可复用 sparse matrix / RHS / solution 向量占位容器，`createSparseMatrix()` 现在建立可验证的单位对角占位形状，真实 B2B stamping 与 BiCGSTAB 求解仍在 solver 边界抛错
 
 - Nesterov 对象层
   - `FloatPoint`
@@ -65,6 +66,7 @@
   - 第二轮补充 WA exp sum 读写口、GNet WA 累计量访问口、Bin/Grid 密度范围入口、NesterovBaseCommon changed-gcell/timing-weight 容器、NesterovBase SLP 坐标/梯度向量与 snapshot/revert 状态
   - 第二轮补充 `NesterovPlace::init()`、`initWireLengthCoef()`、`update*SLPCoordi()`、`update*Gradient()`、`updateOverflow()`、`checkConvergence()`、`checkDivergence()`、`updateTiming()`、`updateRoutability()` 等主循环阶段边界
   - 第三轮补充 `NesterovPlace` 的 debug graphics 入口触发、last iter、timing/routability 迭代计数、snapshot 保存标志、snapshot revert 后 DB 回写、`reportStatus()` / `getLastReport()`
+  - 第六轮补充 `GCell` 面积/密度盒纯数据访问与更新、`Bin` utilization/overflow/reset 数据口、`BinGrid.reportStatus()`、`NesterovBase.refreshState()` 与 base 级报告
 
 - Routability / Timing 边界
   - `Tile`
@@ -77,6 +79,7 @@
   - 第二轮补充 TimingBase 的 timing-driven net 容器、原始权重缓存、overflow checkpoint 访问口、`resetTimingDrivenNets()`、`updateGNetWeights()`、`runResizerForTiming()`、`resetFillerCells()` 边界
   - 第三轮补充 RouteBase 的 RC/overflow/utilization 历史、min-RC gcell size 快照/恢复、inflation 总量与拥塞报告 `reportCongestion()`
   - 第三轮补充 TimingBase 的一次性 overflow checkpoint 调度、timing-driven 迭代状态、原始 timing weight restore、`timingDrivenNets()` 与 `reportTimingDriven()`
+  - 第六轮补充 RouteBase congestion snapshot 历史容器与清理/报告入口；TimingBase 补充按 gnet identity 的权重快照、恢复计数和报告字段
 
 - 图形调试接口
   - `AbstractGraphics`
@@ -92,7 +95,7 @@
 
 ## 未实现
 
-- `InitialPlace::createSparseMatrix()` 的 B2B 模型、稀疏矩阵构建、BiCGSTAB 求解；坐标容器与回写入口已建立
+- `InitialPlace::createSparseMatrix()` 的 B2B 模型 stamping 与真实矩阵系数构建、BiCGSTAB 求解；可复用矩阵/向量占位容器、坐标容器与回写入口已建立
 - `NesterovBaseCommon` 的 weighted-average wirelength force / gradient / preconditioner
 - `NesterovBase` 的 FFT 电势场、density gradient、Nesterov 坐标更新、收敛/发散判定；snapshot/revert 与 bin 状态容器已建，真实 min-overflow 选择逻辑未译
 - `NesterovPlace::doNesterovPlace()` 主循环、backtracking、wirelength coefficient 更新、timing/routability 迭代调度
@@ -125,3 +128,23 @@
 - Route/Timing 状态层
   - `RouteBase.initRouteBase()` 可从 Nesterov bin grid 建立 tile grid，`revertGCellSizeToMinRc()` 恢复 target density 并记录 revert 次数，拥塞报告包含历史序列。
   - `TimingBase` 补齐 `Sequence` 类型导入，保持 timing-driven 核心重权重仍显式未实现。
+
+## 第六轮补充
+
+- InitialPlace 状态层
+  - 新增 `sparseMatrix_`、`rhsVecX_/rhsVecY_`、`solutionVecX_/solutionVecY_`、matrix nonzero/reuse 计数。
+  - `createSparseMatrix()` 建立与 place inst 数量一致的可复用单位对角占位矩阵和坐标 RHS，便于 smoke 与后续 B2B stamping 接入。
+  - `doBicgstabPlace()` 仍在 solver 调用边界抛出 `NotImplementedError`，不伪造求解结果。
+
+- PlaceOptions/report 完整性
+  - `PlaceOptions.report()` 覆盖 initial place、Nesterov、timing、routability、bin grid、pad、phi/wirelength/density 系数等主要配置。
+
+- Nesterov 纯数据更新
+  - `GCell` 补充 area/density area/location/density-box 更新口，resize 同步 density size。
+  - `Bin` 补充 place area、available area、overflow area、utilization 与 area/electro reset。
+  - `BinGrid` 补充 total/average/max density 数据、area/electro reset 与 `reportStatus()`。
+  - `NesterovBase` 补充 `refreshState()` 与 base 级 `reportStatus()`，仍不触碰 FFT、gradient、坐标迭代 solver。
+
+- Route/Timing 状态层
+  - `RouteBase` 新增 congestion snapshot 历史容器，统一保存 rc/overflow/utilization/tile/inflation 样本，并在报告中导出。
+  - `TimingBase` 新增按对象 identity 保存的 timing weight 快照、恢复计数、last restored 数量；真实 STA slack 读取和 net reweight 仍显式未实现。

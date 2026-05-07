@@ -23,9 +23,21 @@ class SRoute:
     def getSrouteConnects(self) -> List[Dict[str, Any]]:
         return [dict(connect) for connect in self.connects]
 
+    def summary(self) -> Dict[str, Any]:
+        net_count = 0
+        layer_count = 0
+        for connect in self.connects:
+            net_count += int(any(key in connect for key in ("net", "nets", "power", "ground")))
+            layer_count += int(any(key in connect for key in ("layer", "layers", "metal", "metal_layers")))
+        return {
+            "connect_count": len(self.connects),
+            "connects_with_nets": net_count,
+            "connects_with_layers": layer_count,
+            "parameter_keys": sorted({key for connect in self.connects for key in connect.keys()}),
+        }
+
     def createSrouteWires(self, *args: Any, **kwargs: Any) -> None:
         _not_implemented("SRoute::createSrouteWires")
 
     def report(self) -> Dict[str, Any]:
-        return {"connect_count": len(self.connects), "connects": self.getSrouteConnects()}
-
+        return {**self.summary(), "connects": self.getSrouteConnects()}

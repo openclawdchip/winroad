@@ -124,3 +124,26 @@
 - `cts`：补 Clock/SubNet 遍历、CtsOptions reset/set/get、TechChar LUT、TreeBuilder blockage/legalization、TritonCTS bookkeeping。
 - `pdn`：补 domain/grid/component/connect/via/sroute/renderer 参数校验、lookup、report、状态 reset。
 - `drt`：补 frDesign/frBlock/frNet/frVia/frLayer 关系、FlexGridGraph 容器、RouterConfiguration、DRC/guide report。
+
+## 2026-05-07 第六轮
+
+本轮继续 6 线程并行。`rcx` 进入拆包队列，其余非 ODB package 继续补状态导出、
+序列化、report、配置导入导出等可落地功能。
+
+| 模块 | 线程 id | 昵称 | 状态 | 负责范围 |
+| --- | --- | --- | --- | --- |
+| `gpl` | `019e0295-9e56-77f1-8d94-f50dffe05dde` | Mendel | 已完成 | `winroad/gpl/*`, `docs/gpl.md` |
+| `grt` | `019e0295-9f86-7c40-b917-f0cd156e7144` | Kuhn | 已完成 | `winroad/grt/*`, `docs/grt.md` |
+| `rsz` | `019e0295-9fa2-73c3-a3ec-0d3b2180e1e7` | Mill | 已完成 | `winroad/rsz/*`, `docs/rsz.md` |
+| `cts` | `019e0295-9fc7-7063-b5c7-9a59669cc05b` | James | 已完成 | `winroad/cts/*`, `docs/cts.md` |
+| `pdn` | `019e0295-9fe0-7ae0-a4b5-15a1252327ac` | Gauss | 已完成 | `winroad/pdn/*`, `docs/pdn.md` |
+| `rcx` | `019e0295-9ff9-7411-9339-b7daa5ea3e7a` | Faraday | 已完成 | `winroad/rcx.py`, `winroad/rcx/*`, `docs/rcx.md` |
+
+### 第六轮已完成摘要
+
+- `gpl`：补 InitialPlace 稀疏矩阵/向量占位容器、PlaceOptions 完整报告、Nesterov/GCell/BinGrid 纯数据状态、RouteBase 拥塞历史、TimingBase 权重快照恢复。
+- `grt`：补 guide 批量读写、按 net 拆分、routing metrics、resource/congestion JSON schema、adjustment 条件查询删除、GlobalRouter state diff/merge。
+- `rsz`：补 BufferedNet JSON/report、MoveTracker JSON/report、RepairDesign/Setup/Hold/RecoverPower 配置合并、reset 和 statistics 导出。
+- `cts`：补 Clock network 序列化、CtsOptions profile 导入导出、TechChar LUT 导入导出、TreeBuilder candidate/legalization 报告、TritonCTS 顶层状态快照。
+- `pdn`：补 PdnGen config/state 导入导出、domain/grid/component 汇总、via failure 聚合、renderer selection snapshot、sroute summary。
+- `rcx`：从单文件拆成 package，保留旧 `winroad/rcx.py` 兼容转发，补 config/status/report、corner 校验和 options 状态。

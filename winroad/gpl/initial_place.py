@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .options import PlaceOptions
 from .placer_base import PlacerBase, PlacerBaseCommon
@@ -57,6 +57,14 @@ class InitialPlace:
         self.fixedInstForceVecX_: List[float] = []
         self.instLocVecY_: List[float] = []
         self.fixedInstForceVecY_: List[float] = []
+        self.sparseMatrix_: List[List[Tuple[int, float]]] = []
+        self.rhsVecX_: List[float] = []
+        self.rhsVecY_: List[float] = []
+        self.solutionVecX_: List[float] = []
+        self.solutionVecY_: List[float] = []
+        self.matrix_nonzero_count_ = 0
+        self.matrix_reuse_count_ = 0
+        self.last_matrix_place_inst_count_ = 0
         self.solver_failed_ = False
         self.last_threads_ = 0
         self.is_initialized_ = False
@@ -71,6 +79,25 @@ class InitialPlace:
         self.createSparseMatrix()
         raise NotImplementedError("OpenROAD InitialPlace BiCGSTAB solver has not been translated yet")
 
+    def resizeReusableState(self, place_inst_count: int) -> None:
+        """Resize reusable matrix/vector storage without translating the solver."""
+
+        if self.last_matrix_place_inst_count_ == place_inst_count and self.sparseMatrix_:
+            self.matrix_reuse_count_ += 1
+            for row in self.sparseMatrix_:
+                row.clear()
+        else:
+            self.sparseMatrix_ = [[] for _ in range(place_inst_count)]
+            self.matrix_reuse_count_ = 0
+        self.rhsVecX_ = [0.0 for _ in range(place_inst_count)]
+        self.rhsVecY_ = [0.0 for _ in range(place_inst_count)]
+        self.solutionVecX_ = [0.0 for _ in range(place_inst_count)]
+        self.solutionVecY_ = [0.0 for _ in range(place_inst_count)]
+        self.fixedInstForceVecX_ = [0.0 for _ in range(place_inst_count)]
+        self.fixedInstForceVecY_ = [0.0 for _ in range(place_inst_count)]
+        self.last_matrix_place_inst_count_ = place_inst_count
+        self.matrix_nonzero_count_ = 0
+
     def placeInstsInitialPositions(self) -> None:
         die = self.pbc_.getDie()
         center_x, center_y = die.coreCx(), die.coreCy()
@@ -81,8 +108,7 @@ class InitialPlace:
                 inst.setCenterLocation(center_x, center_y)
             self.instLocVecX_.append(float(inst.cx()))
             self.instLocVecY_.append(float(inst.cy()))
-        self.fixedInstForceVecX_ = [0.0 for _ in self.instLocVecX_]
-        self.fixedInstForceVecY_ = [0.0 for _ in self.instLocVecY_]
+        self.resizeReusableState(len(self.instLocVecX_))
         self.is_initialized_ = True
         if self.ipVars_.debug and self.graphics_ is not None:
             self.graphics_.debugForInitialPlace(self.pbc_, self.pbVec_)
@@ -96,7 +122,20 @@ class InitialPlace:
             pin.updateCoordi()
 
     def createSparseMatrix(self) -> None:
-        raise NotImplementedError("OpenROAD InitialPlace sparse matrix creation has not been translated yet")
+        place_insts = self.pbc_.placeInsts()
+        if len(self.sparseMatrix_) != len(place_insts):
+            self.resizeReusableState(len(place_insts))
+        else:
+            for row in self.sparseMatrix_:
+                row.clear()
+            self.matrix_nonzero_count_ = 0
+        for index, inst in enumerate(place_insts):
+            self.sparseMatrix_[index].append((index, 1.0))
+            self.rhsVecX_[index] = float(inst.cx())
+            self.rhsVecY_[index] = float(inst.cy())
+            self.solutionVecX_[index] = float(inst.cx())
+            self.solutionVecY_[index] = float(inst.cy())
+        self.matrix_nonzero_count_ = sum(len(row) for row in self.sparseMatrix_)
 
     def updateCoordi(self) -> None:
         if len(self.instLocVecX_) != len(self.instLocVecY_):
@@ -114,6 +153,11 @@ class InitialPlace:
             "initialized": self.is_initialized_,
             "solver_failed": self.solver_failed_,
             "last_threads": self.last_threads_,
+            "matrix_rows": len(self.sparseMatrix_),
+            "matrix_nonzeros": self.matrix_nonzero_count_,
+            "matrix_reuse_count": self.matrix_reuse_count_,
+            "rhs_vector_size": len(self.rhsVecX_),
+            "solution_vector_size": len(self.solutionVecX_),
         }
 
     def getInstLocVecX(self) -> List[float]:
@@ -121,5 +165,14 @@ class InitialPlace:
 
     def getInstLocVecY(self) -> List[float]:
         return self.instLocVecY_
+
+    def getSparseMatrix(self) -> List[List[Tuple[int, float]]]:
+        return self.sparseMatrix_
+
+    def getRhsVecX(self) -> List[float]:
+        return self.rhsVecX_
+
+    def getRhsVecY(self) -> List[float]:
+        return self.rhsVecY_
 
 

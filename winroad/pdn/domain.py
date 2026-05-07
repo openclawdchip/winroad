@@ -116,6 +116,22 @@ class VoltageDomain:
             "grids": [grid.report() for grid in self.grids],
         }
 
+    def summary(self) -> Dict[str, Any]:
+        grid_summaries = [grid.summary() for grid in self.grids]
+        failed_by_reason: Dict[str, int] = {}
+        for grid in grid_summaries:
+            for reason, count in grid["failed_vias_by_reason"].items():
+                failed_by_reason[reason] = failed_by_reason.get(reason, 0) + count
+        return {
+            "name": self.name,
+            "grid_count": len(self.grids),
+            "shape_count": sum(grid["shape_count"] for grid in grid_summaries),
+            "via_count": sum(grid["via_count"] for grid in grid_summaries),
+            "failed_via_count": sum(grid["failed_via_count"] for grid in grid_summaries),
+            "failed_vias_by_reason": failed_by_reason,
+            "grids": grid_summaries,
+        }
+
 
 @dataclass
 class PowerCell:
@@ -175,4 +191,3 @@ class GridSwitchedPower:
             "control": _name(self.control),
             "network": self.network.value,
         }
-

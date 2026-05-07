@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from math import inf
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from .common import BufferedNetType, Point, _not_translated
+from .common import BufferedNetType, Point, _json_value, _not_translated
 
 
 @dataclass(frozen=True)
@@ -307,9 +308,9 @@ class BufferedNet:
     def as_dict(self, include_children: bool = True) -> Dict[str, Any]:
         data = {
             "type": self.type_.value,
-            "location": self.location_,
-            "load_pin": self.load_pin_,
-            "buffer_cell": self.buffer_cell_,
+            "location": _json_value(self.location_),
+            "load_pin": _json_value(self.load_pin_),
+            "buffer_cell": _json_value(self.buffer_cell_),
             "layer": self.layer_,
             "ref_layer": self.ref_layer_,
             "cap": self.cap_,
@@ -329,19 +330,48 @@ class BufferedNet:
             data["children"] = [child.as_dict(True) for child in self.children()]
         return data
 
+    def serialize(self, include_children: bool = True) -> Dict[str, Any]:
+        """返回 JSON-safe tree snapshot。
+
+        名称沿用序列化语义，和 ``as_dict`` 保持同一结构，方便调用方既可直接
+        比较 dict，也可进一步 dump 成 JSON。
+        """
+
+        return self.as_dict(include_children)
+
+    def to_json(self, include_children: bool = True, **json_kwargs: Any) -> str:
+        kwargs = {"sort_keys": True}
+        kwargs.update(json_kwargs)
+        return json.dumps(self.serialize(include_children), **kwargs)
+
     def to_string(self, _resizer: Optional["Resizer"] = None) -> str:
         return f"{self.type_.value}@{self.location_}"
 
-    def reportTree(self, resizer: Optional["Resizer"] = None, level: int = 0) -> str:
+    def reportTree(self, resizer: Optional["Resizer"] = None, level: int = 0, include_metrics: bool = True) -> str:
         """返回树形文本，替代 C++ 里直接打 logger 的 report。"""
 
         indent = "  " * level
-        lines = [f"{indent}{self.to_string(resizer)} cap={self.cap_} fanout={self.fanout_}"]
+        if include_metrics:
+            annotation = (
+                f" cap={self.cap_} fanout={self.fanout_}"
+                f" slew={self.max_load_slew_} slack_fs={self.slack_.value_fs}"
+                f" delay_fs={self.delay_.value_fs}"
+            )
+        else:
+            annotation = ""
+        lines = [f"{indent}{self.to_string(resizer)}{annotation}"]
         if self.ref_ is not None:
-            lines.append(self.ref_.reportTree(resizer, level + 1))
+            lines.append(self.ref_.reportTree(resizer, level + 1, include_metrics))
         if self.ref2_ is not None:
-            lines.append(self.ref2_.reportTree(resizer, level + 1))
+            lines.append(self.ref2_.reportTree(resizer, level + 1, include_metrics))
         return "\n".join(lines)
+
+    def report(self) -> Dict[str, Any]:
+        return {
+            "tree": self.serialize(True),
+            "metrics": self.metrics().as_dict(),
+            "text": self.reportTree(),
+        }
 
 def visitTree(func: Callable[..., Any], *args: Any) -> Any:
     """C++ ``visitTree`` 递归 lambda 辅助器的 Python 版本。"""

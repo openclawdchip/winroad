@@ -34,7 +34,8 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
     `loadCount()`、`nodeCount()`、`totalWireLength()`、`depth()`、`metrics()`、
     `fitsEnvelope()`、`reportTree()`。
   - 纯数据树行为补齐：`children()`、`setRef()`、`setRef2()`、`setRefs()`、
-    `childLength()`、`preorder()`、`postorder()`、`as_dict()`；不访问 STA/DB。
+    `childLength()`、`preorder()`、`postorder()`、`as_dict()`、`serialize()`、
+    `to_json()`、`report()`；不访问 STA/DB。
 
 - `LoadRegion`
   - 对应 `RepairDesign.hh` 中 fanout pin 分区区域。
@@ -45,6 +46,7 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
     long-wire/max-slew/max-cap/max-fanout counter、slew RC factor 等成员。
   - 新增 `RepairDesignLimits`、`RepairDesignViolationCounters`，用于记录
     long wire / max slew / max cap / max fanout 修复边界参数和统计。
+  - `configureLimits()` 采用合并式更新，`resetLimits()` 回到默认限制。
   - `configureLimits()`、`limits()`、`recordRepair()`、`resetViolationCounters()`、
     `violationCounters()`、`reportViolationCounters()`、
     `reportLimits()`、`insertedBufferCount()`、`resizedDriverCount()`、
@@ -59,6 +61,8 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
   - `setupMoveSequence()` 已按 skip flag 过滤 move 枚举，并映射到 Python 的
     `BaseMove` 派生对象序列；真实 move 算法仍保留同名入口并抛
     `NotImplementedError`。
+  - `configure()` 采用合并式更新，`resetConfig()` 清空 setup 配置和 move
+    sequence。
   - `configure()`、`config()`、`reportConfig()`、`makeMoveTracker()`、
     `setMoveTracker()`、`beginEndpointRepair()`、`recordRemovedBuffer()`、
     `resetCounters()`、`reportCounters()`、
@@ -71,11 +75,12 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
     buffer cell 等状态和入口边界。
   - 新增 `RepairHoldConfig`，保存 hold buffer、pass limit、每 pass repair
     limit、是否允许 setup violation 和 setup slack margin。
+  - `configure()` 采用合并式更新，`resetConfig()` 回到默认 hold 配置。
   - `configure()`、`config()`、`reportConfig()`、`setHoldBuffer()`、
     `holdBuffer()`、`recordInsertedBuffer()`、`recordResize()`、
     `recordClonedGate()`、`resetCounters()`、`reportHoldBuffer()`、
-    `reportCounters()` 补齐 hold buffer 选择和计数边界；真实 hold buffer
-    插入仍未翻译。
+    `reportCounters()`、`statistics()`、`to_json()` 补齐 hold buffer 选择、
+    计数和 JSON-safe 导出边界；真实 hold buffer 插入仍未翻译。
 
 - `RecoverPower`
   - 对应 `src/rsz/src/RecoverPower.hh`。
@@ -83,11 +88,12 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
     swapped cell / recovered power 计数和迭代常量。
   - 新增 `RecoverPowerConfig`，保存 recover power percent、match footprint、
     verbose、scene 和 setup slack margin。
+  - `configure()` 采用合并式更新，`resetConfig()` 回到默认 recover power 配置。
   - `configure()`、`config()`、`reportConfig()`、`recordSwap()`、
     `recordSizeDown()`、`recordResize()`、`resetCounters()`、`markBadVertex()`、
-    `isBadVertex()`、`recoveredPower()`、`sizeDownCount()`、`reportCounters()`
-    补齐 swap / size down / bad vertex 统计边界；真实 cell swap/size down
-    mutation 仍未翻译。
+    `isBadVertex()`、`recoveredPower()`、`sizeDownCount()`、`reportCounters()`、
+    `statistics()`、`to_json()` 补齐 swap / size down / bad vertex 统计和
+    JSON-safe 导出边界；真实 cell swap/size down mutation 仍未翻译。
 
 - `PreChecks`
   - 对应 `src/rsz/src/PreChecks.hh`。
@@ -116,7 +122,7 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
   - `currentEndpoint()`、`criticalPins()`、`violators()`、`pinInfo()`、`moves()`、
     `pendingMoves()`、`trackMoveAttempt()`、`trackMoveCommit()`、
     `trackMoveReject()`、`clearPendingMoves()`、`moveSummary()`、
-    `moveSummaryByType()`、`report()` 提供只读报告面。
+    `moveSummaryByType()`、`as_dict()`、`to_json()`、`report()` 提供只读报告面。
 
 - `SwapArithModules`
   - 对应 `src/rsz/src/SwapArithModules.hh` 的抽象接口。
@@ -147,21 +153,24 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
 - `RepairDesign.configureLimits()` / `recordRepair()` /
   `reportViolationCounters()` / `reportLimits()` 和
   `Resizer.configureRepairDesign()` / `repairDesignViolationCounters()` /
-  `reportRepairDesignLimits()`
+  `reportRepairDesignLimits()` / `resetRepairDesignLimits()`
 - `RepairSetup.makeMoveTracker()` / `beginEndpointRepair()` /
   `recordRemovedBuffer()` / `reportCounters()` / `reportMoveSummary()` 和
   `Resizer.configureRepairSetup()` / `reportRepairSetupConfig()` /
-  `reportRepairSetupCounters()` / `reportSetupMoves()`
+  `reportRepairSetupCounters()` / `reportSetupMoves()` /
+  `resetRepairSetupConfig()`
 - `RepairHold.setHoldBuffer()` / `recordInsertedBuffer()` / `resizeCount()` /
   `clonedGateCount()` / `reportCounters()` 和 `Resizer.configureRepairHold()` /
-  `reportRepairHoldConfig()` / `reportHoldCounters()`
+  `reportRepairHoldConfig()` / `reportHoldCounters()` /
+  `reportRepairHoldStats()` / `resetRepairHoldConfig()`
 - `RecoverPower.configure()` / `recordSwap()` / `recordSizeDown()` /
   `resizeCount()` / `swappedCellCount()` / `sizeDownCount()` /
   `reportCounters()` 和 `Resizer.configureRecoverPower()` /
-  `reportRecoverPowerConfig()` / `reportRecoverPowerCounters()`
+  `reportRecoverPowerConfig()` / `reportRecoverPowerCounters()` /
+  `reportRecoverPowerStats()` / `resetRecoverPowerConfig()`
 - `MoveTracker.trackCriticalPins()` / `trackViolator()` /
   `trackViolatorWithInfo()` / `trackMove()` / `commitMoves()` / `rejectMoves()` /
-  `moveSummary()` / `moveSummaryByType()` / `report()`
+  `moveSummary()` / `moveSummaryByType()` / `as_dict()` / `to_json()` / `report()`
 
 ## 未翻译的真实算法
 
@@ -200,37 +209,60 @@ OpenDB netlist mutation、estimated parasitics、global router 或 OpenDP，不�
 4. `BaseMove` 派生类建议按 C++ 文件逐个翻译：buffer、unbuffer、size up/down、
    clone、split load、pin swap、VT swap。
 
-## 第三轮验证命令
+## 第六轮验证命令
 
 ```powershell
-python -m py_compile D:\winroad_py\winroad\rsz.py
+python -m py_compile D:\winroad_py\winroad\rsz\__init__.py D:\winroad_py\winroad\rsz\buffered_net.py D:\winroad_py\winroad\rsz\common.py D:\winroad_py\winroad\rsz\moves.py D:\winroad_py\winroad\rsz\repair_design.py D:\winroad_py\winroad\rsz\repair_setup.py D:\winroad_py\winroad\rsz\repair_hold.py D:\winroad_py\winroad\rsz\recover_power.py D:\winroad_py\winroad\rsz\resizer.py
 ```
 
 ```powershell
+$env:PYTHONPATH='D:\winroad_py'
 @'
-from winroad.rsz import Resizer, MoveStateType, MoveType
+from winroad.rsz import BufferedNet, BufferedNetType, FixedDelay, MoveType, Resizer
+
 r = Resizer()
+
+root = BufferedNet(BufferedNetType.JUNCTION, (0, 0))
+load = BufferedNet(BufferedNetType.LOAD, (10, 5), load_pin_=object())
+buf = BufferedNet(BufferedNetType.BUFFER, (5, 0), buffer_cell_="BUF_X1")
+buf.setRef(load)
+root.setRef(buf)
+root.setSlack(FixedDelay.from_fs(12))
+assert root.serialize()["node_count"] == 3
+assert "children" in root.to_json()
+
 rd = r.repair_design_
-rd.configureLimits(max_wire_length=100.0, max_slew=2.0, max_cap=3.0, max_fanout=8)
-rd.recordRepair(long_wire=1, max_slew=2, max_cap=3, max_fanout=4, inserted_buffers=5, resized_drivers=6, repaired_nets=7)
-assert r.repairDesignViolationCounters()["long_wire"] == 1
+rd.configureLimits(max_wire_length=100.0, slew_margin=0.1, buffer_cells=["B1"])
+rd.configureLimits(max_slew=0.2)
+assert rd.reportLimits()["max_wire_length"] == 100.0
+rd.resetLimits()
+assert rd.reportLimits()["max_wire_length"] is None
+
 rs = r.repair_setup_
 tracker = rs.makeMoveTracker()
-rs.setupMoveSequence([MoveType.BUFFER, MoveType.SWAP, MoveType.SIZEDOWN], False, False, True, False, False, False)
-assert rs.moveSequenceTypes() == [MoveType.BUFFER, MoveType.SWAP]
-assert rs.beginEndpointRepair("end") == 1
-tracker.trackMove("pin", "buffer", MoveStateType.ATTEMPT)
+tracker.setCurrentEndpoint("EP")
+tracker.trackMoveAttempt("pin", "BufferMove")
 tracker.commitMoves()
 assert tracker.moveSummary()["attempt_commit"] == 1
+assert "moves" in tracker.to_json()
+rs.configure(setup_slack_margin=0.01, skip_size_down=True)
+rs.configure(max_repairs_per_pass=7)
+assert rs.reportConfig()["setup_slack_margin"] == 0.01
+rs.setupMoveSequence([MoveType.BUFFER, MoveType.SWAP, MoveType.SIZEDOWN], False, False, True, False, False, False)
+assert rs.moveSequenceTypes() == [MoveType.BUFFER, MoveType.SWAP]
+
 rh = r.repair_hold_
-rh.setHoldBuffer("BUF_X1")
+rh.configure(buffer_cell="BUF_X1", max_passes=2)
 rh.recordInsertedBuffer(2)
-assert rh.reportCounters()["inserted_buffers"] == 2
+assert rh.statistics()["inserted_buffers"] == 2
+
 rp = r.recover_power_
-rp.configure(match_cell_footprint=True)
+rp.configure(recover_power_percent=10.0, scene="slow")
+rp.configure(verbose=True)
 rp.recordSwap(1, 0.25)
 rp.recordSizeDown(2, 0.5)
-assert rp.reportCounters()["sizedown_cells"] == 2
+assert rp.statistics()["config"]["scene"] == "slow"
+
 try:
     r.repairDesign()
 except NotImplementedError:

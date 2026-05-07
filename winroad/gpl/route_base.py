@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..odb import DbDatabase
 from .common import _area
@@ -191,6 +191,7 @@ class RouteBase:
         self.rc_metric_: List[float] = []
         self.route_overflow_: List[float] = []
         self.route_utilization_: List[float] = []
+        self.congestion_history_: List[Dict[str, float]] = []
         self.tile_inflation_ratios_: Dict[int, float] = {}
         self.minRcCellSizes_: Dict[int, Tuple[int, int]] = {}
         self.tg_.setLogger(log)
@@ -330,6 +331,32 @@ class RouteBase:
     def saveRouteUtilization(self, utilization: float) -> None:
         self.route_utilization_.append(utilization)
 
+    def saveCongestionSnapshot(
+        self,
+        rc: Optional[float] = None,
+        overflow: Optional[float] = None,
+        utilization: Optional[float] = None,
+    ) -> Dict[str, float]:
+        snapshot = {
+            "rc": self.final_average_rc_ if rc is None else rc,
+            "overflow": self.total_route_overflow_ if overflow is None else overflow,
+            "utilization": 0.0 if utilization is None else utilization,
+            "overflowed_tiles": float(self.overflowed_tiles_count_),
+            "total_tiles": float(self.getTotalTilesCount()),
+            "total_inflation": float(self.getTotalInflation()),
+        }
+        self.congestion_history_.append(snapshot)
+        self.rc_metric_.append(snapshot["rc"])
+        self.route_overflow_.append(snapshot["overflow"])
+        self.route_utilization_.append(snapshot["utilization"])
+        if snapshot["rc"] < self.minRc_:
+            self.minRc_ = snapshot["rc"]
+            self.is_min_rc_ = True
+            self.saveMinRc()
+        else:
+            self.is_min_rc_ = False
+        return snapshot
+
     def getRcMetricHistory(self) -> List[float]:
         return self.rc_metric_
 
@@ -338,6 +365,15 @@ class RouteBase:
 
     def getRouteUtilizationHistory(self) -> List[float]:
         return self.route_utilization_
+
+    def getCongestionHistory(self) -> List[Dict[str, float]]:
+        return self.congestion_history_
+
+    def clearCongestionHistory(self) -> None:
+        self.rc_metric_.clear()
+        self.route_overflow_.clear()
+        self.route_utilization_.clear()
+        self.congestion_history_.clear()
 
     def reportCongestion(self) -> Dict[str, Any]:
         return {
@@ -354,6 +390,7 @@ class RouteBase:
             "rc_history": list(self.rc_metric_),
             "overflow_history": list(self.route_overflow_),
             "utilization_history": list(self.route_utilization_),
+            "congestion_history": [dict(item) for item in self.congestion_history_],
         }
 
 

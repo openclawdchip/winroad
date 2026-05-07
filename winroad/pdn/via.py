@@ -377,6 +377,21 @@ class Connect:
     def printViaReport(self) -> Dict[str, int]:
         return {reason.value: len(items) for reason, items in self.failed_vias.items()}
 
+    def failedViaReport(self, include_locations: bool = True) -> Dict[str, Any]:
+        by_reason = self.printViaReport()
+        failures: List[Dict[str, Any]] = []
+        if include_locations:
+            for reason, items in self.failed_vias.items():
+                for net, rect in items:
+                    failures.append({"reason": reason.value, "net": _name(net) if net is not None else None, "rect": rect})
+        return {
+            "grid": self.grid.getLongName(),
+            "layers": [_name(self.layer0), _name(self.layer1)],
+            "total": sum(by_reason.values()),
+            "by_reason": by_reason,
+            "failures": failures,
+        }
+
     def report(self) -> Dict[str, Any]:
         return {
             "grid": self.grid.getName(),
@@ -394,6 +409,7 @@ class Connect:
             "via_count": len(self.vias),
             "vias": [via.report() for via in self.vias],
             "failed_vias": self.printViaReport(),
+            "failed_via_report": self.failedViaReport(include_locations=True),
         }
 
     @staticmethod

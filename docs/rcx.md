@@ -2,8 +2,20 @@
 
 ## 已实现
 
+- 已把原 `winroad/rcx.py` 拆成 `winroad/rcx` package：
+  `common.py`、`options.py`、`corner.py`、`rc_model.py`、`measure.py`、
+  `spef.py`、`bench.py`、`ext.py`、`__init__.py`
+- 旧 `winroad/rcx.py` 已保留为兼容转发模块；`import winroad.rcx` 现在导入 package，
+  公开 `__all__` 与旧单文件 API 保持一致
 - 已建立 OpenROAD `rcx::Ext` 对外入口的 Python 对应类：`Ext`，并提供别名 `OpenRCX`
 - 已补齐 `Ext` 的关键入口边界：`extract()`、`write_spef()`、`read_spef()`、`diff_spef()`、`bench_wires()`、`bench_wires_gen()`、`define_process_corner()`、`define_derived_corner()`、`get_ext_db_corner()`、`get_corners()`、`delete_corners()`、`adjust_rc()`
+- 已补齐可落地的 runtime 配置与状态汇报：
+  `Ext.configure()` / `extMain.configure()` 可同步 `tech`、`block`、`spef_version`、
+  `logger`、`current_model`；`get_config()` 返回当前配置快照；
+  `get_status()` 返回模型、corner、SPEF 文件、RC 统计表和未实现边界状态；
+  `report()` 返回可读文本报告
+- corner 管理现在会拒绝重复 corner 名，派生 corner 会校验 base process corner；
+  `extract()` 的 `corner_cnt` 配置记录为 `extract_corner_count`，不会覆盖已定义 corner 数
 - 已复刻 rcx Tcl/接口层选项结构：`BenchWiresOptions`、`ExtractOptions`、`SpefOptions`、`ReadSpefOpts`、`DiffOptions`、`PatternOptions`
 - 已复刻核心主控对象骨架：`extMain`
 - 已补齐 corner 状态管理：`extCorner`、`extMain.define_process_corner()`、`extMain.define_derived_corner()`、`extMain.get_ext_db_corner()`、`extMain.get_corners()`、`extMain.delete_corners()`
@@ -46,3 +58,9 @@
 - bench DEF / Verilog / pattern 生成的实际数据库写入；`extMainOptions` 配置边界已保留
 - OpenROAD rcx 源码中更细的 `GridTable`、`Wire`、`Track`、`SEQ`、`extSegment`、`dbUtil` 等内部对象翻译
 - 按本轮要求，未触碰 `odb` 翻译层，也未实现真实寄生提取、SPEF 解析写出或规则读取算法
+
+## 验证
+
+- `python -m py_compile` 覆盖 `winroad/rcx.py` 和 `winroad/rcx/*.py`
+- smoke 覆盖 package import、corner 定义/派生、配置快照、状态报告、RC 基础访问、
+  以及 `extract()` / `write_spef()` 仍抛 `NotImplementedError`

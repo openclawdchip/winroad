@@ -347,6 +347,9 @@ class FastRouteCore:
         """返回当前 edge/layer resource 的可测试快照。"""
 
         return {
+            "format": "winroad-grt-resource",
+            "version": 1,
+            "schema": self.getResourceSnapshotSchema(),
             "total_capacity_per_layer": list(self.cap_per_layer),
             "total_usage_per_layer": list(self.usage_per_layer),
             "total_overflow_per_layer": list(self.overflow_per_layer),
@@ -366,6 +369,22 @@ class FastRouteCore:
         """返回最近一次保存的 resource snapshot。"""
 
         return dict(self.resource_snapshot)
+
+    @staticmethod
+    def getResourceSnapshotSchema() -> Dict[str, Any]:
+        """返回 resource JSON 的轻量 schema 描述。"""
+
+        return {
+            "edge_record_fields": ["x1", "y1", "x2", "y2", "layer", "value"],
+            "layer_arrays": [
+                "total_capacity_per_layer",
+                "total_usage_per_layer",
+                "total_overflow_per_layer",
+                "max_horizontal_overflows",
+                "max_vertical_overflows",
+            ],
+            "notes": "edge records use normalized undirected grid edges; layer arrays are indexed by layer id.",
+        }
 
     @staticmethod
     def _json_safe_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
@@ -558,6 +577,9 @@ class FastRouteCore:
         """返回 JSON 安全的拥塞报告。"""
 
         summary = self.reportCongestionSummary()
+        summary["format"] = "winroad-grt-congestion"
+        summary["version"] = 1
+        summary["schema"] = self.getCongestionReportSchema()
         summary["congestion_nets"] = [str(net) for net in self.congestion_nets]
         summary["tiles"] = [
             {
@@ -566,11 +588,28 @@ class FastRouteCore:
                 "layer": layer,
                 "capacity": info.congestion.capacity,
                 "usage": info.congestion.usage,
+                "overflow": max(0, info.congestion.usage - info.congestion.capacity),
                 "nets": [str(net) for net in info.nets],
             }
             for (x, y, layer), info in sorted(self.buildTileCongestion().items())
         ]
         return summary
+
+    @staticmethod
+    def getCongestionReportSchema() -> Dict[str, Any]:
+        """返回 congestion JSON 的轻量 schema 描述。"""
+
+        return {
+            "tile_fields": ["x", "y", "layer", "capacity", "usage", "overflow", "nets"],
+            "summary_fields": [
+                "total_overflow",
+                "has_2d_overflow",
+                "congested_tile_count",
+                "total_tile_count",
+                "congestion_nets",
+            ],
+            "notes": "tile overflow is max(usage - capacity, 0); nets are serialized with object names.",
+        }
 
     def getSnapshotBatchCount(self) -> int:
         return self.snapshot_batch_count

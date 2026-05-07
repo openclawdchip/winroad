@@ -5,13 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set
 
-from .component import FollowPins, RingLayer, Rings, Straps
+from .component import FollowPins, PadDirectConnectionStraps, RepairChannelStraps, RingLayer, Rings, Straps
 from .domain import GridSwitchedPower, PowerCell, VoltageDomain
 from .grid import BumpGrid, CoreGrid, ExistingGrid, Grid, InstanceGrid
 from .renderer import PDNRenderer
 from .sroute import SRoute
-from .types import ExtensionMode, Halo, PowerSwitchNetworkType, Rect, StartsWith, _normalize_power_switch_network, _not_implemented, _rect_intersects, _starts_with_power
-from .via import Connect
+from .types import ExtensionMode, FailedViaReason, GridComponentType, GridType, Halo, PowerSwitchNetworkType, Rect, Shape, ShapeType, SplitCut, StartsWith, _name, _normalize_extension_mode, _normalize_power_switch_network, _not_implemented, _rect_intersects, _starts_with_power
+from .via import Connect, Via
 
 @dataclass
 class PdnGen:
@@ -49,9 +49,135 @@ class PdnGen:
             "allow_repair_channels": self.allow_repair_channels,
             "domain_count": len(self.getDomains()),
             "grid_count": sum(len(domain.getGrids()) for domain in self.getDomains()),
+            "summary": self.reportSummary(),
+            "sroute": self.sroute.report() if self.sroute is not None else None,
             "sroute_connects": self.sroute.getSrouteConnects() if self.sroute is not None else [],
             "debug_renderer": self.debug_renderer.report() if self.debug_renderer is not None else None,
         }
+
+    def reportSummary(self) -> Dict[str, Any]:
+        domain_summaries = [domain.summary() for domain in self.getDomains()]
+        failed_by_reason: Dict[str, int] = {}
+        for domain in domain_summaries:
+            for reason, count in domain["failed_vias_by_reason"].items():
+                failed_by_reason[reason] = failed_by_reason.get(reason, 0) + count
+        return {
+            "domain_count": len(domain_summaries),
+            "grid_count": sum(domain["grid_count"] for domain in domain_summaries),
+            "shape_count": sum(domain["shape_count"] for domain in domain_summaries),
+            "via_count": sum(domain["via_count"] for domain in domain_summaries),
+            "failed_via_count": sum(domain["failed_via_count"] for domain in domain_summaries),
+            "failed_vias_by_reason": failed_by_reason,
+            "allow_repair_channels": self.allow_repair_channels,
+            "sroute": self.sroute.summary() if self.sroute is not None else None,
+            "renderer": self.debug_renderer.snapshot() if self.debug_renderer is not None else None,
+            "domains": domain_summaries,
+        }
+
+    def viaFailureReport(self, include_locations: bool = True) -> Dict[str, Any]:
+        grids = [
+            grid.viaFailureReport(include_locations=include_locations)
+            for domain in self.getDomains()
+            for grid in domain.getGrids()
+        ]
+        by_reason: Dict[str, int] = {}
+        for grid in grids:
+            for reason, count in grid["by_reason"].items():
+                by_reason[reason] = by_reason.get(reason, 0) + count
+        return {"total": sum(by_reason.values()), "by_reason": by_reason, "grids": grids}
+
+    def rendererSelectionSnapshot(self) -> Optional[Dict[str, Any]]:
+        return self.debug_renderer.snapshot() if self.debug_renderer is not None else None
+
+    def srouteSummary(self) -> Dict[str, Any]:
+        return self.sroute.summary() if self.sroute is not None else {"connect_count": 0, "connects_with_nets": 0, "connects_with_layers": 0, "parameter_keys": []}
+
+    def exportConfig(self) -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "allow_repair_channels": self.allow_repair_channels,
+            "domains": [self._export_domain_config(domain, domain is self.core_domain) for domain in self.getDomains()],
+            "switched_power_cells": [cell.report() for cell in self.switched_power_cells],
+            "sroute": self.sroute.report() if self.sroute is not None else None,
+            "renderer": self.debug_renderer.snapshot() if self.debug_renderer is not None else None,
+        }
+
+    def exportState(self) -> Dict[str, Any]:
+        return {
+            "version": 1,
+            "config": self.exportConfig(),
+            "runtime": {
+                "domains": [self._export_domain_state(domain) for domain in self.getDomains()],
+                "summary": self.reportSummary(),
+                "via_failure_report": self.viaFailureReport(include_locations=True),
+            },
+        }
+
+    def importConfig(self, data: Mapping[str, Any], resolver: Any = None) -> "PdnGen":
+        db = self.db
+        logger = self.logger
+        self.reset()
+        self.db = db
+        self.logger = logger
+        self.sroute = SRoute(self)
+        self.allow_repair_channels = bool(data.get("allow_repair_channels", False))
+        for cell_data in data.get("switched_power_cells", []):
+            self.switched_power_cells.append(
+                PowerCell(
+                    self.logger,
+                    self._resolve_ref(cell_data.get("name"), resolver),
+                    self._resolve_ref(cell_data.get("control"), resolver),
+                    self._resolve_ref(cell_data.get("acknowledge"), resolver),
+                    self._resolve_ref(cell_data.get("switched_power"), resolver),
+                    self._resolve_ref(cell_data.get("alwayson_power"), resolver),
+                    self._resolve_ref(cell_data.get("ground"), resolver),
+                )
+            )
+        for domain_data in data.get("domains", []):
+            domain = VoltageDomain(
+                pdngen=self,
+                name=str(domain_data["name"]),
+                block=self._get_block(),
+                power=self._resolve_ref(domain_data.get("power"), resolver),
+                ground=self._resolve_ref(domain_data.get("ground"), resolver),
+                secondary=[self._resolve_ref(net, resolver) for net in domain_data.get("secondary", [])],
+                region=self._resolve_ref(domain_data.get("region"), resolver),
+                logger=self.logger,
+                switched_power=self._resolve_ref(domain_data.get("switched_power"), resolver),
+            )
+            if domain_data.get("core", False):
+                self.core_domain = domain
+            else:
+                self.domains.append(domain)
+            for grid_data in domain_data.get("grids", []):
+                grid = self._import_grid_config(domain, grid_data, resolver)
+                domain.addGrid(grid)
+        if data.get("sroute"):
+            for connect in data["sroute"].get("connects", []):
+                self.sroute.addSrouteConnect(**connect)
+        if data.get("renderer"):
+            renderer_data = data["renderer"]
+            self.debug_renderer = PDNRenderer(bool(renderer_data.get("enabled", False)), block=self._get_block(), logger=self.logger)
+            self.debug_renderer.setGrids([grid for domain in self.getDomains() for grid in domain.getGrids()])
+            for selected in renderer_data.get("selected", []):
+                self.debug_renderer.select(selected.get("name", selected))
+        self.setAllowRepairChannels(self.allow_repair_channels)
+        return self
+
+    def importState(self, data: Mapping[str, Any], resolver: Any = None) -> "PdnGen":
+        config = data.get("config", data)
+        self.importConfig(config, resolver=resolver)
+        runtime = data.get("runtime", {})
+        for domain_data in runtime.get("domains", []):
+            domain = self.findDomain(str(domain_data.get("name", "")))
+            if domain is None:
+                continue
+            for grid_data in domain_data.get("grids", []):
+                grid = domain.getGridByName(str(grid_data.get("name", "")))
+                if grid is None:
+                    continue
+                self._import_grid_state(grid, grid_data, resolver)
+        return self
 
     def findSwitchedPowerCell(self, name: str) -> Optional[PowerCell]:
         return next((cell for cell in self.switched_power_cells if cell.getName() == name), None)
@@ -368,6 +494,307 @@ class PdnGen:
     def importUPF(self, target: Any, network_type: Optional[PowerSwitchNetworkType] = None) -> bool:
         _not_implemented("PdnGen::importUPF")
 
+    def _export_domain_config(self, domain: VoltageDomain, is_core: bool) -> Dict[str, Any]:
+        return {
+            "name": domain.getName(),
+            "core": is_core,
+            "power": self._ref(domain.power),
+            "switched_power": self._ref(domain.switched_power),
+            "ground": self._ref(domain.ground),
+            "secondary": [self._ref(net) for net in domain.secondary],
+            "region": self._ref(domain.region),
+            "grids": [self._export_grid_config(grid) for grid in domain.getGrids()],
+        }
+
+    def _export_grid_config(self, grid: Grid) -> Dict[str, Any]:
+        return {
+            "name": grid.getName(),
+            "long_name": grid.getLongName(),
+            "type": grid.type().value,
+            "is_bump": isinstance(grid, BumpGrid),
+            "starts_with_power": grid.starts_with_power,
+            "generate_obstructions": [self._ref(layer) for layer in grid.generate_obstructions],
+            "pin_layers": [self._ref(layer) for layer in grid.getPinLayers()],
+            "allow_repair_channels": grid.allow_repair_channels,
+            "instance": self._ref(grid.inst) if isinstance(grid, InstanceGrid) else None,
+            "halo": grid.halos if isinstance(grid, InstanceGrid) else None,
+            "grid_to_boundary": grid.grid_to_boundary if isinstance(grid, InstanceGrid) else None,
+            "replaceable": grid.replaceable if isinstance(grid, InstanceGrid) else None,
+            "rings": [self._export_component_config(ring) for ring in grid.getRings()],
+            "straps": [self._export_component_config(strap) for strap in grid.getStraps()],
+            "connect": [self._export_connect_config(connect) for connect in grid.getConnect()],
+        }
+
+    def _export_component_config(self, component: Any) -> Dict[str, Any]:
+        data = {
+            "type": component.type().value,
+            "starts_with_power": component.getStartsWithPower(),
+            "nets": [self._ref(net) for net in component.nets],
+        }
+        if isinstance(component, Rings):
+            data.update(
+                {
+                    "layers": [
+                        {"layer": self._ref(layer.layer), "width": layer.width, "spacing": layer.spacing}
+                        for layer in component.layers
+                    ],
+                    "offset": component.offset,
+                    "pad_offset": component.pad_offset,
+                    "extend_to_boundary": component.extend_to_boundary,
+                    "allow_outside_die": component.allow_outside_die,
+                }
+            )
+        elif isinstance(component, Straps):
+            data.update(
+                {
+                    "layer": self._ref(component.layer),
+                    "width": component.width,
+                    "pitch": component.pitch,
+                    "spacing": component.spacing,
+                    "number_of_straps": component.number_of_straps,
+                    "offset": component.offset,
+                    "snap": component.snap,
+                    "extend_mode": component.extend_mode.value,
+                    "strap_start": component.strap_start,
+                    "strap_end": component.strap_end,
+                    "direction": self._ref(component.direction),
+                }
+            )
+            if isinstance(component, PadDirectConnectionStraps):
+                data.update({"iterm": self._ref(component.iterm), "connect_pad_layers": [self._ref(layer) for layer in component.connect_pad_layers]})
+            if isinstance(component, RepairChannelStraps):
+                data.update(
+                    {
+                        "target": component.getGrid().getStraps().index(component.target) if component.target in component.getGrid().getStraps() else None,
+                        "connect_to": self._ref(component.connect_to),
+                        "area": component.area,
+                        "available_area": component.available_area,
+                        "obs_check_area": component.obs_check_area,
+                        "repair_nets": [self._ref(net) for net in component.repair_nets],
+                        "invalid": component.invalid,
+                    }
+                )
+        return data
+
+    def _export_connect_config(self, connect: Connect) -> Dict[str, Any]:
+        return {
+            "layer0": self._ref(connect.layer0),
+            "layer1": self._ref(connect.layer1),
+            "fixed_generate_vias": [self._ref(via) for via in connect.fixed_generate_vias],
+            "fixed_tech_vias": [self._ref(via) for via in connect.fixed_tech_vias],
+            "cut_pitch_x": connect.cut_pitch_x,
+            "cut_pitch_y": connect.cut_pitch_y,
+            "max_rows": connect.max_rows,
+            "max_columns": connect.max_columns,
+            "ongrid": [self._ref(layer) for layer in connect.ongrid],
+            "split_cuts": {
+                self._ref(layer): {"pitch": split.pitch, "stagger": split.stagger}
+                for layer, split in connect.split_cuts.items()
+            },
+        }
+
+    def _export_domain_state(self, domain: VoltageDomain) -> Dict[str, Any]:
+        return {"name": domain.getName(), "grids": [self._export_grid_state(grid) for grid in domain.getGrids()]}
+
+    def _export_grid_state(self, grid: Grid) -> Dict[str, Any]:
+        components = grid.getGridComponents()
+        component_state = []
+        for index, component in enumerate(components):
+            component_state.append(
+                {
+                    "index": index,
+                    "type": component.type().value,
+                    "shapes": [self._export_shape_state(shape) for shape in component.getShapes()],
+                }
+            )
+        shape_index = {id(shape): (component_index, shape_index) for component_index, component in enumerate(components) for shape_index, shape in enumerate(component.getShapes())}
+        return {
+            "name": grid.getName(),
+            "components": component_state,
+            "connect": [self._export_connect_state(connect, shape_index) for connect in grid.getConnect()],
+            "summary": grid.summary(),
+        }
+
+    def _export_shape_state(self, shape: Shape) -> Dict[str, Any]:
+        return {
+            "layer": self._ref(shape.layer),
+            "net": self._ref(shape.net),
+            "rect": shape.rect,
+            "wire_type": self._ref(shape.wire_type),
+            "shape_type": shape.shape_type.value,
+            "locked": shape.locked,
+            "obstruction": shape.obstruction,
+            "iterm_connections": list(shape.iterm_connections),
+            "bterm_connections": list(shape.bterm_connections),
+        }
+
+    def _export_connect_state(self, connect: Connect, shape_index: Mapping[int, Any]) -> Dict[str, Any]:
+        return {
+            "layers": [self._ref(connect.layer0), self._ref(connect.layer1)],
+            "vias": [
+                {
+                    "net": self._ref(via.net),
+                    "area": via.area,
+                    "lower": shape_index.get(id(via.lower)) if via.lower is not None else None,
+                    "upper": shape_index.get(id(via.upper)) if via.upper is not None else None,
+                    "failed": via.failed,
+                    "failed_reason": via.failed_reason.value if via.failed_reason is not None else None,
+                }
+                for via in connect.getVias()
+            ],
+            "failed_vias": [
+                {"reason": reason.value, "net": self._ref(net), "rect": rect}
+                for reason, items in connect.failed_vias.items()
+                for net, rect in items
+            ],
+        }
+
+    def _import_grid_config(self, domain: VoltageDomain, data: Mapping[str, Any], resolver: Any) -> Grid:
+        grid_type = data.get("type")
+        starts = bool(data.get("starts_with_power", True))
+        obstructions = [self._resolve_ref(layer, resolver) for layer in data.get("generate_obstructions", [])]
+        if grid_type == GridType.EXISTING.value:
+            grid: Grid = ExistingGrid(domain, str(data["name"]), starts, obstructions, pdngen=self, block=self._get_block(), logger=self.logger)
+        elif grid_type == GridType.INSTANCE.value:
+            cls = BumpGrid if data.get("is_bump", False) else InstanceGrid
+            grid = cls(domain, str(data["name"]), starts, obstructions, inst=self._resolve_ref(data.get("instance"), resolver))
+            grid.addHalo(tuple(data.get("halo") or (0, 0, 0, 0)))  # type: ignore[arg-type]
+            grid.setGridToBoundary(bool(data.get("grid_to_boundary", False)))
+            grid.setReplaceable(bool(data.get("replaceable", False)))
+        else:
+            grid = CoreGrid(domain, str(data["name"]), starts, obstructions)
+        grid.setPinLayers([self._resolve_ref(layer, resolver) for layer in data.get("pin_layers", [])])
+        grid.setAllowRepairChannels(bool(data.get("allow_repair_channels", False)))
+        for ring_data in data.get("rings", []):
+            grid.addRing(self._import_ring_config(grid, ring_data, resolver))
+        for strap_data in data.get("straps", []):
+            grid.addStrap(self._import_strap_config(grid, strap_data, resolver))
+        for connect_data in data.get("connect", []):
+            grid.addConnect(self._import_connect_config(grid, connect_data, resolver))
+        return grid
+
+    def _import_ring_config(self, grid: Grid, data: Mapping[str, Any], resolver: Any) -> Rings:
+        layers = data.get("layers", [])
+        ring_layers = tuple(RingLayer(self._resolve_ref(layer.get("layer"), resolver), layer.get("width", 0), layer.get("spacing", 0)) for layer in layers)
+        if len(ring_layers) != 2:
+            raise ValueError("ring config requires exactly two layers")
+        return Rings(
+            grid=grid,
+            starts_with_power=bool(data.get("starts_with_power", True)),
+            nets=[self._resolve_ref(net, resolver) for net in data.get("nets", [])],
+            layers=ring_layers,  # type: ignore[arg-type]
+            offset=tuple(data.get("offset", (0, 0, 0, 0))),  # type: ignore[arg-type]
+            pad_offset=tuple(data.get("pad_offset", (0, 0, 0, 0))),  # type: ignore[arg-type]
+            extend_to_boundary=bool(data.get("extend_to_boundary", False)),
+            allow_outside_die=bool(data.get("allow_outside_die", False)),
+        )
+
+    def _import_strap_config(self, grid: Grid, data: Mapping[str, Any], resolver: Any) -> Straps:
+        component_type = data.get("type")
+        cls: Any = Straps
+        if component_type == GridComponentType.FOLLOWPIN.value:
+            cls = FollowPins
+        elif component_type == GridComponentType.PAD_CONNECT.value:
+            cls = PadDirectConnectionStraps
+        elif component_type == GridComponentType.REPAIR_CHANNEL.value:
+            cls = RepairChannelStraps
+        strap = cls(
+            grid=grid,
+            starts_with_power=bool(data.get("starts_with_power", True)),
+            nets=[self._resolve_ref(net, resolver) for net in data.get("nets", [])],
+            layer=self._resolve_ref(data.get("layer"), resolver),
+            width=data.get("width", 0),
+            pitch=data.get("pitch", 0),
+            spacing=data.get("spacing", 0),
+            number_of_straps=data.get("number_of_straps", 0),
+            offset=data.get("offset", 0),
+            snap=bool(data.get("snap", False)),
+            extend_mode=_normalize_extension_mode(data.get("extend_mode", ExtensionMode.CORE)),
+            strap_start=data.get("strap_start", 0),
+            strap_end=data.get("strap_end", 0),
+            direction=self._resolve_ref(data.get("direction"), resolver),
+        )
+        if isinstance(strap, PadDirectConnectionStraps):
+            strap.iterm = self._resolve_ref(data.get("iterm"), resolver)
+            strap.connect_pad_layers = [self._resolve_ref(layer, resolver) for layer in data.get("connect_pad_layers", [])]
+        if isinstance(strap, RepairChannelStraps):
+            strap.connect_to = self._resolve_ref(data.get("connect_to"), resolver)
+            strap.area = tuple(data.get("area", (0, 0, 0, 0)))  # type: ignore[assignment]
+            strap.available_area = tuple(data.get("available_area", (0, 0, 0, 0)))  # type: ignore[assignment]
+            strap.obs_check_area = tuple(data.get("obs_check_area", (0, 0, 0, 0)))  # type: ignore[assignment]
+            strap.repair_nets = {self._resolve_ref(net, resolver) for net in data.get("repair_nets", [])}
+            strap.invalid = bool(data.get("invalid", False))
+        return strap
+
+    def _import_connect_config(self, grid: Grid, data: Mapping[str, Any], resolver: Any) -> Connect:
+        split_cuts = {
+            self._resolve_ref(layer, resolver): SplitCut(value.get("pitch", 0), bool(value.get("stagger", False)))
+            for layer, value in data.get("split_cuts", {}).items()
+        }
+        return Connect(
+            grid,
+            self._resolve_ref(data.get("layer0"), resolver),
+            self._resolve_ref(data.get("layer1"), resolver),
+            [self._resolve_ref(via, resolver) for via in data.get("fixed_generate_vias", [])],
+            [self._resolve_ref(via, resolver) for via in data.get("fixed_tech_vias", [])],
+            data.get("cut_pitch_x", 0),
+            data.get("cut_pitch_y", 0),
+            data.get("max_rows", 0),
+            data.get("max_columns", 0),
+            {self._resolve_ref(layer, resolver) for layer in data.get("ongrid", [])},
+            split_cuts,
+        )
+
+    def _import_grid_state(self, grid: Grid, data: Mapping[str, Any], resolver: Any) -> None:
+        components = grid.getGridComponents()
+        shapes_by_ref: Dict[Any, Shape] = {}
+        for component_data in data.get("components", []):
+            index = int(component_data.get("index", -1))
+            if index < 0 or index >= len(components):
+                continue
+            component = components[index]
+            for shape_index, shape_data in enumerate(component_data.get("shapes", [])):
+                shape = Shape(
+                    layer=self._resolve_ref(shape_data.get("layer"), resolver),
+                    net=self._resolve_ref(shape_data.get("net"), resolver),
+                    rect=tuple(shape_data.get("rect", (0, 0, 0, 0))),  # type: ignore[arg-type]
+                    wire_type=self._resolve_ref(shape_data.get("wire_type"), resolver),
+                    shape_type=ShapeType(shape_data.get("shape_type", ShapeType.SHAPE.value)),
+                    locked=bool(shape_data.get("locked", False)),
+                    obstruction=shape_data.get("obstruction"),
+                )
+                component.addShape(shape)
+                shapes_by_ref[(index, shape_index)] = shape
+        for connect_index, connect_data in enumerate(data.get("connect", [])):
+            if connect_index >= len(grid.getConnect()):
+                continue
+            connect = grid.getConnect()[connect_index]
+            connect.clearShapes()
+            connect.clearFailedVias()
+            for via_data in connect_data.get("vias", []):
+                via = Via(
+                    connect=connect,
+                    net=self._resolve_ref(via_data.get("net"), resolver),
+                    area=tuple(via_data.get("area", (0, 0, 0, 0))),  # type: ignore[arg-type]
+                    lower=shapes_by_ref.get(tuple(via_data["lower"])) if via_data.get("lower") is not None else None,
+                    upper=shapes_by_ref.get(tuple(via_data["upper"])) if via_data.get("upper") is not None else None,
+                    failed=bool(via_data.get("failed", False)),
+                    failed_reason=FailedViaReason(via_data["failed_reason"]) if via_data.get("failed_reason") else None,
+                )
+                connect.addVia(via)
+            for failure in connect_data.get("failed_vias", []):
+                connect.addFailedVia(FailedViaReason(failure.get("reason", FailedViaReason.OTHER.value)), tuple(failure.get("rect", (0, 0, 0, 0))), self._resolve_ref(failure.get("net"), resolver))  # type: ignore[arg-type]
+
+    def _ref(self, value: Any) -> Any:
+        return None if value is None else _name(value)
+
+    def _resolve_ref(self, value: Any, resolver: Any = None) -> Any:
+        if value is None:
+            return None
+        if resolver is None:
+            return value
+        return resolver(value)
+
     def _get_block(self) -> Any:
         if self.db is None:
             return None
@@ -424,6 +851,42 @@ def report_power_grid(pdngen_obj: PdnGen) -> Dict[str, Any]:
     """报告当前 Python PDN 对象树；不读取或写入 ODB。"""
 
     return pdngen_obj.report()
+
+
+def report_power_grid_summary(pdngen_obj: PdnGen) -> Dict[str, Any]:
+    """报告 domain/grid/component/via/sroute/renderer 聚合摘要。"""
+
+    return pdngen_obj.reportSummary()
+
+
+def report_pdn_via_failures(pdngen_obj: PdnGen, include_locations: bool = True) -> Dict[str, Any]:
+    """报告当前 Python PDN 对象树记录的 failed via。"""
+
+    return pdngen_obj.viaFailureReport(include_locations=include_locations)
+
+
+def export_power_grid_config(pdngen_obj: PdnGen) -> Dict[str, Any]:
+    """导出可复建的 PDN 配置状态，不包含 runtime shapes/vias。"""
+
+    return pdngen_obj.exportConfig()
+
+
+def import_power_grid_config(pdngen_obj: PdnGen, data: Mapping[str, Any], resolver: Any = None) -> PdnGen:
+    """导入 `export_power_grid_config()` 生成的配置字典。"""
+
+    return pdngen_obj.importConfig(data, resolver=resolver)
+
+
+def export_power_grid_state(pdngen_obj: PdnGen) -> Dict[str, Any]:
+    """导出 PDN 配置和 runtime shape/via/failure 状态。"""
+
+    return pdngen_obj.exportState()
+
+
+def import_power_grid_state(pdngen_obj: PdnGen, data: Mapping[str, Any], resolver: Any = None) -> PdnGen:
+    """导入 `export_power_grid_state()` 生成的状态字典。"""
+
+    return pdngen_obj.importState(data, resolver=resolver)
 
 
 def check_power_grid(pdngen_obj: PdnGen) -> None:
