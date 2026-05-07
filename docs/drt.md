@@ -1,10 +1,143 @@
 # drt
 
-## 已实现
+## 第一轮翻译补位
 
-- 模块入口已建立
+- 已按本机 OpenROAD `src/drt` C++ 源码边界建立 Python 顶层骨架。
+- 只修改 `winroad/drt.py` 与本文档；本轮不触碰 `odb`。
+- 目标是建立等价对象和入口边界，不实现 demo detailed routing。
 
-## 未实现
+## 已实现对象边界
 
-- 详细布线类与接口翻译
+- 顶层入口与工厂：
+  - `TritonRoute`
+  - `create_triton_route()`
+- 顶层配置与 debug：
+  - `ParamStruct`
+  - `RouterConfiguration`
+  - `frDebugSettings`
+  - `RipUpMode`
+- 基础类型与 enum：
+  - `Point`
+  - `Rect`
+  - `frCoord`
+  - `frLayerNum`
+  - `frUInt4`
+  - `frDirEnum`
+  - `frBlockObjectEnum`
+  - `dbTechLayerDir`
+  - `dbTechLayerType`
+- drt 私有设计数据库对象：
+  - `frDesign`
+  - `frTechObject`
+  - `frBlock`
+  - `frNet`
+  - `frNode`
+  - `frShape`
+  - `frGuide`
+  - `frMarker`
+  - `frViaDef`
+  - `frVia`
+  - `frLayer`
+  - `frRegionQuery`
+- routing/PA/GC 顶层阶段：
+  - `FlexGR`
+  - `FlexDR`
+  - `FlexDRViaData`
+  - `FlexDRSearchRepairArgs`
+  - `FlexGridGraph`
+  - `FlexGridGraphNode`
+  - `FlexMazeIdx`
+  - `FlexPA`
+  - `FlexGCWorker`
 
+## 已实现轻量行为
+
+- `TritonRoute`：
+  - `init()` 建立空 `frDesign`，保存 logger/dist/stt/graphics 指针。
+  - `setParams()` 将 `ParamStruct` 写入 `RouterConfiguration`。
+  - debug/distributed/worker result/user selected via 等状态接口已补齐。
+  - `clearDesign()`、`getDesign()`、`getRouterConfiguration()`、`getDebugSettings()` 等查询入口可用。
+- `frDesign` / `frBlock` / `frTechObject`：
+  - 支持 tech layer、via def、top block、net、marker、master、update、version 的轻量管理。
+  - 支持 preferred/non-preferred track 查询边界。
+- `frNet`：
+  - 支持 inst term/bterm、shape、via、patch wire、guide、node、GR shape/via 的容器管理。
+  - 支持 modified/fake/fixed/clock/NDR/jumper/special 等状态位。
+  - 支持 NDR/clock absolute priority 的基础配置映射。
+- `frLayer` / `frVia` / `frGuide` / `frMarker`：
+  - 支持名称、层号、方向、宽度、pitch、via def、bbox、owner 等不依赖 odb 的访问器。
+- `FlexGridGraph`：
+  - 支持坐标设置、维度、bbox、maze index、layer index、edge/block 状态查询。
+- `FlexDR` / `FlexGR` / `FlexPA` / `FlexGCWorker`：
+  - 支持构造、设计/tech/region query 获取、debug/distributed/target 状态设置。
+
+## 显式未实现
+
+以下入口保留 C++ 同名边界并抛 `NotImplementedError`：
+
+- `TritonRoute`：
+  - `main()`
+  - `prep()`
+  - `initGuide()`
+  - `pinAccess()`
+  - `stepDR()`
+  - `gr()`
+  - `ta()`
+  - `dr()`
+  - `endFR()`
+  - `checkDRC()`
+  - `reportDRC()`
+  - `reportConstraints()`
+  - `routeLayerLengths()`
+  - `runDRWorker()`
+  - `debugSingleWorker()`
+  - `updateGlobals()`
+  - `resetDb()`
+  - `updateDesign()`
+  - `sendDesignDist()`
+  - `writeGlobals()`
+  - `sendDesignUpdates()`
+  - `sendGlobalsUpdates()`
+  - `fixMaxSpacing()`
+  - `deleteInstancePAData()`
+  - `addInstancePAData()`
+- `FlexGR`：
+  - `main()`
+  - `init()`
+  - `searchRepair()`
+  - `layerAssign()`
+  - `writeToGuide()`
+  - `updateDb()`
+- `FlexDR`：
+  - `init()`
+  - `main()`
+  - `searchRepair()`
+  - `end()`
+  - `reportGuideCoverage()`
+  - `fixMaxSpacing()`
+- `FlexGridGraph`：
+  - `init()`
+  - `search()`
+  - `traceBackPath()`
+  - `updatePrevNodeCost()`
+- `FlexPA`：
+  - `main()`
+  - `init()`
+  - `genAllAccessPoints()`
+- `FlexGCWorker`：
+  - `init()`
+  - `main()`
+  - `updateDRNet()`
+- `frRegionQuery`：
+  - `init()`
+  - `query()`
+  - `add()`
+  - `remove()`
+
+## 说明
+
+- 本轮严格保留 OpenROAD `src/drt` 的顶层模块边界：PA、GR、TA、DR、GC、
+  grid graph、设计对象、tech layer、net/via/guide/marker。
+- 真实 detailed routing、DRC、search/maze、worker 并行、分布式通信、
+  guide/DEF/ODB 读写均未实现，避免伪造布线结果。
+- 后续轮次可沿 `NotImplementedError` 的入口逐文件翻译 C++ 实现。

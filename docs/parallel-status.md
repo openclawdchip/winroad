@@ -67,7 +67,7 @@
 
 | 模块 | 线程 id | 昵称 | 状态 | 负责文件 |
 | --- | --- | --- | --- | --- |
-| `drt` | `019e0272-b660-7592-8b09-9a2bb79c8798` | Parfit | 运行中 | `winroad/drt.py`, `docs/drt.md` |
+| `drt` | `019e0272-b660-7592-8b09-9a2bb79c8798` | Parfit | 已完成 | `winroad/drt.py`, `docs/drt.md` |
 
 ### 第三轮已完成摘要
 
@@ -76,3 +76,4 @@
 - `cts`：补 TechChar LUT 数据、TreeBuilder blockage/legalization、TritonCTS clock root/tree/report/repair/balance 等边界。
 - `pdn`：补 GridComponent build/report、Connect split-cut/via、Grid lookup/build/report、SRoute、PDNRenderer、PdnGen lookup/repair/write 边界。
 - `grt`：补 GSegment 轻量序列化、guide 读写、Net alpha/beta/gamma、resource snapshot、tile congestion、wirelength/report 边界。
+- `drt`：完成第一轮详细布线顶层边界，包含 TritonRoute、FlexDR/FlexGR/FlexGridGraph/FlexPA/FlexGCWorker、frDesign/frNet/frVia/frLayer 等对象。
