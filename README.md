@@ -32,6 +32,27 @@ WinRoad 是一个面向 Windows 的 Python 物理设计工程仓库，目标是�
 - `examples/`：示例入口
 - `runs/`：运行输出
 
+## 模块地图
+
+WinRoad 先按 OpenROAD 的源码边界建模，后续翻译都按这个顺序推进。
+
+| OpenROAD 模块 | WinRoad 目标 |
+| --- | --- |
+| `odb` | OpenDB 数据库与对象模型 |
+| `grt` | 全局布线 |
+| `gpl` | 全局布局 |
+| `rsz` | resize / timing repair |
+| `cts` | 时钟树综合 |
+| `rcx` | 寄生参数提取 |
+| `pdn` | 电源网络生成 |
+| `drt` | 详细布线 |
+
+## 文档规则
+
+- 每个模块单独一个文档
+- 每个文档只记录该模块已经实现的功能和未实现的空白
+- 不写 demo 口径，不写架构设想，只写翻译结果
+
 ## 约定
 
 1. 不做自造 demo 接口。
