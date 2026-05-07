@@ -5,7 +5,7 @@ WinRoad 是一个面向 Windows 的 Python 物理设计工程仓库，目标是�
 ## 目标
 
 - 以 OpenROAD 源码为准做等价翻译
-- 让 `odb / grt / gpl / rsz / cts / rcx / pdn / drt` 逐层可调用
+- 先完成非 ODB 顶层模块，再回到 `odb`
 - 保留中文注释和模块说明，方便持续协作
 - 让项目最终可以直接作为 GitHub 仓库开源
 
@@ -34,18 +34,19 @@ WinRoad 是一个面向 Windows 的 Python 物理设计工程仓库，目标是�
 
 ## 模块地图
 
-WinRoad 先按 OpenROAD 的源码边界建模，后续翻译都按这个顺序推进。
+WinRoad 先按 OpenROAD 的源码边界建模。当前主线调整为：`odb` 放到最后，
+优先推进不直接依赖完整 OpenDB 细节的顶层算法模块。
 
 | OpenROAD 模块 | WinRoad 目标 |
 | --- | --- |
-| `odb` | OpenDB 数据库与对象模型 |
-| `grt` | 全局布线 |
 | `gpl` | 全局布局 |
+| `grt` | 全局布线 |
 | `rsz` | resize / timing repair |
 | `cts` | 时钟树综合 |
 | `rcx` | 寄生参数提取 |
 | `pdn` | 电源网络生成 |
 | `drt` | 详细布线 |
+| `odb` | OpenDB 数据库与对象模型，最后补完整 |
 
 ## 文档规则
 

@@ -28,6 +28,7 @@ GRoute = List["GSegment"]
 NetRouteMap = Dict[Any, GRoute]
 CapacityReductionData = List[List[List["CapacityReduction"]]]
 TileSet = Set[Tuple[int, int]]
+NetsPerCongestedArea = Dict[Tuple[int, int, int], Set[Any]]
 
 
 def _unsupported(name: str) -> None:
@@ -870,8 +871,22 @@ class FastRouteCore:
     h_capacity_3D: List[int] = field(default_factory=list)
     last_col_v_capacity_3D: List[int] = field(default_factory=list)
     last_row_h_capacity_3D: List[int] = field(default_factory=list)
+    cap_per_layer: List[int] = field(default_factory=list)
+    usage_per_layer: List[int] = field(default_factory=list)
+    overflow_per_layer: List[int] = field(default_factory=list)
+    max_h_overflow: List[int] = field(default_factory=list)
+    max_v_overflow: List[int] = field(default_factory=list)
+    original_resources: List[int] = field(default_factory=list)
     edge_capacities: Dict[Tuple[int, int, int, int, int], int] = field(default_factory=dict)
     edge_usage: Dict[Tuple[int, int, int, int, int], int] = field(default_factory=dict)
+    tree_edges: Dict[Any, GRoute] = field(default_factory=dict)
+    adjustments: List[Tuple[int, int, int, int, int, int, bool]] = field(default_factory=list)
+    congestion_nets: Set[Any] = field(default_factory=set)
+    congestion_grid_v: List[CongestionInformation] = field(default_factory=list)
+    congestion_grid_h: List[CongestionInformation] = field(default_factory=list)
+    ndr_nets: Set[Any] = field(default_factory=set)
+    soft_ndr_nets: Set[Any] = field(default_factory=set)
+    soft_ndr_usage: Dict[int, int] = field(default_factory=dict)
     nets: Dict[Any, Dict[str, Any]] = field(default_factory=dict)
     net_ids: List[Any] = field(default_factory=list)
     routes: NetRouteMap = field(default_factory=dict)
@@ -887,6 +902,7 @@ class FastRouteCore:
     snapshot_batched_width: int = 0
     snapshot_batch_count: int = 0
     max_net_degree: int = 0
+    detour_penalty: int = 0
     regular_x: bool = True
     regular_y: bool = True
     incremental_grt: bool = False
@@ -897,6 +913,14 @@ class FastRouteCore:
 
         self.edge_capacities.clear()
         self.edge_usage.clear()
+        self.tree_edges.clear()
+        self.adjustments.clear()
+        self.congestion_nets.clear()
+        self.congestion_grid_v.clear()
+        self.congestion_grid_h.clear()
+        self.ndr_nets.clear()
+        self.soft_ndr_nets.clear()
+        self.soft_ndr_usage.clear()
         self.nets.clear()
         self.net_ids.clear()
         self.routes.clear()
@@ -919,6 +943,11 @@ class FastRouteCore:
         self.h_capacity_3D = [0 for _ in range(nLayers + 1)]
         self.last_col_v_capacity_3D = [0 for _ in range(nLayers + 1)]
         self.last_row_h_capacity_3D = [0 for _ in range(nLayers + 1)]
+        self.cap_per_layer = [0 for _ in range(nLayers + 1)]
+        self.usage_per_layer = [0 for _ in range(nLayers + 1)]
+        self.overflow_per_layer = [0 for _ in range(nLayers + 1)]
+        self.max_h_overflow = [0 for _ in range(nLayers + 1)]
+        self.max_v_overflow = [0 for _ in range(nLayers + 1)]
 
     def addVCapacity(self, verticalCapacity: int, layer: int) -> None:
         while len(self.v_capacity_3D) <= layer:
@@ -1013,6 +1042,77 @@ class FastRouteCore:
 
         _unsupported("FastRouteCore::initLowerBoundCapacities")
 
+    def getDbNetLayerEdgeCost(self, db_net: Any, layer: int) -> int:
+        """对应 C++ ``getDbNetLayerEdgeCost()``。
+
+        edge cost 来自 FastRoute net 注册时保存的 NDR/track 消耗向量；缺失时
+        维持 C++ 默认单位代价边界。
+        """
+
+        edge_costs = self.nets.get(db_net, {}).get("edge_cost_per_layer")
+        if edge_costs is None or layer < 0 or layer >= len(edge_costs):
+            return 1
+        return int(edge_costs[layer])
+
+    def initEdgesCapacityPerLayer(self) -> None:
+        """按已保存 edge capacity 汇总每层容量。"""
+
+        self.cap_per_layer = [0 for _ in range(self.num_layers + 1)]
+        for (*_, layer), capacity in self.edge_capacities.items():
+            while len(self.cap_per_layer) <= layer:
+                self.cap_per_layer.append(0)
+            self.cap_per_layer[layer] += capacity
+
+    def setNumAdjustments(self, nAdjustments: int) -> None:
+        """预留 C++ adjustment 容器大小；Python 只保留边界语义。"""
+
+        if nAdjustments <= 0:
+            self.adjustments.clear()
+
+    def addAdjustment(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        layer: int,
+        reducedCap: int,
+        isReduce: bool,
+    ) -> None:
+        """记录 FastRoute edge capacity adjustment 边界。"""
+
+        self.adjustments.append((x1, y1, x2, y2, layer, reducedCap, isReduce))
+
+    def releaseResourcesOnInterval(self, *args: Any, **kwargs: Any) -> None:
+        _unsupported("FastRouteCore::releaseResourcesOnInterval")
+
+    def addVerticalAdjustments(self, *args: Any, **kwargs: Any) -> None:
+        _unsupported("FastRouteCore::addVerticalAdjustments")
+
+    def addHorizontalAdjustments(self, *args: Any, **kwargs: Any) -> None:
+        _unsupported("FastRouteCore::addHorizontalAdjustments")
+
+    def saveResourcesBeforeAdjustments(self) -> None:
+        """保存 adjustment 前资源快照，供建议 adjustment/report 复用。"""
+
+        self.original_resources = list(self.cap_per_layer)
+
+    def computeSuggestedAdjustment(self) -> int:
+        _unsupported("FastRouteCore::computeSuggestedAdjustment")
+
+    def getPrecisionAdjustment(self, x: int, y: int, is_horizontal: bool) -> int:
+        _unsupported("FastRouteCore::getPrecisionAdjustment")
+
+    def initBlockedIntervals(self, track_space: List[int]) -> None:
+        _unsupported("FastRouteCore::initBlockedIntervals")
+
+    def initAuxVar(self) -> None:
+        """初始化 FastRoute 辅助统计容器；真实 edge/tree 初始化仍由专门入口承担。"""
+
+        self.initEdgesCapacityPerLayer()
+        self.usage_per_layer = [0 for _ in range(max(self.num_layers + 1, len(self.cap_per_layer)))]
+        self.overflow_per_layer = [0 for _ in range(len(self.usage_per_layer))]
+
     def setEdgeCapacity(self, x1: int, y1: int, x2: int, y2: int, layer: int, capacity: int) -> None:
         self.edge_capacities[(x1, y1, x2, y2, layer)] = capacity
 
@@ -1039,9 +1139,45 @@ class FastRouteCore:
     ) -> None:
         key = (x1, y1, x2, y2, layer)
         self.edge_usage[key] = self.edge_usage.get(key, 0) + used
+        while len(self.usage_per_layer) <= layer:
+            self.usage_per_layer.append(0)
+        self.usage_per_layer[layer] += used
 
     def hasAvailableResources(self, x1: int, y1: int, x2: int, y2: int, layer: int, db_net: Any) -> bool:
         return self.getAvailableResources(x1, y1, x2, y2, layer) > 0
+
+    def updateRouteGridsLayer(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        layer: int,
+        new_layer: int,
+        db_net: Any,
+    ) -> None:
+        """更新已保存 route 中精确匹配 segment 的层号。
+
+        这是状态同步辅助；涉及 rip-up/reroute 的真实层分配算法仍在 ``run``。
+        """
+
+        for route in (self.routes.get(db_net, []), self.planar_routes.get(db_net, [])):
+            for segment in route:
+                if (
+                    segment.init_x,
+                    segment.init_y,
+                    segment.final_x,
+                    segment.final_y,
+                    segment.init_layer,
+                    segment.final_layer,
+                ) == (x1, y1, x2, y2, layer, layer):
+                    segment.init_layer = new_layer
+                    segment.final_layer = new_layer
+
+    def addTreeEdge(self, x1: int, y1: int, x2: int, y2: int, layer: int, db_net: Any) -> None:
+        """保存 FastRoute tree edge 的 GSegment 形式。"""
+
+        self.tree_edges.setdefault(db_net, []).append(GSegment(x1, y1, layer, x2, y2, layer))
 
     def run(self) -> NetRouteMap:
         """执行 FastRoute 主算法。
@@ -1056,6 +1192,30 @@ class FastRouteCore:
 
     def has2Doverflow(self) -> bool:
         return self.has_2d_overflow
+
+    def getBlockage(self, layer: Any, x: int, y: int) -> Tuple[int, int]:
+        _unsupported("FastRouteCore::getBlockage")
+
+    def updateDbCongestion(self, min_routing_layer: int, max_routing_layer: int) -> None:
+        _unsupported("FastRouteCore::updateDbCongestion")
+
+    def getCapacityReductionData(self, cap_red_data: CapacityReductionData) -> None:
+        _unsupported("FastRouteCore::getCapacityReductionData")
+
+    def findCongestedEdgesNets(
+        self,
+        nets_in_congested_edges: NetsPerCongestedArea,
+        vertical: bool,
+    ) -> None:
+        _unsupported("FastRouteCore::findCongestedEdgesNets")
+
+    def getCongestionGrid(
+        self,
+        congestionGridV: List[CongestionInformation],
+        congestionGridH: List[CongestionInformation],
+    ) -> None:
+        congestionGridV.extend(self.congestion_grid_v)
+        congestionGridH.extend(self.congestion_grid_h)
 
     def getSnapshotBatchCount(self) -> int:
         return self.snapshot_batch_count
@@ -1090,6 +1250,9 @@ class FastRouteCore:
 
     def setMaxNetDegree(self, max_degree: int) -> None:
         self.max_net_degree = max_degree
+
+    def setDetourPenalty(self, penalty: int) -> None:
+        self.detour_penalty = penalty
 
     def setVerbose(self, value: bool) -> None:
         self.verbose = value
@@ -1175,6 +1338,58 @@ class FastRouteCore:
 
     def get3DRoute(self, db_net: Any, route: GRoute) -> None:
         route.extend(self.routes.get(db_net, []))
+
+    def getCongestionNets(self, congestion_nets: Set[Any]) -> None:
+        congestion_nets.update(self.congestion_nets)
+
+    def computeCongestionInformation(self) -> None:
+        _unsupported("FastRouteCore::computeCongestionInformation")
+
+    def getOriginalResources(self) -> List[int]:
+        return self.original_resources
+
+    def getTotalCapacityPerLayer(self) -> List[int]:
+        return self.cap_per_layer
+
+    def getTotalUsagePerLayer(self) -> List[int]:
+        return self.usage_per_layer
+
+    def getTotalOverflowPerLayer(self) -> List[int]:
+        return self.overflow_per_layer
+
+    def getMaxHorizontalOverflows(self) -> List[int]:
+        return self.max_h_overflow
+
+    def getMaxVerticalOverflows(self) -> List[int]:
+        return self.max_v_overflow
+
+    def clearNDRnets(self) -> None:
+        self.ndr_nets.clear()
+        self.soft_ndr_nets.clear()
+        self.soft_ndr_usage.clear()
+
+    def computeCongestedNDRnets(self) -> None:
+        _unsupported("FastRouteCore::computeCongestedNDRnets")
+
+    def updateSoftNDRNetUsage(self, net_id: int, edge_cost: int) -> None:
+        self.soft_ndr_usage[net_id] = edge_cost
+
+    def setSoftNDR(self, net_id: int) -> None:
+        self.soft_ndr_nets.add(net_id)
+
+    def applySoftNDR(self, net_ids: Sequence[int]) -> None:
+        self.soft_ndr_nets.update(net_ids)
+
+    def convertGridsToSegments(self, *args: Any, **kwargs: Any) -> None:
+        _unsupported("FastRouteCore::convertGridsToSegments")
+
+    def clearNetRouteById(self, netID: int) -> None:
+        if 0 <= netID < len(self.net_ids):
+            self.clearNetRoute(self.net_ids[netID])
+
+    def clearNets(self) -> None:
+        self.nets.clear()
+        self.net_ids.clear()
 
     def setIncrementalGrt(self, is_incremental: bool) -> None:
         self.incremental_grt = is_incremental
@@ -1393,7 +1608,7 @@ class GlobalRouter:
         _unsupported("GlobalRouter::updateUncoveredPinsPositions")
 
     def saveGuidesFromDB(self, guides: Dict[Any, Any]) -> None:
-        _unsupported("GlobalRouter::saveGuidesFromFile")
+        _unsupported("GlobalRouter::saveGuidesFromDB")
 
     def saveGuides(self, nets: Sequence[Any]) -> None:
         _unsupported("GlobalRouter::saveGuides")

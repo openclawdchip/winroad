@@ -957,6 +957,46 @@ class GPin:
         self.maxExpSumX_ = self.maxExpSumY_ = self.minExpSumX_ = self.minExpSumY_ = 0.0
         self.hasMaxExpSumX_ = self.hasMaxExpSumY_ = self.hasMinExpSumX_ = self.hasMinExpSumY_ = False
 
+    def setMaxExpSumX(self, maxExpSumX: float) -> None:
+        self.maxExpSumX_ = maxExpSumX
+        self.hasMaxExpSumX_ = True
+
+    def setMaxExpSumY(self, maxExpSumY: float) -> None:
+        self.maxExpSumY_ = maxExpSumY
+        self.hasMaxExpSumY_ = True
+
+    def setMinExpSumX(self, minExpSumX: float) -> None:
+        self.minExpSumX_ = minExpSumX
+        self.hasMinExpSumX_ = True
+
+    def setMinExpSumY(self, minExpSumY: float) -> None:
+        self.minExpSumY_ = minExpSumY
+        self.hasMinExpSumY_ = True
+
+    def maxExpSumX(self) -> float:
+        return self.maxExpSumX_
+
+    def maxExpSumY(self) -> float:
+        return self.maxExpSumY_
+
+    def minExpSumX(self) -> float:
+        return self.minExpSumX_
+
+    def minExpSumY(self) -> float:
+        return self.minExpSumY_
+
+    def hasMaxExpSumX(self) -> bool:
+        return self.hasMaxExpSumX_
+
+    def hasMaxExpSumY(self) -> bool:
+        return self.hasMaxExpSumY_
+
+    def hasMinExpSumX(self) -> bool:
+        return self.hasMinExpSumX_
+
+    def hasMinExpSumY(self) -> bool:
+        return self.hasMinExpSumY_
+
     def setCenterLocation(self, cx: int, cy: int) -> None:
         self.cx_, self.cy_ = cx, cy
 
@@ -1094,6 +1134,30 @@ class GNet:
     def addWaYExpMaxSumY(self, value: float) -> None:
         self.waYExpMaxSumY_ += value
 
+    def waExpMinSumX(self) -> float:
+        return self.waExpMinSumX_
+
+    def waXExpMinSumX(self) -> float:
+        return self.waXExpMinSumX_
+
+    def waExpMinSumY(self) -> float:
+        return self.waExpMinSumY_
+
+    def waYExpMinSumY(self) -> float:
+        return self.waYExpMinSumY_
+
+    def waExpMaxSumX(self) -> float:
+        return self.waExpMaxSumX_
+
+    def waXExpMaxSumX(self) -> float:
+        return self.waXExpMaxSumX_
+
+    def waExpMaxSumY(self) -> float:
+        return self.waExpMaxSumY_
+
+    def waYExpMaxSumY(self) -> float:
+        return self.waYExpMaxSumY_
+
 
 @dataclass
 class Bin:
@@ -1155,6 +1219,16 @@ class Bin:
     def electroFieldY(self) -> float:
         return self.electroFieldY_
 
+    def electroForceX(self) -> float:
+        """C++ 旧命名兼容：当前源码中等价于 electroFieldX。"""
+
+        return self.electroFieldX_
+
+    def electroForceY(self) -> float:
+        """C++ 旧命名兼容：当前源码中等价于 electroFieldY。"""
+
+        return self.electroFieldY_
+
     def getTargetDensity(self) -> float:
         return self.targetDensity_
 
@@ -1169,6 +1243,11 @@ class Bin:
 
     def setElectroField(self, electroFieldX: float, electroFieldY: float) -> None:
         self.electroFieldX_, self.electroFieldY_ = electroFieldX, electroFieldY
+
+    def setElectroForce(self, electroForceX: float, electroForceY: float) -> None:
+        """C++ 旧命名兼容：当前源码中等价于 setElectroField。"""
+
+        self.setElectroField(electroForceX, electroForceY)
 
     def setElectroPhi(self, phi: float) -> None:
         self.electroPhi_ = phi
@@ -1280,6 +1359,9 @@ class BinGrid:
                 uy = int(round(self.ly_ + (y + 1) * self.binSizeY_))
                 self.bins_.append(Bin(x, y, lx, ly, ux, uy, targetDensity_=self.targetDensity_))
 
+    def updateBinsGCellDensityArea(self, cells: Sequence[GCell]) -> None:
+        raise NotImplementedError("OpenROAD bin density-area accumulation has not been translated yet")
+
     def lx(self) -> int:
         return self.lx_
 
@@ -1322,11 +1404,26 @@ class BinGrid:
     def getOverflowAreaUnscaled(self) -> int:
         return self.sumOverflowAreaUnscaled_
 
+    def getDensityMinMaxIdxX(self, gcell: GCell) -> Tuple[int, int]:
+        raise NotImplementedError("OpenROAD density bin X range calculation has not been translated yet")
+
+    def getDensityMinMaxIdxY(self, gcell: GCell) -> Tuple[int, int]:
+        raise NotImplementedError("OpenROAD density bin Y range calculation has not been translated yet")
+
+    def getMinMaxIdxX(self, inst: Instance) -> Tuple[int, int]:
+        raise NotImplementedError("OpenROAD instance bin X range calculation has not been translated yet")
+
+    def getMinMaxIdxY(self, inst: Instance) -> Tuple[int, int]:
+        raise NotImplementedError("OpenROAD instance bin Y range calculation has not been translated yet")
+
     def getBins(self) -> List[Bin]:
         return self.bins_
 
     def getBinsConst(self) -> List[Bin]:
         return self.bins_
+
+    def updateBinsNonPlaceArea(self) -> None:
+        raise NotImplementedError("OpenROAD non-place bin area update has not been translated yet")
 
 
 @dataclass
@@ -1698,6 +1795,8 @@ class NesterovBaseCommon:
         self.delta_area_ = 0
         self.new_gcells_count_ = 0
         self.deleted_gcells_count_ = 0
+        self.changed_gcells_: List[GCell] = []
+        self.timing_driven_net_reweight_overflow_: List[int] = []
         self.db_cbk_: Optional[nesterovDbCbk] = None
         self._init_from_pb(clusters or [])
 
@@ -1744,6 +1843,9 @@ class NesterovBaseCommon:
     def updateWireLengthForceWA(self, wlCoeffX: float, wlCoeffY: float) -> None:
         raise NotImplementedError("OpenROAD WA wirelength force update has not been translated yet")
 
+    def updateWireLengthForceWAInit(self, wlCoeffX: float, wlCoeffY: float) -> None:
+        raise NotImplementedError("OpenROAD WA wirelength force init has not been translated yet")
+
     def getWireLengthGradientPinWA(self, gPin: GPin, wlCoeffX: float, wlCoeffY: float) -> FloatPoint:
         raise NotImplementedError("OpenROAD WA pin gradient has not been translated yet")
 
@@ -1752,6 +1854,37 @@ class NesterovBaseCommon:
 
     def getWireLengthPreconditioner(self, gCell: GCell) -> FloatPoint:
         raise NotImplementedError("OpenROAD wirelength preconditioner has not been translated yet")
+
+    def updatePinLocation(self) -> None:
+        for gpin in self.gPins_:
+            gpin.updateLocation()
+
+    def updateDensityPinLocation(self) -> None:
+        for gpin in self.gPins_:
+            gpin.updateDensityLocation()
+
+    def updateGNetBox(self) -> None:
+        for gnet in self.gNets_:
+            gnet.updateBox()
+
+    def setTimingNetWeight(self, net: Net, weight: float) -> None:
+        gnet = self.pbToNb(net)
+        if gnet is not None:
+            gnet.setTimingWeight(weight)
+
+    def resetTimingNetWeights(self) -> None:
+        for gnet in self.gNets_:
+            gnet.setTimingWeight(1.0)
+
+    def addChangedGCell(self, gcell: GCell) -> None:
+        if gcell not in self.changed_gcells_:
+            self.changed_gcells_.append(gcell)
+
+    def clearChangedGCells(self) -> None:
+        self.changed_gcells_.clear()
+
+    def changedGCells(self) -> List[GCell]:
+        return self.changed_gcells_
 
     def getHpwl(self) -> int:
         return sum(gnet.getHpwl() for gnet in self.gNets_)
@@ -1833,6 +1966,14 @@ class NesterovBase:
         self.iter_ = 0
         self.isConverged_ = False
         self.reprint_iter_header_ = False
+        self.snapshot_gcell_coordis_: List[FloatPoint] = []
+        self.snapshot_density_coordis_: List[FloatPoint] = []
+        self.prevSLPCoordi_: List[FloatPoint] = []
+        self.curSLPCoordi_: List[FloatPoint] = []
+        self.nextSLPCoordi_: List[FloatPoint] = []
+        self.prevSLPGradient_: List[FloatPoint] = []
+        self.curSLPGradient_: List[FloatPoint] = []
+        self.nextSLPGradient_: List[FloatPoint] = []
         self._init_bin_grid()
 
     def _init_bin_grid(self) -> None:
@@ -1926,6 +2067,14 @@ class NesterovBase:
         self.movableArea_ = sum(cell.dx() * cell.dy() for cell in self.nb_gcells_ if cell.isInstance())
         self.totalFillerArea_ = sum(cell.dx() * cell.dy() for cell in self.fillerStor_)
 
+    def initFillerGCells(self) -> None:
+        raise NotImplementedError("OpenROAD filler creation and placement has not been translated yet")
+
+    def resetFillerGCells(self) -> None:
+        self.fillerStor_.clear()
+        self.nb_gcells_ = [cell for cell in self.nb_gcells_ if not cell.isFiller()]
+        self.updateAreas()
+
     def updateDensitySize(self) -> None:
         for gcell in self.nb_gcells_:
             gcell.setDensitySize(gcell.dx(), gcell.dy())
@@ -1988,6 +2137,40 @@ class NesterovBase:
     def updateDensityFieldBin(self) -> None:
         raise NotImplementedError("OpenROAD FFT density field update has not been translated yet")
 
+    def updateWireLengthForceWA(self, wlCoeffX: float, wlCoeffY: float) -> None:
+        self.nbc_.updateWireLengthForceWA(wlCoeffX, wlCoeffY)
+
+    def updateWireLengthForceWAInit(self, wlCoeffX: float, wlCoeffY: float) -> None:
+        self.nbc_.updateWireLengthForceWAInit(wlCoeffX, wlCoeffY)
+
+    def updateGCellDensityCenterLocation(self) -> None:
+        raise NotImplementedError("OpenROAD density-center clamping update has not been translated yet")
+
+    def updateInitialPrevSLPCoordi(self) -> None:
+        self.prevSLPCoordi_ = [FloatPoint(cell.cx(), cell.cy()) for cell in self.nb_gcells_]
+
+    def updateCurSLPCoordi(self) -> None:
+        self.curSLPCoordi_ = [FloatPoint(cell.cx(), cell.cy()) for cell in self.nb_gcells_]
+
+    def updateNextSLPCoordi(self) -> None:
+        self.nextSLPCoordi_ = [FloatPoint(cell.cx(), cell.cy()) for cell in self.nb_gcells_]
+
+    def updatePrevGradient(self) -> None:
+        self.prevSLPGradient_ = list(self.curSLPGradient_)
+
+    def updateCurGradient(self) -> None:
+        raise NotImplementedError("OpenROAD current SLP gradient update has not been translated yet")
+
+    def updateNextGradient(self) -> None:
+        raise NotImplementedError("OpenROAD next SLP gradient update has not been translated yet")
+
+    def updatePrevSLPCoordi(self) -> None:
+        self.prevSLPCoordi_ = list(self.curSLPCoordi_)
+
+    def updateDensityCenterCoordiLayoutInside(self) -> None:
+        for gcell in self.nb_gcells_:
+            self.updateDensityCoordiLayoutInside(gcell)
+
     def getBinGrid(self) -> BinGrid:
         return self.bg_
 
@@ -1996,6 +2179,21 @@ class NesterovBase:
 
     def initDensity2(self, wlCoeffX: float, wlCoeffY: float) -> float:
         raise NotImplementedError("OpenROAD Nesterov initDensity2 has not been translated yet")
+
+    def initBaseWireLengthCoef(self) -> None:
+        raise NotImplementedError("OpenROAD base wirelength coefficient initialization has not been translated yet")
+
+    def initDensityPenalty(self, init_density_penalty: float) -> None:
+        self.densityPenalty_ = init_density_penalty
+
+    def updateDensityPenalty(self, overflow: float) -> None:
+        raise NotImplementedError("OpenROAD density penalty update has not been translated yet")
+
+    def updatePhiCoef(self, overflow: float) -> None:
+        raise NotImplementedError("OpenROAD phi coefficient update has not been translated yet")
+
+    def updateGradSum(self) -> None:
+        raise NotImplementedError("OpenROAD gradient sum update has not been translated yet")
 
     def setNpVars(self, npVars: NesterovPlaceVars) -> None:
         self.npVars_ = npVars
@@ -2016,10 +2214,15 @@ class NesterovBase:
         return self.isDiverged_
 
     def saveSnapshot(self) -> None:
-        return None
+        self.snapshot_gcell_coordis_ = [FloatPoint(cell.cx(), cell.cy()) for cell in self.nb_gcells_]
+        self.snapshot_density_coordis_ = [FloatPoint(cell.dCx(), cell.dCy()) for cell in self.nb_gcells_]
 
     def revertToSnapshot(self) -> bool:
-        return False
+        if not self.snapshot_gcell_coordis_:
+            return False
+        self.updateGCellCenterLocation(self.snapshot_gcell_coordis_)
+        self.updateGCellDensityCenterLocation(self.snapshot_density_coordis_)
+        return True
 
     def resetMinSumOverflow(self) -> None:
         return None
@@ -2113,6 +2316,19 @@ class RouteBase:
         self.min_RC_violated_cnt_ = 0
         self.max_routability_no_improvement_ = 3
         self.max_routability_revert_ = 50
+        self.rc_metric_: List[float] = []
+        self.route_overflow_: List[float] = []
+        self.route_utilization_: List[float] = []
+        self.tg_.setLogger(log)
+
+    def setNesterovBaseCommon(self, nbc: NesterovBaseCommon) -> None:
+        self.nbc_ = nbc
+
+    def setNesterovBases(self, nbVec: Sequence[NesterovBase]) -> None:
+        self.nbVec_ = list(nbVec)
+
+    def initRouteBase(self) -> None:
+        raise NotImplementedError("OpenROAD RouteBase initialization has not been translated yet")
 
     def updateGrtRoute(self) -> None:
         raise NotImplementedError("OpenROAD GR route update has not been translated yet")
@@ -2129,11 +2345,25 @@ class RouteBase:
     def calculateRudyTiles(self) -> None:
         raise NotImplementedError("OpenROAD RUDY tile calculation has not been translated yet")
 
+    def updateRudyRoute(self) -> None:
+        self.calculateRudyTiles()
+        self.updateRudyAverage(False)
+
     def updateRudyAverage(self, verbose: bool = True) -> None:
         raise NotImplementedError("OpenROAD RUDY average update has not been translated yet")
 
+    def updateRoute(self) -> None:
+        if self.rbVars_.useRudy:
+            self.updateRudyRoute()
+        else:
+            self.updateGrtRoute()
+            self.getGrtResult()
+
     def getRudyAverage(self) -> float:
         return self.final_average_rc_
+
+    def getRC(self) -> float:
+        return self.getRudyAverage() if self.rbVars_.useRudy else self.getGrtRC()
 
     def getOverflowedTilesCount(self) -> int:
         return self.overflowed_tiles_count_
@@ -2149,6 +2379,23 @@ class RouteBase:
 
     def routability(self, routability_driven_revert_count: int) -> Tuple[bool, bool]:
         raise NotImplementedError("OpenROAD routability-driven inflation loop has not been translated yet")
+
+    def updateInflationRatio(self) -> None:
+        raise NotImplementedError("OpenROAD routability inflation-ratio update has not been translated yet")
+
+    def updateGCellSize(self) -> None:
+        raise NotImplementedError("OpenROAD routability gcell size update has not been translated yet")
+
+    def revertGCellSizeToMinRc(self) -> None:
+        raise NotImplementedError("OpenROAD routability min-RC revert has not been translated yet")
+
+    def saveMinRc(self) -> None:
+        self.minRcTargetDensity_ = [nb.getTargetDensity() for nb in self.nbVec_]
+
+    def resetMinRc(self) -> None:
+        self.minRc_ = 1e30
+        self.is_min_rc_ = False
+        self.minRcTargetDensity_.clear()
 
     def inflatedAreaDelta(self) -> List[int]:
         return self.inflatedAreaDelta_
@@ -2177,6 +2424,9 @@ class TimingBase:
         self.timingNetWeightOverflow_: List[int] = []
         self.timingOverflowChk_: List[int] = []
         self.net_weight_max_ = 5.0
+        self.timing_driven_nets_: List[GNet] = []
+        self.prev_timing_weights_: Dict[int, float] = {}
+        self.run_journal_restore_ = False
 
     def isTimingNetWeightOverflow(self, overflow: float) -> bool:
         return int(round(overflow * 100)) in self.timingNetWeightOverflow_
@@ -2205,8 +2455,25 @@ class TimingBase:
     def executeTimingDriven(self, run_journal_restore: bool) -> bool:
         raise NotImplementedError("OpenROAD timing-driven net reweight has not been translated yet")
 
+    def resetTimingDrivenNets(self) -> None:
+        self.timing_driven_nets_.clear()
+        if self.nbc_ is not None:
+            self.nbc_.resetTimingNetWeights()
+
+    def updateGNetWeights(self) -> None:
+        raise NotImplementedError("OpenROAD timing-driven gnet weight update has not been translated yet")
+
+    def runResizerForTiming(self, run_journal_restore: bool) -> bool:
+        raise NotImplementedError("OpenROAD resizer timing repair hook has not been translated yet")
+
+    def resetFillerCells(self) -> None:
+        raise NotImplementedError("OpenROAD timing-driven filler reset has not been translated yet")
+
     def initTimingOverflowChk(self) -> None:
         self.timingOverflowChk_ = sorted(set(self.timingNetWeightOverflow_), reverse=True)
+
+    def timingOverflowChk(self) -> List[int]:
+        return self.timingOverflowChk_
 
 
 class NesterovPlace:
@@ -2259,8 +2526,42 @@ class NesterovPlace:
     def doNesterovPlace(self, start_iter: int = 0) -> int:
         raise NotImplementedError("OpenROAD NesterovPlace main loop has not been translated yet")
 
+    def init(self) -> None:
+        raise NotImplementedError("OpenROAD NesterovPlace initialization sequence has not been translated yet")
+
+    def initWireLengthCoef(self) -> None:
+        raise NotImplementedError("OpenROAD initial wirelength coefficient calculation has not been translated yet")
+
     def updateWireLengthCoef(self, overflow: float) -> None:
         raise NotImplementedError("OpenROAD wirelength coefficient update has not been translated yet")
+
+    def updateInitialPrevSLPCoordi(self) -> None:
+        for nb in self.nbVec_:
+            nb.updateInitialPrevSLPCoordi()
+
+    def updateCurSLPCoordi(self) -> None:
+        for nb in self.nbVec_:
+            nb.updateCurSLPCoordi()
+
+    def updateNextSLPCoordi(self) -> None:
+        for nb in self.nbVec_:
+            nb.updateNextSLPCoordi()
+
+    def updatePrevGradient(self) -> None:
+        for nb in self.nbVec_:
+            nb.updatePrevGradient()
+
+    def updateCurGradient(self) -> None:
+        for nb in self.nbVec_:
+            nb.updateCurGradient()
+
+    def updateNextGradient(self) -> None:
+        for nb in self.nbVec_:
+            nb.updateNextGradient()
+
+    def updatePrevSLPCoordi(self) -> None:
+        for nb in self.nbVec_:
+            nb.updatePrevSLPCoordi()
 
     def updateNextIter(self, iter: int) -> None:
         for nb in self.nbVec_:
@@ -2270,9 +2571,51 @@ class NesterovPlace:
         if self.nbc_ is not None:
             self.nbc_.updateDbGCells()
 
+    def updateGCellDensityCenterLocation(self) -> None:
+        for nb in self.nbVec_:
+            nb.updateGCellDensityCenterLocation()
+
+    def updateDensityCenterCoordiLayoutInside(self) -> None:
+        for nb in self.nbVec_:
+            nb.updateDensityCenterCoordiLayoutInside()
+
+    def saveSnapshot(self) -> None:
+        for nb in self.nbVec_:
+            nb.saveSnapshot()
+        self.diverge_snapshot_average_overflow_unscaled_ = self.average_overflow_unscaled_
+
+    def revertToSnapshot(self) -> bool:
+        return all(nb.revertToSnapshot() for nb in self.nbVec_)
+
+    def checkConvergence(self, iter: int, routability_iter: int) -> bool:
+        return all(nb.checkConvergence(iter, routability_iter, self.rb_) for nb in self.nbVec_)
+
+    def checkDivergence(self) -> bool:
+        self.num_region_diverged_ = sum(1 for nb in self.nbVec_ if nb.checkDivergence())
+        return self.num_region_diverged_ > 0
+
+    def updateOverflow(self) -> None:
+        self.total_sum_overflow_ = sum(nb.getSumOverflow() for nb in self.nbVec_)
+        self.total_sum_overflow_unscaled_ = sum(nb.getSumOverflowUnscaled() for nb in self.nbVec_)
+        count = max(1, len(self.nbVec_))
+        self.average_overflow_ = self.total_sum_overflow_ / count
+        self.average_overflow_unscaled_ = self.total_sum_overflow_unscaled_ / count
+
     def checkInvalidValues(self, wireLengthGradSum: float, densityGradSum: float) -> None:
         if wireLengthGradSum != wireLengthGradSum or densityGradSum != densityGradSum:
             raise ValueError("Invalid gradient value in NesterovPlace")
+
+    def updateTiming(self, overflow: float) -> bool:
+        if self.tb_ is None or self.npVars_ is None or not self.npVars_.timingDrivenMode:
+            return False
+        if self.tb_.isTimingNetWeightOverflow(overflow):
+            return self.tb_.executeTimingDriven(False)
+        return False
+
+    def updateRoutability(self, routability_driven_revert_count: int) -> Tuple[bool, bool]:
+        if self.rb_ is None or self.npVars_ is None or not self.npVars_.routability_driven_mode:
+            return (False, False)
+        return self.rb_.routability(routability_driven_revert_count)
 
     def getWireLengthCoefX(self) -> float:
         return self.wireLengthCoefX_
@@ -2527,6 +2870,12 @@ class Replace:
     def addPlacementCluster(self, cluster: Cluster) -> None:
         self.clusters_.append(cluster)
 
+    def clearPlacementClusters(self) -> None:
+        self.clusters_.clear()
+
+    def getTotalPlaceableInsts(self) -> int:
+        return self.total_placeable_insts_
+
     def checkHasCoreRows(self) -> None:
         block = _get_block(self.db_)
         if block is None:
@@ -2585,6 +2934,28 @@ class Replace:
 
     def runMBFF(self, max_sz: int, alpha: float, beta: float, threads: int, num_paths: int) -> None:
         raise NotImplementedError("OpenROAD MBFF clustering has not been translated yet")
+
+    def resetRoutabilityResources(self) -> None:
+        self.rb_ = None
+        if self.np_ is not None:
+            self.np_.rb_ = None
+
+    def resetTimingResources(self) -> None:
+        self.tb_ = None
+        if self.np_ is not None:
+            self.np_.tb_ = None
+
+    def setInitialPlaceMaxIter(self, options: PlaceOptions, max_iter: int) -> None:
+        options.initialPlaceMaxIter = max_iter
+
+    def setNesterovPlaceMaxIter(self, options: PlaceOptions, max_iter: int) -> None:
+        options.nesterovPlaceMaxIter = max_iter
+
+    def setTargetDensity(self, options: PlaceOptions, density: float) -> None:
+        options.density = density
+
+    def setTargetOverflow(self, options: PlaceOptions, overflow: float) -> None:
+        options.overflow = overflow
 
     def initNesterovPlace(self, options: PlaceOptions, threads: int, check_density: bool) -> bool:
         if self.pbc_ is None:

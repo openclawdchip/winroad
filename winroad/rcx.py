@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 
 CoupleOptions = List[int]
@@ -25,6 +25,17 @@ def _not_translated(name: str) -> NotImplementedError:
     """统一说明某个 C++ 函数边界尚未落地。"""
 
     return NotImplementedError(f"OpenROAD rcx::{name} 尚未翻译为 Python 实现")
+
+
+def _parse_number_list(text: Optional[str]) -> List[float]:
+    """解析 rcx Tcl 选项里常见的空格/逗号分隔数值表。"""
+
+    if not text:
+        return []
+    values: List[float] = []
+    for word in text.replace(",", " ").split():
+        values.append(float(word))
+    return values
 
 
 @dataclass
@@ -335,6 +346,28 @@ class extDistRCTable:
     def getComputeRC_maxDist(self) -> int:
         return self.maxDist_
 
+    def makeComputeTable(self, maxDist: int, distUnit: int) -> None:
+        self.maxDist_ = maxDist
+        self.unit_ = distUnit
+        self.computeTable_ = list(self.measureTable_)
+
+    def findRes(self, dist1: int, dist2: int, compute: bool = False) -> Optional[extDistRC]:
+        """按 C++ 边界保留双距离电阻查找；当前只在已加载表中精确匹配。"""
+
+        return self.getRC(dist1, compute) or self.getRC(dist2, compute)
+
+    def readRules(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extDistRCTable::readRules")
+
+    def readRules_res2(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extDistRCTable::readRules_res2")
+
+    def writeRules(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extDistRCTable::writeRules")
+
+    def interpolate(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extDistRCTable::interpolate")
+
 
 @dataclass
 class extDistWidthRCTable:
@@ -344,6 +377,12 @@ class extDistWidthRCTable:
     _layerCnt: int = 0
     _met: int = 0
     _widthTable: List[int] = field(default_factory=list)
+    _diagWidthTable: Dict[int, List[int]] = field(default_factory=dict)
+    _diagDistTable: Dict[int, List[int]] = field(default_factory=dict)
+    _metCnt: int = 0
+    _widthCnt: int = 0
+    _diagWidthCnt: int = 0
+    _diagDistCnt: int = 0
     _rcDistTable: Dict[tuple[int, int], extDistRCTable] = field(default_factory=dict)
 
     def addRCw(self, n: int, w: int, rc: extDistRC) -> None:
@@ -367,6 +406,45 @@ class extDistWidthRCTable:
     def getRuleTable(self, mou: int, w: int) -> Optional[extDistRCTable]:
         return self._rcDistTable.get((mou, w))
 
+    def setDiagUnderTables(
+        self,
+        met: int,
+        diagWidthTable: Optional[Iterable[float]] = None,
+        diagDistTable: Optional[Iterable[float]] = None,
+        dbFactor: float = 1.0,
+    ) -> None:
+        self._diagWidthTable[met] = [int(w * dbFactor) for w in (diagWidthTable or [])]
+        self._diagDistTable[met] = [int(s * dbFactor) for s in (diagDistTable or [])]
+        self._diagWidthCnt = max(self._diagWidthCnt, len(self._diagWidthTable[met]))
+        self._diagDistCnt = max(self._diagDistCnt, len(self._diagDistTable[met]))
+
+    def getDiagWidthIndex(self, m: int, w: int) -> int:
+        try:
+            return self._diagWidthTable.get(m, []).index(w)
+        except ValueError:
+            return -1
+
+    def getDiagDistIndex(self, m: int, s: int) -> int:
+        try:
+            return self._diagDistTable.get(m, []).index(s)
+        except ValueError:
+            return -1
+
+    def getMetIndexUnder(self, mOver: int) -> int:
+        return mOver
+
+    def readRulesOver(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extDistWidthRCTable::readRulesOver")
+
+    def readRulesUnder(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extDistWidthRCTable::readRulesUnder")
+
+    def readRulesDiagUnder(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extDistWidthRCTable::readRulesDiagUnder")
+
+    def readRulesOverUnder(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extDistWidthRCTable::readRulesOverUnder")
+
 
 @dataclass
 class extMetRCTable:
@@ -377,7 +455,16 @@ class extMetRCTable:
     _capOver: Dict[int, extDistWidthRCTable] = field(default_factory=dict)
     _capUnder: Dict[int, extDistWidthRCTable] = field(default_factory=dict)
     _capOverUnder: Dict[int, extDistWidthRCTable] = field(default_factory=dict)
-    _viaModel: List[Any] = field(default_factory=list)
+    _wireCnt: int = 0
+    _name: str = ""
+    _rate: float = 0.0
+    _capOver_open: Dict[tuple[int, bool], extDistWidthRCTable] = field(default_factory=dict)
+    _capUnder_open: Dict[tuple[int, bool], extDistWidthRCTable] = field(default_factory=dict)
+    _capOverUnder_open: Dict[tuple[int, bool], extDistWidthRCTable] = field(default_factory=dict)
+    _capDiagUnder: Dict[int, extDistWidthRCTable] = field(default_factory=dict)
+    _resOver: Dict[int, extDistWidthRCTable] = field(default_factory=dict)
+    _viaModel: List["extViaModel"] = field(default_factory=list)
+    _viaModelHash: Dict[str, "extViaModel"] = field(default_factory=dict)
 
     def allocOverTable(self, met: int, wTable: Optional[List[float]] = None, dbFactor: float = 1.0) -> None:
         table = extDistWidthRCTable(_over=True, _layerCnt=self._layerCnt, _met=met)
@@ -388,6 +475,23 @@ class extMetRCTable:
         table = extDistWidthRCTable(_over=False, _layerCnt=self._layerCnt, _met=met)
         table._widthTable = [int(w * dbFactor) for w in (wTable or [])]
         self._capUnder[met] = table
+
+    def allocOverUnderTable(self, met: int, wTable: Optional[List[float]] = None, dbFactor: float = 1.0) -> None:
+        table = extDistWidthRCTable(_over=True, _layerCnt=self._layerCnt, _met=met)
+        table._widthTable = [int(w * dbFactor) for w in (wTable or [])]
+        self._capOverUnder[met] = table
+
+    def allocDiagUnderTable(
+        self,
+        met: int,
+        wTable: Optional[List[float]] = None,
+        diagWidthCnt: int = 0,
+        diagDistCnt: int = 0,
+        dbFactor: float = 1.0,
+    ) -> None:
+        table = extDistWidthRCTable(_over=False, _layerCnt=self._layerCnt, _met=met)
+        table._widthTable = [int(w * dbFactor) for w in (wTable or [])]
+        self._capDiagUnder[met] = table
 
     def addCapOver(self, met: int, metUnder: int, rc: extDistRC) -> int:
         table = self._capOver.setdefault(met, extDistWidthRCTable(_over=True, _layerCnt=self._layerCnt, _met=met))
@@ -406,6 +510,64 @@ class extMetRCTable:
     def getCapUnder(self, met: int, metOver: int) -> Optional[extDistRC]:
         table = self._capUnder.get(met)
         return None if table is None else table.getRC(metOver, 0, 0)
+
+    def addViaModel(
+        self,
+        name: str,
+        R: float,
+        cCnt: int,
+        dx: int,
+        dy: int,
+        top: int,
+        bot: int,
+    ) -> "extViaModel":
+        model = extViaModel(name=name, R=R, cCnt=cCnt, dx=dx, dy=dy, top=top, bot=bot)
+        self._viaModel.append(model)
+        self._viaModelHash[name] = model
+        return model
+
+    def getViaModel(self, name: str) -> Optional["extViaModel"]:
+        return self._viaModelHash.get(name)
+
+    def GetViaRes(self, *args: Any, **kwargs: Any) -> bool:
+        raise _not_translated("extMetRCTable::GetViaRes")
+
+    def ReadRules(self, *args: Any, **kwargs: Any) -> bool:
+        raise _not_translated("extMetRCTable::ReadRules")
+
+    def writeViaRes(self, *args: Any, **kwargs: Any) -> None:
+        raise _not_translated("extMetRCTable::writeViaRes")
+
+
+@dataclass
+class extViaModel:
+    """对应 `extViaModel` 的轻量配置边界，保存 via 电阻模型元数据。"""
+
+    name: str = ""
+    R: float = 0.0
+    cCnt: int = 0
+    dx: int = 0
+    dy: int = 0
+    top: int = 0
+    bot: int = 0
+
+
+@dataclass
+class extRCTable:
+    """对应 `extRCTable`，早期 over/under 简化表的 Python 边界。"""
+
+    _over: bool = True
+    _layerCnt: int = 0
+    _inTable: Dict[tuple[int, int], List[extDistRC]] = field(default_factory=dict)
+
+    def addCapOver(self, met: int, metUnder: int, rc: extDistRC) -> int:
+        table = self._inTable.setdefault((met, metUnder), [])
+        table.append(rc)
+        return len(table) - 1
+
+    def getCapOver(self, met: int, metUnder: int) -> Optional[extDistRC]:
+        table = self._inTable.get((met, metUnder), [])
+        return table[-1] if table else None
 
 
 @dataclass
@@ -477,6 +639,13 @@ class extRCModel:
     _layerCnt: int = 0
     _metRCTable: List[extMetRCTable] = field(default_factory=list)
     _cornerTable: List[extCorner] = field(default_factory=list)
+    _modelMap: List[int] = field(default_factory=list)
+    _rulesFile: Optional[str] = None
+    _rulesFileBinary: bool = False
+    _resistanceTable: Dict[tuple[int, int], float] = field(default_factory=dict)
+    _capacitanceTable: Dict[tuple[int, int], float] = field(default_factory=dict)
+    _minWidthTable: Dict[int, float] = field(default_factory=dict)
+    _minDistTable: Dict[int, int] = field(default_factory=dict)
     _v2_flow: bool = False
 
     def addMetRCTable(self, table: extMetRCTable) -> int:
@@ -503,11 +672,40 @@ class extRCModel:
         key = extMeasure.getMetIndexOverUnder(met, underMet, overMet, max(self._layerCnt, 1))
         return None if width_table is None else width_table.getRC(key, width, dist)
 
+    def createModelProcessTable(self, rulesFileModelCnt: int, cornerCnt: int) -> bool:
+        self._modelMap = list(range(min(rulesFileModelCnt, cornerCnt)))
+        while len(self._modelMap) < cornerCnt:
+            self._modelMap.append(-1)
+        return True
+
+    def isRulesFile_v2(self, name: str, bin: bool = False) -> bool:
+        self._rulesFile = name
+        self._rulesFileBinary = bin
+        raise _not_translated("extRCModel::isRulesFile_v2")
+
     def readRules_v2(self, *args: Any, **kwargs: Any) -> bool:
         raise _not_translated("extRCModel::readRules_v2")
 
+    def spotModelsInRules(self, *args: Any, **kwargs: Any) -> bool:
+        raise _not_translated("extRCModel::spotModelsInRules")
+
     def DefWires(self, opt: extMainOptions) -> int:
         raise _not_translated("extRCModel::DefWires")
+
+    def OverRulePat(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extRCModel::OverRulePat")
+
+    def UnderRulePat(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extRCModel::UnderRulePat")
+
+    def DiagUnderRulePat(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extRCModel::DiagUnderRulePat")
+
+    def OverUnderRulePat(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extRCModel::OverUnderRulePat")
+
+    def ViaRulePat(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extRCModel::ViaRulePat")
 
 
 @dataclass
@@ -604,6 +802,25 @@ class extMeasure:
     """对应 `extMeasure`，RC 测量基类。"""
 
     logger_: Any = None
+    _block: Any = None
+    _tech: Any = None
+    _netSrcId: int = 0
+    _netTgtId: int = 0
+    _met: int = 0
+    _underMet: int = 0
+    _overMet: int = 0
+    _len: int = 0
+    _dist: int = 0
+    _width: int = 0
+    _dir: int = 0
+    _diag: bool = False
+    _over: bool = False
+    _under: bool = False
+    _overUnder: bool = False
+    _res: bool = False
+    _dbg: int = 0
+    _rc: List[extDistRC] = field(default_factory=list)
+    _rcModel: Optional[extRCModel] = None
     _topWidthR: float = 0.0
     _botWidthR: float = 0.0
     _teffR: float = 0.0
@@ -630,6 +847,21 @@ class extMeasure:
     def measureRC(self, options: CoupleOptions) -> None:
         raise _not_translated("extMeasure::measureRC")
 
+    def calcRes(self, *args: Any, **kwargs: Any) -> float:
+        raise _not_translated("extMeasure::calcRes")
+
+    def calcDiagRC(self, *args: Any, **kwargs: Any) -> None:
+        raise _not_translated("extMeasure::calcDiagRC")
+
+    def measureOverUnderCap(self, *args: Any, **kwargs: Any) -> None:
+        raise _not_translated("extMeasure::measureOverUnderCap")
+
+    def getFringe(self, *args: Any, **kwargs: Any) -> float:
+        raise _not_translated("extMeasure::getFringe")
+
+    def getCoupling(self, *args: Any, **kwargs: Any) -> float:
+        raise _not_translated("extMeasure::getCoupling")
+
 
 @dataclass
 class extMeasureRC(extMeasure):
@@ -645,6 +877,12 @@ class extMeasureRC(extMeasure):
     _lowTrackSearch: List[List[int]] = field(default_factory=lambda: [[0] * 32, [0] * 32])
     _hiTrackSearch: List[List[int]] = field(default_factory=lambda: [[0] * 32, [0] * 32])
     _currentSeg: Any = None
+    _couplingState: CouplingState = field(default_factory=CouplingState)
+    _segments: SegmentTables = field(default_factory=SegmentTables)
+    _maxCapNodeCnt: int = 0
+    _totCCcnt: int = 0
+    _totSmallCCcnt: int = 0
+    _totBigCCcnt: int = 0
     _newDiagFlow: bool = False
     _useWeighted: bool = False
 
@@ -671,6 +909,15 @@ class extMeasureRC(extMeasure):
     def CouplingFlow(self, *args: Any, **kwargs: Any) -> int:
         raise _not_translated("extMeasureRC::CouplingFlow")
 
+    def FindCouplingCaps(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extMeasureRC::FindCouplingCaps")
+
+    def computeAndStoreRC(self, *args: Any, **kwargs: Any) -> None:
+        raise _not_translated("extMeasureRC::computeAndStoreRC")
+
+    def OverSubRC(self, *args: Any, **kwargs: Any) -> None:
+        raise _not_translated("extMeasureRC::OverSubRC")
+
 
 @dataclass
 class extSpef:
@@ -681,14 +928,107 @@ class extSpef:
     """
 
     logger_: Any = None
+    _tech: Any = None
+    _block: Any = None
+    _version: Optional[str] = None
+    _ext: Any = None
+    _design: Optional[str] = None
+    _inFile: Optional[str] = None
+    _outFile: Optional[str] = None
+    _gzipFlag: bool = False
+    _writeNameMap: bool = True
+    _noNameMap: bool = False
+    _singleP: bool = False
+    _preserveCapValues: bool = False
+    _cornerCnt: int = 0
+    _dbCorner: int = -1
+    _active_corner_cnt: int = 0
+    _active_corner_number: List[int] = field(default_factory=list)
+    _rRun: int = 0
+    _moreToRead: bool = False
+    _termJxy: bool = False
+    _noCapNumCollapse: bool = False
+    _last_written_nets: List[Any] = field(default_factory=list)
+    _last_read_nets: List[Any] = field(default_factory=list)
     options: Optional[SpefOptions] = None
+
+    def reinit(self) -> None:
+        self._rRun = 0
+        self._last_written_nets.clear()
+        self._last_read_nets.clear()
+
+    def setOutSpef(self, filename: str) -> bool:
+        self._outFile = filename
+        return bool(filename)
+
+    def setInSpef(self, filename: str, onlyOpen: bool = False) -> bool:
+        self._inFile = filename
+        return bool(filename)
+
+    def stopWrite(self) -> None:
+        raise _not_translated("extSpef::stopWrite")
+
+    def set_single_pi(self, v: bool) -> None:
+        self._singleP = v
+
+    def preserveFlag(self, v: bool) -> None:
+        self._preserveCapValues = v
+
+    def getWriteCorner(self, corner: int, name: Optional[str] = None) -> int:
+        if corner >= 0:
+            return corner
+        if name and self._ext is not None and hasattr(self._ext, "get_ext_db_corner"):
+            return self._ext.get_ext_db_corner(name)
+        return -1
+
+    def setUseIdsFlag(self, diff: bool = False, calib: bool = False) -> None:
+        self._noNameMap = True
+
+    def setGzipFlag(self, gzFlag: bool) -> None:
+        self._gzipFlag = gzFlag
+
+    def setDesign(self, name: str) -> None:
+        self._design = name
+
+    def setCornerCnt(self, n: int) -> None:
+        self._cornerCnt = n
+        self._active_corner_cnt = n
+        self._active_corner_number = list(range(n))
+
+    def incr_rRun(self) -> None:
+        self._rRun += 1
 
     def writeBlock(self, options: SpefOptions) -> None:
         self.options = options
+        self.setGzipFlag(options.gz)
+        self.set_single_pi(options.single_pi)
+        self._termJxy = options.term_junction_xy
+        self._noNameMap = options.no_name_map
+        if options.file:
+            self.setOutSpef(options.file)
+        self._dbCorner = self.getWriteCorner(options.corner, options.ext_corner_name)
         raise _not_translated("extSpef::writeBlock")
 
     def readBlock(self, options: ReadSpefOpts) -> None:
+        self._moreToRead = options.more_to_read
+        self._noCapNumCollapse = options.no_cap_num_collapse
+        if options.file:
+            self.setInSpef(options.file)
+        self._dbCorner = options.corner
         raise _not_translated("extSpef::readBlock")
+
+    def readBlockIncr(self, debug: int = 0) -> int:
+        raise _not_translated("extSpef::readBlockIncr")
+
+    def write_spef_nets(self, flatten: bool, parallel: bool) -> None:
+        raise _not_translated("extSpef::write_spef_nets")
+
+    def writeNet(self, *args: Any, **kwargs: Any) -> None:
+        raise _not_translated("extSpef::writeNet")
+
+    def setCalibLimit(self, upperLimit: float, lowerLimit: float) -> None:
+        self._upperCalibLimit = upperLimit
+        self._lowerCalibLimit = lowerLimit
 
 
 @dataclass
@@ -702,6 +1042,12 @@ class extMain:
     _block: Any = None
     _spef: extSpef = field(default_factory=extSpef)
     _modelTable: List[extRCModel] = field(default_factory=list)
+    _modelMap: List[int] = field(default_factory=list)
+    _metRCTable: List[extMetRCTable] = field(default_factory=list)
+    _resistanceTable: Dict[tuple[int, int], float] = field(default_factory=dict)
+    _capacitanceTable: Dict[tuple[int, int], float] = field(default_factory=dict)
+    _minWidthTable: Dict[int, float] = field(default_factory=dict)
+    _minDistTable: Dict[int, int] = field(default_factory=dict)
     _processCornerTable: List[extCorner] = field(default_factory=list)
     _scaledCornerTable: List[extCorner] = field(default_factory=list)
     _cornerCnt: int = 0
@@ -712,16 +1058,47 @@ class extMain:
     _couplingFlag: int = 0
     _mergeResBound: float = 0.0
     _mergeViaRes: bool = False
+    _mergeParallelCC: bool = False
+    _reportNetNoWire: bool = False
+    _netNoWireCnt: int = 0
     _resFactor: float = 1.0
+    _resModify: bool = False
     _ccFactor: float = 1.0
+    _ccModify: bool = False
     _gndcFactor: float = 1.0
+    _gndcModify: bool = False
     _coupleThreshold: float = 0.1
+    _dgContextDepth: int = 0
+    _dgContextPlanes: int = 0
+    _dgContextTracks: int = 0
+    _ccContextPlanes: int = 0
+    _extRun: int = 0
+    _prevControl: Any = None
+    _foreign: bool = False
+    _rsegCoord: bool = False
+    _diagFlow: bool = False
+    _noModelRC: bool = False
+    _currentModel: Optional[extRCModel] = None
     _lef_res: bool = False
     _wireInfra: bool = False
     _extMaxRect: Any = None
+    _tmpLenStats: str = ""
+    _last_node_xy: List[int] = field(default_factory=lambda: [0, 0])
+    _minCapTable: Dict[tuple[int, int], float] = field(default_factory=dict)
+    _maxCapTable: Dict[tuple[int, int], float] = field(default_factory=dict)
+    _minResTable: Dict[tuple[int, int], float] = field(default_factory=dict)
+    _maxResTable: Dict[tuple[int, int], float] = field(default_factory=dict)
     _last_extract_options: Optional[ExtractOptions] = None
     _last_spef_options: Optional[SpefOptions] = None
     _last_read_spef_options: Optional[ReadSpefOpts] = None
+    _last_bench_options: Optional[extMainOptions] = None
+
+    def __post_init__(self) -> None:
+        self._spef.logger_ = self.logger_
+        self._spef._tech = self._tech
+        self._spef._block = self._block
+        self._spef._version = self.spef_version_
+        self._spef._ext = self
 
     def setLogger(self, logger: Any) -> None:
         self.logger_ = logger
@@ -783,19 +1160,41 @@ class extMain:
         self._resFactor = res_factor
         self._ccFactor = cc_factor
         self._gndcFactor = gndc_factor
+        self._resModify = res_factor != 1.0
+        self._ccModify = cc_factor != 1.0
+        self._gndcModify = gndc_factor != 1.0
 
     def setExtractionOptions_v2(self, options: ExtractOptions) -> None:
         self._last_extract_options = options
         self._ccUp = options.cc_up
+        self._cornerCnt = options.corner_cnt
+        self._mergeResBound = options.max_res
         self._mergeViaRes = not options.no_merge_via_res
         self._coupleThreshold = options.coupling_threshold
+        self._dgContextDepth = options.context_depth
         self._lef_res = options.lef_res
+        self._diagFlow = options.cc_model >= 10
+
+    def setupMappingTables(self, *args: Any, **kwargs: Any) -> None:
+        raise _not_translated("extMain::setupMappingTables")
 
     def makeBlockRCsegs_v2(self, netNames: Optional[str], extRules: Optional[str]) -> None:
         raise _not_translated("extMain::makeBlockRCsegs_v2")
 
     def makeRCNetwork_v2(self) -> bool:
         raise _not_translated("extMain::makeRCNetwork_v2")
+
+    def makeNetRCsegs(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extMain::makeNetRCsegs")
+
+    def couplingFlow(self, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extMain::couplingFlow")
+
+    def computeCapacitance(self, *args: Any, **kwargs: Any) -> None:
+        raise _not_translated("extMain::computeCapacitance")
+
+    def getRseg(self, *args: Any, **kwargs: Any) -> Any:
+        raise _not_translated("extMain::getRseg")
 
     def extract(self, options: ExtractOptions) -> None:
         self.setExtractionOptions_v2(options)
@@ -813,19 +1212,111 @@ class extMain:
         raise _not_translated("extMain::diff_spef")
 
     def benchPatternsGen(self, opt: PatternOptions) -> int:
+        self._last_bench_options = self._pattern_to_main_options(opt)
         raise _not_translated("extMain::benchPatternsGen")
 
     def bench_wires(self, bwo: BenchWiresOptions) -> None:
+        self._last_bench_options = self._bench_to_main_options(bwo)
         raise _not_translated("extMain::bench_wires")
 
     def benchVerilog(self, file: str) -> None:
         raise _not_translated("extMain::benchVerilog")
+
+    def overPatterns(self, opt: PatternOptions, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extMain::overPatterns")
+
+    def UnderPatterns(self, opt: PatternOptions, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extMain::UnderPatterns")
+
+    def OverUnderPatterns(self, opt: PatternOptions, *args: Any, **kwargs: Any) -> int:
+        raise _not_translated("extMain::OverUnderPatterns")
+
+    def write_spef_nets(self, flatten: bool, parallel: bool) -> None:
+        self._spef.write_spef_nets(flatten, parallel)
+
+    def getSpef(self) -> extSpef:
+        return self._spef
+
+    def setMinRC(self, ii: int, jj: int, rc: extDistRC) -> None:
+        self._minCapTable[(ii, jj)] = rc.getTotalCap()
+        self._minResTable[(ii, jj)] = rc.getRes()
+
+    def setMaxRC(self, ii: int, jj: int, rc: extDistRC) -> None:
+        self._maxCapTable[(ii, jj)] = rc.getTotalCap()
+        self._maxResTable[(ii, jj)] = rc.getRes()
 
     def _find_corner_index(self, name: str, table: List[extCorner]) -> int:
         for idx, corner in enumerate(table):
             if corner._name == name:
                 return idx
         return -1
+
+    def _bench_to_main_options(self, bwo: BenchWiresOptions) -> extMainOptions:
+        opt = extMainOptions(
+            _overDist=bwo.over_dist,
+            _underDist=bwo.under_dist,
+            _met_cnt=bwo.met_cnt,
+            _met=bwo.met,
+            _underMet=bwo.under_met,
+            _overMet=bwo.over_met,
+            _wireCnt=bwo.cnt,
+            _topDir=bwo.dir,
+            _name=bwo.block,
+            _wTable=bwo.w_list if bwo.multiple_widths else bwo.w,
+            _sTable=bwo.s_list,
+            _thTable=bwo.th_list if bwo.ddd else bwo.th,
+            _dTable=bwo.d,
+            _default_lef_rules=bwo.default_lef_rules,
+            _nondefault_lef_rules=bwo.nondefault_lef_rules,
+            _multiple_widths=bwo.multiple_widths,
+            _over=bwo.Over,
+            _overUnder=bwo.over_under,
+            _diag=1 if bwo.diag else 0,
+            _db_only=bwo.db_only,
+            _gen_def_patterns=bwo.gen_def_patterns,
+            _res_patterns=bwo.resPatterns,
+            _len=bwo.len,
+            _tech=self._tech,
+            _block=self._block,
+            _rcModel=self.getRCModel(),
+            _layerCnt=bwo.met_cnt,
+            _v1=bwo.v1,
+        )
+        opt._widthTable = _parse_number_list(opt._wTable)
+        opt._spaceTable = _parse_number_list(opt._sTable)
+        opt._thicknessTable = _parse_number_list(opt._thTable)
+        opt._densityTable = _parse_number_list(opt._dTable)
+        opt._gridTable = _parse_number_list(bwo.grid_list)
+        return opt
+
+    def _pattern_to_main_options(self, po: PatternOptions) -> extMainOptions:
+        opt = extMainOptions(
+            _overDist=po.over_dist,
+            _underDist=po.under_dist,
+            _met_cnt=po.met_cnt,
+            _met=po.met,
+            _underMet=po.under_met,
+            _overMet=po.over_met,
+            _wireCnt=po.wire_cnt,
+            _topDir=po.dir,
+            _name=po.name,
+            _wTable=po.width or "1",
+            _sTable=po.spacing or "1",
+            _default_lef_rules=po.default_lef_rules,
+            _nondefault_lef_rules=po.nondefault_lef_rules,
+            _over=po.over,
+            _overUnder=po.over_under,
+            _diag=1 if po.diag else 0,
+            _len=po.len,
+            _tech=self._tech,
+            _block=self._block,
+            _rcModel=self.getRCModel(),
+            _layerCnt=po.met_cnt,
+        )
+        opt._widthTable = _parse_number_list(opt._wTable)
+        opt._spaceTable = _parse_number_list(opt._sTable)
+        opt._gridTable = _parse_number_list(po.grid_list)
+        return opt
 
 
 class Ext:
@@ -884,6 +1375,8 @@ class Ext:
 
     def init_rcx_model(self, corner_names: str, metal_cnt: int) -> bool:
         model = extRCModel(_name=corner_names, _layerCnt=metal_cnt)
+        for _ in [name for name in corner_names.replace(",", " ").split() if name] or [""]:
+            model.addMetRCTable(extMetRCTable(_layerCnt=metal_cnt, logger_=self.logger_))
         self._ext.addRCModel(model)
         return True
 
@@ -912,7 +1405,10 @@ class Ext:
         self._ext.bench_wires(bwo)
 
     def write_spef_nets(self, block: Any, flatten: bool, parallel: bool, corner: int) -> None:
-        raise _not_translated("Ext::write_spef_nets")
+        self._ext._block = block
+        self._ext._spef._block = block
+        self._ext._spef._dbCorner = corner
+        self._ext.write_spef_nets(flatten, parallel)
 
     def extract(self, options: ExtractOptions) -> None:
         self._ext.extract(options)
@@ -980,6 +1476,8 @@ __all__ = [
     "extDistRCTable",
     "extDistWidthRCTable",
     "extMetRCTable",
+    "extViaModel",
+    "extRCTable",
     "extCorner",
     "extMainOptions",
     "extRCModel",

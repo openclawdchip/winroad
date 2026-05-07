@@ -11,7 +11,8 @@ STA / parasitics / placement 算法。
   - 保存 `logger/db/sta/stt_builder/global_router/opendp/estimate_parasitics`
     等 C++ 构造依赖。
   - 建立 dont-use、dont-touch、buffer list、clock buffer pattern、
-    resize slack、library analysis、debug graphics 等核心状态。
+    target load map、input slew map、tie cell/port、resize slack、library analysis、
+    debug graphics 等核心状态。
   - `repairDesign`、`repairSetup`、`repairHold`、`recoverPower` 按 C++
     边界委托到对应子类。
 
@@ -32,23 +33,26 @@ STA / parasitics / placement 算法。
 - `RepairDesign`
   - 对应 `src/rsz/src/RepairDesign.hh`。
   - 保存 pre-check、buffer size、margin、violation counter、debug graphics、
-    slew RC factor 等成员。
+    long-wire/max-slew/max-cap/max-fanout counter、slew RC factor 等成员。
   - `insertedBufferCount()`、`setDebugGraphics()`、`getSlewRCFactor()` 等入口已建立。
 
 - `OptoParams`、`RepairSetup`
   - 对应 `src/rsz/src/RepairSetup.hh`。
   - 保存 move sequence、endpoint pass 计数、rejected move、violator/move tracker
     等状态。
-  - `setupMoveSequence()` 已按 skip flag 过滤 move 枚举，但具体 `BaseMove`
-    派生动作尚未翻译。
+  - `setupMoveSequence()` 已按 skip flag 过滤 move 枚举，并映射到 Python 的
+    `BaseMove` 派生对象序列；真实 move 算法仍保留同名入口并抛
+    `NotImplementedError`。
 
 - `RepairHold`
   - 对应 `src/rsz/src/RepairHold.hh`。
-  - 保存 hold buffer / resize / cloned gate 计数和入口边界。
+  - 保存 hold buffer / resize / cloned gate、setup margin、pass limit、
+    buffer cell 等状态和入口边界。
 
 - `RecoverPower`
   - 对应 `src/rsz/src/RecoverPower.hh`。
-  - 保存 power recovery 的场景、bad vertices、面积和迭代常量。
+  - 保存 power recovery 的场景、bad vertices、面积、match-footprint 标志、
+    swapped cell / recovered power 计数和迭代常量。
 
 - `PreChecks`
   - 对应 `src/rsz/src/PreChecks.hh`。
@@ -63,6 +67,13 @@ STA / parasitics / placement 算法。
   - 对应 `src/rsz/src/BaseMove.hh`。
   - 已实现 move 计数、pending/accepted/rejected 集合、`commitMoves()`、
     `undoMoves()` 等通用状态逻辑。
+
+- `BufferMove`、`UnbufferMove`、`SizeUpMove`、`SizeUpMatchMove`、`SizeDownMove`、
+  `SwapPinsMove`、`CloneMove`、`SplitLoadMove`、`VTSwapSpeedMove`
+  - 对应 `src/rsz/src/*Move.hh` 的 setup repair 动作类边界。
+  - 已建立 `name()`、`doMove()` 及各类私有/辅助入口的 Python 方法名。
+  - 真实 rebuffer、buffer removal、gate sizing、pin swap、clone、split load、
+    VT swap 算法依赖 STA/OpenDB mutation，当前均抛 `NotImplementedError`。
 
 - `MoveTracker`、`PinInfo`、`MoveStateType`、`MoveStateData`
   - 对应 `src/rsz/src/MoveTracker.hh`。
@@ -81,6 +92,8 @@ STA / parasitics / placement 算法。
 - `Resizer.setDontTouch()` / `dontTouch()` / `reportDontTouch()`
 - `Resizer.setMaxUtilization()` / `coreArea()` / `utilization()` / `maxArea()`
 - `Resizer.designArea()` / `designAreaIncr()` / `initDesignArea()`
+- `Resizer.targetLoadCap()` 可返回已缓存的 `target_load_map_` 条目；未缓存时
+  保持真实算法边界并抛未翻译错误
 - `Resizer.dbuToMeters()` / `metersToDbu()`
 - `Resizer.setClockBuffersList()` / `setClockBufferString()` /
   `setClockBufferFootprint()` / `resetClockBufferPattern()`
@@ -89,6 +102,10 @@ STA / parasitics / placement 算法。
 - `Resizer.parseMove()` / `parseMoveSequence()`
 - `Resizer.resizeSlackPreamble()` / `resizeWorstSlackNets()` / `resizeNetSlack()`
 - `BaseMove.countMove()` / `commitMoves()` / `undoMoves()` and counters
+- `RepairSetup.setupMoveSequence()` / `allMoves()` 建立 move 类型到派生对象的
+  C++ 边界映射
+- `RepairHold.resizeCount()` / `clonedGateCount()`
+- `RecoverPower.resizeCount()` / `swappedCellCount()`
 - `MoveTracker.trackCriticalPins()` / `trackViolator()` /
   `trackViolatorWithInfo()` / `trackMove()` / `commitMoves()` / `rejectMoves()`
 
@@ -102,7 +119,9 @@ OpenDB netlist mutation、estimated parasitics、global router 或 OpenDP，不�
   `insertBufferBeforeLoads()`、`removeBuffers()`、`unbufferNet()`、`bufferInputs()`、
   `bufferOutputs()`
 - setup 修复：`RepairSetup.repairSetup()`、`repairEndpoint()`、`repairPins()`、
-  `reportSwappablePins()`
+  `reportSwappablePins()`；`BufferMove`、`UnbufferMove`、`SizeUpMove`、
+  `SizeUpMatchMove`、`SizeDownMove`、`SwapPinsMove`、`CloneMove`、
+  `SplitLoadMove`、`VTSwapSpeedMove` 的 `doMove()` 和辅助函数
 - hold 修复：`RepairHold.repairHold()`、`reportHoldBuffer()`
 - design 修复：`RepairDesign.repairDesign()`、`repairNet()`、`repairClkNets()`、
   `repairClkInverters()`、`computeSlewRCFactor()`

@@ -43,8 +43,8 @@
   - `Net` 的 pin 管理、slack、segment parent、dirty/clock/merged 状态接口
   - `Grid` 的初始化、坐标/grid 互转、tile/blockage 边界辅助接口
   - `RoutingTracks` 的 layer/pitch/track 查询接口
-  - `FastRouteCore` 的 grid/layer/capacity/net 注册、route 清理、debug、线程、拥塞参数接口
-  - `GlobalRouter` 的配置入口、route 查询、连通性检查、资源更新转发、增量 dirty net 标记、debug 转发、grid/layer 查询接口
+  - `FastRouteCore` 的 grid/layer/capacity/net 注册、route 清理、debug、线程、拥塞参数、capacity/report 边界接口
+  - `GlobalRouter` 的配置入口、guide/report 边界、route 查询、连通性检查、资源更新转发、增量 dirty net 标记、debug 转发、grid/layer 查询接口
 
 ## 未实现
 
@@ -72,6 +72,9 @@
   - `getLayerResistance()`
   - `getViaResistance()`
 - CUGR 接入、RUDY/heatmap、拥塞图文件格式和报告输出仍待按 OpenROAD C++ 逐函数移植。
+- 第二轮已继续补齐的边界包括：
+  - `FastRouteCore` 的 `getDbNetLayerEdgeCost()`、`initEdgesCapacityPerLayer()`、`setNumAdjustments()`、`addAdjustment()`、`saveResourcesBeforeAdjustments()`、`initAuxVar()`、`getCongestionGrid()`、`getCongestionNets()`、`getOriginalResources()`、`getTotalCapacityPerLayer()`、`getTotalUsagePerLayer()`、`getTotalOverflowPerLayer()`、`getMaxHorizontalOverflows()`、`getMaxVerticalOverflows()`、`clearNDRnets()` 等状态与报告入口
+  - `GlobalRouter` 的 guide/report/resistance 入口名和增量辅助方法边界
 
 ## 说明
 

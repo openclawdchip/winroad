@@ -27,3 +27,25 @@
 - 当前线程表：`D:\winroad_py\docs\parallel-status.md`
 - 代码进展：`D:\winroad_py\winroad`
 - 文档进展：`D:\winroad_py\docs`
+
+## 2026-05-07 第二轮
+
+主线调整：`odb` 放到最后，本轮 6 线程全部推进非 ODB 顶层模块。
+
+| 模块 | 线程 id | 昵称 | 状态 | 负责文件 |
+| --- | --- | --- | --- | --- |
+| `gpl` | `019e0265-9fb7-7110-99bf-cd751e15a6e3` | Noether | 已完成 | `winroad/gpl.py`, `docs/gpl.md` |
+| `grt` | `019e0265-9fee-7121-9e65-c34c32aa251e` | Nash | 已完成 | `winroad/grt.py`, `docs/grt.md` |
+| `rsz` | `019e0265-a043-78e3-867e-46fcfb90aa5d` | Euclid | 已完成 | `winroad/rsz.py`, `docs/rsz.md` |
+| `cts` | `019e0265-a144-7e81-b75a-508275295e8d` | Tesla | 已完成 | `winroad/cts.py`, `docs/cts.md` |
+| `rcx` | `019e0265-a165-76c2-a6d0-4e834d8fe200` | Hooke | 已完成 | `winroad/rcx.py`, `docs/rcx.md` |
+| `pdn` | `019e0265-a192-7470-ac88-3e4f7fe5784c` | Mencius | 已完成 | `winroad/pdn.py`, `docs/pdn.md` |
+
+### 第二轮已完成摘要
+
+- `gpl`：深化 `Replace`、`NesterovPlace`、`RouteBase`、`TimingBase` 的函数边界和状态容器。
+- `grt`：深化 `FastRouteCore` 容量、usage、overflow、adjustment、congestion、NDR 等边界。
+- `rsz`：新增 `BaseMove` 派生 move 边界，并补 `Resizer`、`RepairDesign`、`RepairHold`、`RecoverPower` 状态字段。
+- `cts`：深化 `CtsOptions`、`TechChar`、`TreeBuilder/HTreeBuilder`、`SinkClustering`、`LatencyBalancer`、`TritonCTS` 的函数边界。
+- `rcx`：深化 RC table/model、corner/config、measure、SPEF、extMain、bench/pattern 边界。
+- `pdn`：完成第一轮 PDN 顶层对象边界，包括 grid、strap、ring、via、domain、connect、report/check 等。

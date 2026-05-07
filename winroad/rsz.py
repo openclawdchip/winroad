@@ -593,6 +593,163 @@ class BaseMove:
         return self.all_count_
 
 
+class BufferMove(BaseMove):
+    """对应 ``BufferMove``，setup repair 的重缓冲动作边界。"""
+
+    def name(self) -> str:
+        return "BufferMove"
+
+    def doMove(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("BufferMove::doMove")
+
+    def rebufferNet(self, drvr_pin: Any) -> None:
+        _not_translated("BufferMove::rebufferNet")
+
+    def rebuffer(self, drvr_pin: Any) -> int:
+        _not_translated("BufferMove::rebuffer")
+
+    def debugCheckMultipleBuffers(self, *_args: Any, **_kwargs: Any) -> None:
+        _not_translated("BufferMove::debugCheckMultipleBuffers")
+
+    def hasTopLevelOutputPort(self, net: Any) -> bool:
+        _not_translated("BufferMove::hasTopLevelOutputPort")
+
+
+class UnbufferMove(BaseMove):
+    """对应 ``UnbufferMove``，buffer removal 动作边界。"""
+
+    buffer_removal_max_fanout_ = 10
+
+    def name(self) -> str:
+        return "UnbufferMove"
+
+    def doMove(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("UnbufferMove::doMove")
+
+    def removeBufferIfPossible(self, buffer: Any, honorDontTouchFixed: bool) -> bool:
+        _not_translated("UnbufferMove::removeBufferIfPossible")
+
+    def canRemoveBuffer(self, buffer: Any, honorDontTouchFixed: bool) -> bool:
+        _not_translated("UnbufferMove::canRemoveBuffer")
+
+    def removeBuffer(self, buffer: Any) -> bool:
+        _not_translated("UnbufferMove::removeBuffer")
+
+    def bufferBetweenPorts(self, buffer: Any) -> bool:
+        _not_translated("UnbufferMove::bufferBetweenPorts")
+
+    def bufferRemovalCreatesFeedthrough(self, ip_modnet: Any, op_modnet: Any) -> bool:
+        _not_translated("UnbufferMove::bufferRemovalCreatesFeedthrough")
+
+
+class SizeUpMove(BaseMove):
+    """对应 ``SizeUpMove``。"""
+
+    def name(self) -> str:
+        return "SizeUpMove"
+
+    def doMove(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("SizeUpMove::doMove")
+
+
+class SizeUpMatchMove(BaseMove):
+    """对应 ``SizeUpMatchMove``，匹配前级驱动强度的 size-up 动作。"""
+
+    def name(self) -> str:
+        return "SizeUpMoveMatch"
+
+    def doMove(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("SizeUpMatchMove::doMove")
+
+
+class SizeDownMove(BaseMove):
+    """对应 ``SizeDownMove``。"""
+
+    size_down_max_fanout_ = 10
+
+    def name(self) -> str:
+        return "SizeDownMove"
+
+    def doMove(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("SizeDownMove::doMove")
+
+    def downSizeGate(self, *_args: Any, **_kwargs: Any) -> Any:
+        _not_translated("SizeDownMove::downSizeGate")
+
+
+class SwapPinsMove(BaseMove):
+    """对应 ``SwapPinsMove``，等价输入 pin swap 的动作边界。"""
+
+    def __init__(self, resizer: "Resizer") -> None:
+        super().__init__(resizer)
+        self.equiv_pin_map_: Dict[Any, Set[Any]] = {}
+
+    def name(self) -> str:
+        return "SwapPinsMove"
+
+    def doMove(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("SwapPinsMove::doMove")
+
+    def reportSwappablePins(self) -> None:
+        _not_translated("SwapPinsMove::reportSwappablePins")
+
+    def swapPins(self, inst: Any, port1: Any, port2: Any) -> bool:
+        _not_translated("SwapPinsMove::swapPins")
+
+    def equivCellPins(self, *_args: Any, **_kwargs: Any) -> None:
+        _not_translated("SwapPinsMove::equivCellPins")
+
+    def annotateInputSlews(self, *_args: Any, **_kwargs: Any) -> None:
+        _not_translated("SwapPinsMove::annotateInputSlews")
+
+    def findSwapPinCandidate(self, *_args: Any, **_kwargs: Any) -> None:
+        _not_translated("SwapPinsMove::findSwapPinCandidate")
+
+    def resetInputSlews(self) -> None:
+        _not_translated("SwapPinsMove::resetInputSlews")
+
+
+class CloneMove(BaseMove):
+    """对应 ``CloneMove``，gate cloning 动作边界。"""
+
+    def name(self) -> str:
+        return "CloneMove"
+
+    def doMove(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("CloneMove::doMove")
+
+    def computeCloneGateLocation(self, *_args: Any, **_kwargs: Any) -> Point:
+        _not_translated("CloneMove::computeCloneGateLocation")
+
+    def cloneDriver(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("CloneMove::cloneDriver")
+
+
+class SplitLoadMove(BaseMove):
+    """对应 ``SplitLoadMove``。"""
+
+    split_load_min_fanout_ = 8
+
+    def name(self) -> str:
+        return "SplitLoadMove"
+
+    def doMove(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("SplitLoadMove::doMove")
+
+
+class VTSwapSpeedMove(BaseMove):
+    """对应 ``VTSwapSpeedMove``，setup timing 用 VT swap 动作边界。"""
+
+    def name(self) -> str:
+        return "VTSwapSpeed"
+
+    def doMove(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("VTSwapSpeedMove::doMove")
+
+    def isSwappable(self, *_args: Any, **_kwargs: Any) -> bool:
+        _not_translated("VTSwapSpeedMove::isSwappable")
+
+
 class MoveTracker:
     """记录 setup repair 尝试、提交、拒绝的 pin/move 状态。"""
 
@@ -705,6 +862,20 @@ class Resizer:
         self.resize_slacks_: Dict[Any, float] = {}
         self.graphics_: Optional[ResizerObserver] = None
         self.lib_data_ = LibraryAnalysisData()
+        self.parse_to_openroad_ = None
+        self.resizer_ = None
+        self.opcode_mapper_ = None
+        self.swap_arith_modules_ = None
+        self.tielib_port_ = None
+        self.tiehi_cell_ = None
+        self.tiehi_port_ = None
+        self.tielo_cell_ = None
+        self.tielo_port_ = None
+        self.target_load_map_: Dict[Any, float] = {}
+        self.input_slew_map_: Dict[Any, RiseFallArray] = {}
+        self.tgt_slews_: RiseFallArray = (inf, inf)
+        self.dont_use_changed_ = False
+        self.dont_touch_changed_ = False
         self.repair_design_ = RepairDesign(self)
         self.repair_setup_ = RepairSetup(self)
         self.repair_hold_ = RepairHold(self)
@@ -737,9 +908,11 @@ class Resizer:
             self.dont_use_.add(key)
         else:
             self.dont_use_.discard(key)
+        self.dont_use_changed_ = True
 
     def resetDontUse(self) -> None:
         self.dont_use_.clear()
+        self.dont_use_changed_ = True
 
     def dontUse(self, cell: Any) -> bool:
         return _obj_key(cell) in self.dont_use_
@@ -754,6 +927,7 @@ class Resizer:
             target.add(key)
         else:
             target.discard(key)
+        self.dont_touch_changed_ = True
 
     def dontTouch(self, obj: Any) -> bool:
         key = _obj_key(obj)
@@ -808,6 +982,9 @@ class Resizer:
         _not_translated("Resizer::targetSlew")
 
     def targetLoadCap(self, cell: Any) -> float:
+        key = _obj_key(cell)
+        if key in self.target_load_map_:
+            return self.target_load_map_[key]
         _not_translated("Resizer::targetLoadCap")
 
     def repairSetup(self, *args: Any, **kwargs: Any) -> bool:
@@ -826,7 +1003,7 @@ class Resizer:
         return self.repair_hold_.holdBufferCount()
 
     def recoverPower(self, recover_power_percent: float, match_cell_footprint: bool = False, verbose: bool = False) -> bool:
-        return self.recover_power_.recoverPower(recover_power_percent, verbose)
+        return self.recover_power_.recoverPower(recover_power_percent, match_cell_footprint, verbose)
 
     def swapArithModules(self, path_count: int, target: str, slack_margin: float) -> None:
         _not_translated("Resizer::swapArithModules")
@@ -1102,11 +1279,20 @@ class RepairDesign:
         self.drvr_pin_ = None
         self.max_cap_ = 0.0
         self.max_length_ = 0
+        self.max_wire_length_ = 0.0
+        self.max_slew_ = 0.0
+        self.max_cap_margin_ = 0.0
+        self.max_fanout_ = 0
         self.slew_margin_ = 0.0
         self.cap_margin_ = 0.0
         self.corner_ = None
         self.resize_count_ = 0
         self.inserted_buffer_count_ = 0
+        self.repaired_net_count_ = 0
+        self.long_wire_count_ = 0
+        self.max_slew_count_ = 0
+        self.max_cap_count_ = 0
+        self.max_fanout_count_ = 0
         self.print_interval_ = 0
         self.graphics_: Optional[ResizerObserver] = None
         self.r_strongest_buffer_ = 0.0
@@ -1171,6 +1357,16 @@ class RepairSetup:
         self.removed_buffer_count_ = 0
         self.initial_design_area_ = 0.0
         self.move_sequence_: List[BaseMove] = []
+        self.move_sequence_types_: List[MoveType] = []
+        self.buffer_move_ = BufferMove(resizer)
+        self.unbuffer_move_ = UnbufferMove(resizer)
+        self.swap_pins_move_ = SwapPinsMove(resizer)
+        self.sizeup_move_ = SizeUpMove(resizer)
+        self.sizeup_match_move_ = SizeUpMatchMove(resizer)
+        self.sizedown_move_ = SizeDownMove(resizer)
+        self.clone_move_ = CloneMove(resizer)
+        self.split_load_move_ = SplitLoadMove(resizer)
+        self.vt_swap_move_ = VTSwapSpeedMove(resizer)
         self.endpoint_pass_counts_phase1_: Dict[Any, int] = {}
         self.wns_no_progress_count_ = 0
         self.rejected_pin_moves_current_endpoint_: Dict[Any, Set[BaseMove]] = {}
@@ -1180,6 +1376,21 @@ class RepairSetup:
 
     def init(self) -> None:
         self.db_network_ = self.resizer_.db_network_
+        for move in self.allMoves():
+            move.init()
+
+    def allMoves(self) -> List[BaseMove]:
+        return [
+            self.buffer_move_,
+            self.unbuffer_move_,
+            self.swap_pins_move_,
+            self.sizeup_move_,
+            self.sizeup_match_move_,
+            self.sizedown_move_,
+            self.clone_move_,
+            self.split_load_move_,
+            self.vt_swap_move_,
+        ]
 
     def setupMoveSequence(
         self,
@@ -1210,7 +1421,20 @@ class RepairSetup:
             skipped.add(MoveType.UNBUFFER)
         if skip_vt_swap:
             skipped.add(MoveType.VTSWAP_SPEED)
+        move_map: Dict[MoveType, BaseMove] = {
+            MoveType.BUFFER: self.buffer_move_,
+            MoveType.UNBUFFER: self.unbuffer_move_,
+            MoveType.SWAP: self.swap_pins_move_,
+            MoveType.SIZE: self.sizeup_move_,
+            MoveType.SIZEUP: self.sizeup_move_,
+            MoveType.SIZEUP_MATCH: self.sizeup_match_move_,
+            MoveType.SIZEDOWN: self.sizedown_move_,
+            MoveType.CLONE: self.clone_move_,
+            MoveType.SPLIT: self.split_load_move_,
+            MoveType.VTSWAP_SPEED: self.vt_swap_move_,
+        }
         self.move_sequence_types_ = [move for move in sequence if move not in skipped]
+        self.move_sequence_ = [move_map[move] for move in self.move_sequence_types_]
 
     def repairSetup(self, *_args: Any, **_kwargs: Any) -> bool:
         _not_translated("RepairSetup::repairSetup")
@@ -1229,7 +1453,7 @@ class RepairSetup:
         _not_translated("RepairSetup::hasTopLevelOutputPort")
 
     def reportSwappablePins(self) -> None:
-        _not_translated("RepairSetup::reportSwappablePins")
+        self.swap_pins_move_.reportSwappablePins()
 
 
 class RepairHold:
@@ -1246,6 +1470,11 @@ class RepairHold:
         self.resize_count_ = 0
         self.inserted_buffer_count_ = 0
         self.cloned_gate_count_ = 0
+        self.buffer_cell_ = None
+        self.max_passes_ = 0
+        self.max_repairs_per_pass_ = 0
+        self.allow_setup_violations_ = False
+        self.setup_slack_margin_ = 0.0
         self.initial_design_area_ = 0.0
 
     def init(self) -> None:
@@ -1259,6 +1488,12 @@ class RepairHold:
 
     def reportHoldBuffer(self) -> Any:
         _not_translated("RepairHold::reportHoldBuffer")
+
+    def resizeCount(self) -> int:
+        return self.resize_count_
+
+    def clonedGateCount(self) -> int:
+        return self.cloned_gate_count_
 
 
 class RecoverPower:
@@ -1281,6 +1516,10 @@ class RecoverPower:
         self.estimate_parasitics_ = resizer.estimate_parasitics_
         self.scene_ = None
         self.resize_count_ = 0
+        self.swapped_cell_count_ = 0
+        self.recovered_power_ = 0.0
+        self.match_cell_footprint_ = False
+        self.verbose_ = False
         self.bad_vertices_: Set[Any] = set()
         self.initial_design_area_ = 0.0
         self.print_interval_ = 0
@@ -1290,6 +1529,12 @@ class RecoverPower:
 
     def recoverPower(self, *_args: Any, **_kwargs: Any) -> bool:
         _not_translated("RecoverPower::recoverPower")
+
+    def resizeCount(self) -> int:
+        return self.resize_count_
+
+    def swappedCellCount(self) -> int:
+        return self.swapped_cell_count_
 
 
 class SwapArithModules:
@@ -1331,10 +1576,12 @@ def initResizer(tcl_interp: Any = None) -> Resizer:
 
 __all__ = [
     "BaseMove",
+    "BufferMove",
     "BufferUse",
     "BufferedNet",
     "BufferedNetMetrics",
     "BufferedNetType",
+    "CloneMove",
     "FixedDelay",
     "LibraryAnalysisData",
     "LoadRegion",
@@ -1351,8 +1598,15 @@ __all__ = [
     "RepairSetup",
     "Resizer",
     "ResizerObserver",
+    "SizeDownMove",
+    "SizeUpMatchMove",
+    "SizeUpMove",
     "SlackEstimatorParams",
+    "SplitLoadMove",
     "SwapArithModules",
+    "SwapPinsMove",
+    "UnbufferMove",
+    "VTSwapSpeedMove",
     "VTCategory",
     "VTLeakageStats",
     "initResizer",
