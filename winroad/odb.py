@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 
 class SigType(str, Enum):
@@ -25,6 +25,16 @@ class SigType(str, Enum):
     CLOCK = "clock"
     ANALOG = "analog"
     OTHER = "other"
+
+
+class IoType(str, Enum):
+    """对应 OpenDB 的 dbIoType::Value。"""
+
+    INPUT = "input"
+    OUTPUT = "output"
+    INOUT = "inout"
+    FEEDTHRU = "feedthru"
+    UNKNOWN = "unknown"
 
 
 class WireType(str, Enum):
@@ -68,6 +78,22 @@ class PlacementStatus(str, Enum):
     FIXED = "fixed"
     COVER = "cover"
     LOCKED = "locked"
+
+
+class RowDir(str, Enum):
+    """对应 OpenDB 的 dbRowDir::Value。"""
+
+    HORIZONTAL = "horizontal"
+    VERTICAL = "vertical"
+
+
+class PropertyType(str, Enum):
+    """对应 OpenDB 的 PropTypeEnum。"""
+
+    STRING = "string"
+    BOOL = "bool"
+    INT = "int"
+    DOUBLE = "double"
 
 
 @dataclass
@@ -427,6 +453,279 @@ class DbITerm:
 
 
 @dataclass
+class DbProperty:
+    """复刻 _dbProperty 的 Python 版本。
+
+    OpenDB 里 property 是挂到任意 dbObject 上的名字和值，值类型由
+    PropTypeEnum 标识。这里用 owner_type/owner 保存归属对象边界。
+    """
+
+    name: str
+    value: str | bool | int | float = ""
+    type: PropertyType = PropertyType.STRING
+    owner_type: str = "unknown"
+    owner: Optional[str] = None
+    next: Optional[str] = None
+
+    def set_value(self, value: str | bool | int | float) -> None:
+        """设置属性值，并按 Python 值推断 OpenDB property 类型。"""
+
+        self.value = value
+        if isinstance(value, bool):
+            self.type = PropertyType.BOOL
+        elif isinstance(value, int):
+            self.type = PropertyType.INT
+        elif isinstance(value, float):
+            self.type = PropertyType.DOUBLE
+        else:
+            self.type = PropertyType.STRING
+
+    def get_value(self) -> str | bool | int | float:
+        """返回 property 保存的 variant 值。"""
+
+        return self.value
+
+
+@dataclass
+class DbRow:
+    """复刻 _dbRow 的 Python 版本。
+
+    Row 是 floorplan site 阵列的基础对象，保存 site、原点、方向、
+    site 数量和间距。
+    """
+
+    name: str
+    orient: OrientType = OrientType.N
+    direction: RowDir = RowDir.HORIZONTAL
+    lib: Optional[str] = None
+    site: Optional[str] = None
+    x: int = 0
+    y: int = 0
+    site_cnt: int = 0
+    spacing: int = 0
+
+    def get_origin(self) -> tuple[int, int]:
+        """返回 row 原点。"""
+
+        return (self.x, self.y)
+
+    def get_site_count(self) -> int:
+        """返回 row 中 site 个数。"""
+
+        return self.site_cnt
+
+
+@dataclass
+class DbBPin:
+    """复刻 _dbBPin 的 Python 版本。
+
+    BPin 是 block terminal 的物理 pin 形状集合，主要连接到 bterm，
+    持有 box 链、access point 列表和 DEF 5.6 的 spacing/width 扩展。
+    """
+
+    name: str
+    bterm: Optional[str] = None
+    status: PlacementStatus = PlacementStatus.NONE
+    boxes: List[DbBox] = field(default_factory=list)
+    next_bpin: Optional[str] = None
+    has_min_spacing: bool = False
+    has_effective_width: bool = False
+    min_spacing: int = 0
+    effective_width: int = 0
+    aps: List[str] = field(default_factory=list)
+
+    def add_box(self, box: DbBox) -> DbBox:
+        """把一个 dbBox 挂到该 bpin。"""
+
+        box.owner_type = "bpin"
+        box.owner = self.name
+        self.boxes.append(box)
+        return box
+
+    def set_placement_status(self, status: PlacementStatus) -> None:
+        """对应 dbBPin::setPlacementStatus()。"""
+
+        self.status = status
+
+    def set_min_spacing(self, width: int) -> None:
+        """对应 dbBPin::setMinSpacing()。"""
+
+        self.has_min_spacing = True
+        self.min_spacing = width
+
+    def set_effective_width(self, width: int) -> None:
+        """对应 dbBPin::setEffectiveWidth()。"""
+
+        self.has_effective_width = True
+        self.effective_width = width
+
+    def get_bterm(self) -> Optional[str]:
+        """返回所属 bterm 名称占位。"""
+
+        return self.bterm
+
+    def get_boxes(self) -> List[DbBox]:
+        """返回 pin 的 box 列表。"""
+
+        return self.boxes
+
+
+@dataclass
+class DbBTerm:
+    """复刻 _dbBTerm 的 Python 版本。
+
+    BTerm 是 block 端口对象，保存 io/sig 类型、net/modnet 链接、bpin 链、
+    层级父对象以及镜像/约束区域等 OpenDB 字段。
+    """
+
+    name: str
+    io_type: IoType = IoType.UNKNOWN
+    sig_type: SigType = SigType.SIGNAL
+    ext_id: int = 0
+    spef: bool = False
+    special: bool = False
+    mark: bool = False
+    net: Optional[str] = None
+    mnet: Optional[str] = None
+    next_entry: Optional[str] = None
+    next_bterm: Optional[str] = None
+    prev_bterm: Optional[str] = None
+    next_modnet_bterm: Optional[str] = None
+    prev_modnet_bterm: Optional[str] = None
+    parent_block: Optional[str] = None
+    parent_iterm: Optional[str] = None
+    bpins: List[str] = field(default_factory=list)
+    ground_pin: Optional[str] = None
+    supply_pin: Optional[str] = None
+    sta_vertex_id: int = 0
+    constraint_region: Optional[tuple[int, int, int, int]] = None
+    mirrored_bterm: Optional[str] = None
+    is_mirrored: bool = False
+    chip_region: Optional[str] = None
+    chip_bump: Optional[str] = None
+
+    def connect(self, net: Optional[str]) -> None:
+        """把 bterm 接到 flat net；传 None 时保持空连接。"""
+
+        if net is None:
+            return
+        self.net = net
+
+    def disconnect(self) -> None:
+        """断开 flat net/modnet 连接。"""
+
+        self.net = None
+        self.mnet = None
+        self.next_bterm = None
+        self.prev_bterm = None
+        self.next_modnet_bterm = None
+        self.prev_modnet_bterm = None
+
+    def connect_modnet(self, modnet: Optional[str]) -> None:
+        """把 bterm 接到 module net。"""
+
+        if modnet is not None:
+            self.mnet = modnet
+
+    def add_bpin(self, bpin: DbBPin) -> DbBPin:
+        """挂接一个 bpin 到该 bterm。"""
+
+        bpin.bterm = self.name
+        if bpin.name not in self.bpins:
+            self.bpins.append(bpin.name)
+        return bpin
+
+    def set_io_type(self, io_type: IoType) -> None:
+        """对应 dbBTerm::setIoType()。"""
+
+        self.io_type = io_type
+
+    def set_sig_type(self, sig_type: SigType) -> None:
+        """对应 dbBTerm::setSigType()。"""
+
+        self.sig_type = sig_type
+
+    def set_mirrored_constraint_region(
+        self, region: tuple[int, int, int, int], mirrored_bterm: Optional[str] = None
+    ) -> None:
+        """保存 mirrored bterm 约束区域。"""
+
+        self.constraint_region = region
+        self.mirrored_bterm = mirrored_bterm
+        self.is_mirrored = mirrored_bterm is not None
+
+
+@dataclass
+class DbGuide:
+    """复刻 _dbGuide 的 Python 版本。
+
+    Guide 是 global routing guide，挂到 net，保存矩形、routing layer、
+    optional via layer 和拥塞/跳线/端口连接标志。
+    """
+
+    name: str
+    net: Optional[str] = None
+    box: Optional[tuple[int, int, int, int]] = None
+    layer: Optional[str] = None
+    via_layer: Optional[str] = None
+    guide_next: Optional[str] = None
+    is_congested: bool = False
+    is_jumper: bool = False
+    is_connect_to_term: bool = False
+
+    def set_box(self, box: tuple[int, int, int, int]) -> None:
+        """设置 guide 矩形。"""
+
+        self.box = box
+
+
+@dataclass
+class DbGroup:
+    """复刻 _dbGroup 的 Python 版本。
+
+    Group 保存实例/子 group 关系、region 链接以及 power/ground net 列表。
+    """
+
+    name: str
+    type: str = "physical_cluster"
+    next_entry: Optional[str] = None
+    group_next: Optional[str] = None
+    parent_group: Optional[str] = None
+    insts: List[str] = field(default_factory=list)
+    modinsts: List[str] = field(default_factory=list)
+    groups: List[str] = field(default_factory=list)
+    power_nets: List[str] = field(default_factory=list)
+    ground_nets: List[str] = field(default_factory=list)
+    region_next: Optional[str] = None
+    region_prev: Optional[str] = None
+    region: Optional[str] = None
+
+    def add_inst(self, inst_name: str) -> None:
+        """把 inst 挂到 group。"""
+
+        if inst_name not in self.insts:
+            self.insts.append(inst_name)
+
+    def add_group(self, group_name: str) -> None:
+        """把子 group 挂到 group。"""
+
+        if group_name not in self.groups:
+            self.groups.append(group_name)
+
+    def add_power_net(self, net_name: str) -> None:
+        """添加 power net。"""
+
+        if net_name not in self.power_nets:
+            self.power_nets.append(net_name)
+
+    def add_ground_net(self, net_name: str) -> None:
+        """添加 ground net。"""
+
+        if net_name not in self.ground_nets:
+            self.ground_nets.append(net_name)
+
+
+@dataclass
 class DbBlock:
     """复刻 _dbBlock 的 Python 版本。
 
@@ -457,6 +756,12 @@ class DbBlock:
     max_layer_for_clock: int = 0
     nets: Dict[str, DbNet] = field(default_factory=dict)
     insts: Dict[str, DbInst] = field(default_factory=dict)
+    rows: Dict[str, DbRow] = field(default_factory=dict)
+    bterms: Dict[str, DbBTerm] = field(default_factory=dict)
+    bpins: Dict[str, DbBPin] = field(default_factory=dict)
+    guides: Dict[str, DbGuide] = field(default_factory=dict)
+    groups: Dict[str, DbGroup] = field(default_factory=dict)
+    properties: Dict[str, DbProperty] = field(default_factory=dict)
     blocked_regions_for_pins: List[tuple[int, int, int, int]] = field(default_factory=list)
     children: List[str] = field(default_factory=list)
 
@@ -471,6 +776,138 @@ class DbBlock:
 
         self.insts[inst.name] = inst
         return inst
+
+    def add_row(self, row: DbRow) -> DbRow:
+        """添加 floorplan row。"""
+
+        self.rows[row.name] = row
+        return row
+
+    def add_bterm(self, bterm: DbBTerm) -> DbBTerm:
+        """添加 block terminal，并同步到 net 的 bterm 列表。"""
+
+        bterm.parent_block = self.name
+        self.bterms[bterm.name] = bterm
+        if bterm.net and bterm.net in self.nets:
+            net_bterms = self.nets[bterm.net].bterms
+            if bterm.name not in net_bterms:
+                net_bterms.append(bterm.name)
+        return bterm
+
+    def add_bpin(self, bpin: DbBPin) -> DbBPin:
+        """添加 block pin，并同步到所属 bterm。"""
+
+        self.bpins[bpin.name] = bpin
+        if bpin.bterm and bpin.bterm in self.bterms:
+            self.bterms[bpin.bterm].add_bpin(bpin)
+        return bpin
+
+    def add_guide(self, guide: DbGuide) -> DbGuide:
+        """添加 global routing guide，并同步到 net 的 guide 列表。"""
+
+        self.guides[guide.name] = guide
+        if guide.net and guide.net in self.nets:
+            net_guides = self.nets[guide.net].guides
+            if guide.name not in net_guides:
+                net_guides.append(guide.name)
+        return guide
+
+    def add_group(self, group: DbGroup) -> DbGroup:
+        """添加 group，并同步 parent group/inst 的轻量关系。"""
+
+        self.groups[group.name] = group
+        if group.parent_group and group.parent_group in self.groups:
+            self.groups[group.parent_group].add_group(group.name)
+        for inst_name in group.insts:
+            if inst_name in self.insts:
+                self.insts[inst_name].group = group.name
+        for net_name in group.power_nets + group.ground_nets:
+            if net_name in self.nets and group.name not in self.nets[net_name].groups:
+                self.nets[net_name].groups.append(group.name)
+        return group
+
+    def add_property(self, prop: DbProperty) -> DbProperty:
+        """添加 block 作用域 property。"""
+
+        self.properties[prop.name] = prop
+        return prop
+
+    def create_row(
+        self,
+        name: str,
+        site: Optional[str] = None,
+        x: int = 0,
+        y: int = 0,
+        orient: OrientType = OrientType.N,
+        direction: RowDir = RowDir.HORIZONTAL,
+        site_cnt: int = 0,
+        spacing: int = 0,
+    ) -> DbRow:
+        """创建 row 并挂到 block。"""
+
+        row = DbRow(
+            name=name,
+            site=site,
+            x=x,
+            y=y,
+            orient=orient,
+            direction=direction,
+            site_cnt=site_cnt,
+            spacing=spacing,
+        )
+        return self.add_row(row)
+
+    def create_bterm(
+        self,
+        name: str,
+        net: Optional[str] = None,
+        io_type: IoType = IoType.UNKNOWN,
+        sig_type: SigType = SigType.SIGNAL,
+    ) -> DbBTerm:
+        """创建 bterm 并挂到 block。"""
+
+        bterm = DbBTerm(name=name, net=net, io_type=io_type, sig_type=sig_type)
+        return self.add_bterm(bterm)
+
+    def create_bpin(
+        self, name: str, bterm: Optional[str] = None, status: PlacementStatus = PlacementStatus.NONE
+    ) -> DbBPin:
+        """创建 bpin 并挂到 block。"""
+
+        bpin = DbBPin(name=name, bterm=bterm, status=status)
+        return self.add_bpin(bpin)
+
+    def create_guide(
+        self,
+        name: str,
+        net: Optional[str] = None,
+        box: Optional[tuple[int, int, int, int]] = None,
+        layer: Optional[str] = None,
+        via_layer: Optional[str] = None,
+    ) -> DbGuide:
+        """创建 guide 并挂到 block。"""
+
+        guide = DbGuide(name=name, net=net, box=box, layer=layer, via_layer=via_layer)
+        return self.add_guide(guide)
+
+    def create_group(self, name: str, parent_group: Optional[str] = None) -> DbGroup:
+        """创建 group 并挂到 block。"""
+
+        group = DbGroup(name=name, parent_group=parent_group)
+        return self.add_group(group)
+
+    def create_property(
+        self,
+        name: str,
+        value: str | bool | int | float = "",
+        owner_type: str = "block",
+        owner: Optional[str] = None,
+    ) -> DbProperty:
+        """创建 property 并挂到 block。"""
+
+        prop = DbProperty(name=name, owner_type=owner_type, owner=owner or self.name)
+        prop.set_value(value)
+        return self.add_property(prop)
 
 
 @dataclass
@@ -511,6 +948,7 @@ class DbDatabase:
     vias: Dict[str, DbVia] = field(default_factory=dict)
     mterms: Dict[str, DbMTerm] = field(default_factory=dict)
     iterms: Dict[str, DbITerm] = field(default_factory=dict)
+    properties: Dict[str, DbProperty] = field(default_factory=dict)
 
     def ensure_chip(self) -> DbChip:
         """没有 chip 时自动创建。"""
@@ -574,6 +1012,20 @@ class DbDatabase:
         iterm = DbITerm(inst=name)
         self.iterms[name] = iterm
         return iterm
+
+    def create_property(
+        self,
+        name: str,
+        value: str | bool | int | float = "",
+        owner_type: str = "database",
+        owner: Optional[str] = None,
+    ) -> DbProperty:
+        """创建数据库作用域 property。"""
+
+        prop = DbProperty(name=name, owner_type=owner_type, owner=owner)
+        prop.set_value(value)
+        self.properties[name] = prop
+        return prop
 
     def is_schema(self, rev: int) -> bool:
         """对应 OpenDB 的 isSchema(rev)。"""
@@ -644,3 +1096,44 @@ def create_iterm(db: DbDatabase, name: str) -> DbITerm:
     """创建并返回 iterm。"""
 
     return db.create_iterm(name)
+
+
+def create_row(block: DbBlock, name: str, **kwargs: Any) -> DbRow:
+    """创建并返回 row。"""
+
+    return block.create_row(name, **kwargs)
+
+
+def create_bterm(block: DbBlock, name: str, **kwargs: Any) -> DbBTerm:
+    """创建并返回 bterm。"""
+
+    return block.create_bterm(name, **kwargs)
+
+
+def create_bpin(block: DbBlock, name: str, **kwargs: Any) -> DbBPin:
+    """创建并返回 bpin。"""
+
+    return block.create_bpin(name, **kwargs)
+
+
+def create_guide(block: DbBlock, name: str, **kwargs: Any) -> DbGuide:
+    """创建并返回 guide。"""
+
+    return block.create_guide(name, **kwargs)
+
+
+def create_group(block: DbBlock, name: str, **kwargs: Any) -> DbGroup:
+    """创建并返回 group。"""
+
+    return block.create_group(name, **kwargs)
+
+
+def create_property(
+    owner: DbDatabase | DbBlock,
+    name: str,
+    value: str | bool | int | float = "",
+    **kwargs: Any,
+) -> DbProperty:
+    """创建并返回 property。"""
+
+    return owner.create_property(name, value, **kwargs)
