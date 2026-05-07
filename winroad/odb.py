@@ -150,6 +150,137 @@ class DbInst:
 
 
 @dataclass
+class DbBox:
+    """复刻 _dbBox 的 Python 版本。
+
+    OpenDB 里的 box 既可能是普通矩形，也可能是 octilinear 形状，
+    这里先用通用形状字段保存。
+    """
+
+    owner_type: str = "unknown"
+    is_tech_via: bool = False
+    is_block_via: bool = False
+    visited: bool = False
+    octilinear: bool = False
+    layer_id: int = 0
+    via_id: int = 0
+    layer_mask: int = 0
+    rect: Optional[tuple[int, int, int, int]] = None
+    oct: Optional[list[tuple[int, int]]] = None
+    owner: int = 0
+    next_box: int = 0
+    design_rule_width: int = -1
+
+    def is_oct(self) -> bool:
+        """判断当前 box 是否为 octilinear。"""
+
+        return self.octilinear
+
+    def get_type(self) -> str:
+        """对应 OpenDB 的 getType()。"""
+
+        if self.is_tech_via:
+            return "tech_via"
+        if self.is_block_via:
+            return "block_via"
+        return "box"
+
+
+@dataclass
+class DbMaster:
+    """复刻 _dbMaster 的 Python 版本。"""
+
+    name: str
+    master_id: int = 0
+    x: int = 0
+    y: int = 0
+    width: int = 0
+    height: int = 0
+    type: str = "core"
+    frozen: bool = False
+    x_symmetry: bool = False
+    y_symmetry: bool = False
+    r90_symmetry: bool = False
+    mark: bool = False
+    sequential: bool = False
+    special_power: bool = False
+    site: Optional[str] = None
+    lib_for_site: Optional[str] = None
+    next_entry: Optional[str] = None
+    leq: Optional[str] = None
+    eeq: Optional[str] = None
+    obstructions: List[DbBox] = field(default_factory=list)
+    poly_obstructions: List[list[tuple[int, int]]] = field(default_factory=list)
+    mterms: List[str] = field(default_factory=list)
+    mpins: List[str] = field(default_factory=list)
+
+
+@dataclass
+class DbLib:
+    """复刻 _dbLib 的 Python 版本。"""
+
+    name: str
+    lef_units: int = 0
+    dbu_per_micron: int = 0
+    hier_delimiter: str = "/"
+    left_bus_delimiter: str = "["
+    right_bus_delimiter: str = "]"
+    tech: Optional[str] = None
+    masters: Dict[str, DbMaster] = field(default_factory=dict)
+    sites: Dict[str, str] = field(default_factory=dict)
+
+    def add_master(self, master: DbMaster) -> DbMaster:
+        """添加 master。"""
+
+        self.masters[master.name] = master
+        return master
+
+
+@dataclass
+class DbTech:
+    """复刻 _dbTech 的 Python 版本。"""
+
+    name: str = ""
+    version: float = 0.0
+    via_cnt: int = 0
+    layer_cnt: int = 0
+    rlayer_cnt: int = 0
+    lef_units: int = 0
+    dbu_per_micron: int = 0
+    mfgrid: int = 0
+    namecase: bool = False
+    haswireext: bool = False
+    nowireext: bool = False
+    hasclmeas: bool = False
+    clmeas: str = "unknown"
+    hasminspobs: bool = False
+    minspobs: bool = False
+    hasminsppin: bool = False
+    minsppin: bool = False
+    bottom_layer: Optional[str] = None
+    top_layer: Optional[str] = None
+    non_default_rules: List[str] = field(default_factory=list)
+    samenet_rules: List[str] = field(default_factory=list)
+    via_hash: Dict[str, str] = field(default_factory=dict)
+    layers: Dict[str, dict] = field(default_factory=dict)
+    vias: Dict[str, dict] = field(default_factory=dict)
+
+    def add_layer(self, name: str, data: Optional[dict] = None) -> dict:
+        """添加工艺层。"""
+
+        layer = data or {}
+        self.layers[name] = layer
+        return layer
+
+    def add_via(self, name: str, data: Optional[dict] = None) -> dict:
+        """添加工艺 via。"""
+
+        via = data or {}
+        self.vias[name] = via
+        return via
+
+
+@dataclass
 class DbBlock:
     """复刻 _dbBlock 的 Python 版本。
 
@@ -227,6 +358,8 @@ class DbDatabase:
     schema_minor: int = 111
     master_id: int = 0
     chip: Optional[DbChip] = None
+    tech: Optional[DbTech] = None
+    libs: Dict[str, DbLib] = field(default_factory=dict)
 
     def ensure_chip(self) -> DbChip:
         """没有 chip 时自动创建。"""
@@ -242,6 +375,19 @@ class DbDatabase:
         block = DbBlock(name=name)
         chip.add_block(block)
         return block
+
+    def create_tech(self, name: str = "") -> DbTech:
+        """创建工艺数据库对象。"""
+
+        self.tech = DbTech(name=name)
+        return self.tech
+
+    def create_lib(self, name: str) -> DbLib:
+        """创建 LEF/DEF 库对象。"""
+
+        lib = DbLib(name=name)
+        self.libs[name] = lib
+        return lib
 
     def is_schema(self, rev: int) -> bool:
         """对应 OpenDB 的 isSchema(rev)。"""
@@ -271,3 +417,14 @@ def create_block(db: DbDatabase, name: str) -> DbBlock:
 
     return db.create_block(name)
 
+
+def create_tech(db: DbDatabase, name: str = "") -> DbTech:
+    """创建并返回 tech。"""
+
+    return db.create_tech(name)
+
+
+def create_lib(db: DbDatabase, name: str) -> DbLib:
+    """创建并返回 lib。"""
+
+    return db.create_lib(name)
