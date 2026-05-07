@@ -12,9 +12,11 @@
   - `src/straps.h`
   - `src/connect.h`
   - `src/via.h`
+  - `src/sroute.h`
+  - `src/renderer.h`
   - `src/power_cells.h`
   - `src/pdn.tcl`
-- Python 侧只建立顶层对象、函数边界和对象关系，不写 OpenDB，不生成示例几何。
+- Python 侧只建立顶层对象、函数边界、参数保存和对象关系，不写 OpenDB，不生成示例几何。
 
 ## 已实现边界
 
@@ -26,6 +28,7 @@
   - `GridComponentType`
   - `ShapeType`
   - `FailedViaReason`
+  - `SplitCut`
   - `Rect`
   - `Halo`
 
@@ -55,6 +58,9 @@
   - `makeRegionVoltageDomain()`
   - `buildGrids()`
   - `findGrid()`
+  - `getGridByName()`
+  - `findGridForInstance()`
+  - `findGridContainingRect()`
   - `makeCoreGrid()`
   - `makeInstanceGrid()`
   - `makeExistingGrid()`
@@ -70,6 +76,7 @@
   - `filterVias()`
   - `checkSetup()`
   - `repairVias()`
+  - `addSrouteConnect()`
   - `createSrouteWires()`
   - `trimShapes()`
   - `updateVias()`
@@ -82,7 +89,7 @@
 - Voltage domain
   - `VoltageDomain`
   - 已保留 power / switched power / always-on power / ground / secondary nets / region / grids 关系
-  - 已建立 `getNets()`、`addGrid()`、`resetGrids()`、`clearGrids()`、`removeGrid()`、`report()`、`checkSetup()`
+  - 已建立 `getNets()`、`addGrid()`、`resetGrids()`、`clearGrids()`、`removeGrid()`、`findGrid()`、`getGridByName()`、`report()`、`checkSetup()`
 
 - Grid 对象层
   - `Grid`
@@ -91,7 +98,7 @@
   - `BumpGrid`
   - `ExistingGrid`
   - 已保留 rings / straps / connect / pin layers / via / switched power cell 关系
-  - 已建立 `addRing()`、`addStrap()`、`addConnect()`、`removeStrap()`、`getNets()`、`resetShapes()`、`ripup()`、`report()`、`checkSetup()`
+  - 已建立 `addRing()`、`addStrap()`、`addConnect()`、`removeStrap()`、`getNets()`、`getGridComponents()`、`getShapes()`、`getVias()`、`findComponent()`、`findConnect()`、`build()`、`resetShapes()`、`ripup()`、`report()`、`checkSetup()`
 
 - Grid component / shape
   - `GridComponent`
@@ -102,7 +109,9 @@
   - `FollowPins`
   - `PadDirectConnectionStraps`
   - `RepairChannelStraps`
-  - 已保留 shape list、net 顺序、start-with-power、ring layer/offset、strap pitch/width/spacing/extend/snap 等字段
+  - 已保留 shape list、net 顺序、start-with-power、ring layer/offset/pad-offset、strap pitch/width/spacing/extend/snap/start/end、pad direct connection、repair channel area/repair nets 等字段
+  - `GridComponent.build()` 保留 C++ build 顺序边界：layer check、make/refine/cut；实际几何仍在 `makeShapes()`/`cutShapes()` 抛 `NotImplementedError`
+  - `Rings.report()`、`Straps.report()`、`PadDirectConnectionStraps.report()`、`RepairChannelStraps.report()` 会展开参数边界
 
 - Connect / via
   - `Connect`
@@ -119,13 +128,17 @@
   - `ViaGenerator`
   - `GenerateViaGenerator`
   - `TechViaGenerator`
-  - 已保留 cut pitch、fixed vias、max rows/columns、ongrid、split cuts、failed via report 等边界字段
+  - 已保留 cut pitch、fixed vias、max rows/columns、ongrid、split cuts pitch/stagger、via list、failed via report 等边界字段
+  - `Connect` 已建立 `getSplitCut()`、`getSplitCutPitch()`、`isSplitCutStaggered()`、`getVias()`、`addVia()`、`clearFailedVias()`、参数化 `report()`
+  - `DbBaseVia.getViaReport()` 和 `DbGenerateStackedVia.getViaReport()` 已建立计数报告边界；真实 via 生成继续抛 `NotImplementedError`
 
 - Power switch / sroute / renderer
   - `PowerCell`
   - `GridSwitchedPower`
   - `SRoute`
   - `PDNRenderer`
+  - `SRoute.addSrouteConnect()`/`getSrouteConnects()` 只保存 `add_sroute_connect` 参数；`createSrouteWires()` 保留同名算法入口并抛 `NotImplementedError`
+  - `PDNRenderer` 保存 enabled/block/logger/grids/selected，支持 `setBlock()`、`setLogger()`、`setGrids()`、`select()`、`clear()`、`report()`；`redraw()` 保留入口并抛 `NotImplementedError`
 
 ## 未实现
 
@@ -143,5 +156,24 @@
 ## 说明
 
 - 当前 Python 层不依赖具体 `odb` 类型，所有 ODB 对象均以 `Any` 保存引用。
-- 可安全构建 `PdnGen -> VoltageDomain -> Grid -> Ring/Strap/Connect` 对象树并调用 `report()`。
+- 可安全构建 `PdnGen -> VoltageDomain -> Grid -> Ring/Strap/Connect` 对象树并调用 `report()`、domain/grid lookup、connect/component lookup、sroute 参数保存。
 - 涉及真实 PDN 算法、数据库写入或物理几何生成的同名入口会显式抛 `NotImplementedError`，避免误把 demo 行为当作算法结果。
+
+## 第二轮补充重点
+
+- grid component build/write/check/report
+  - `GridComponent.build()`、`Grid.build()` 建立 C++ 调用顺序边界，实际 `makeShapes()`/`makeVias()`/`writeToDb()` 不实现。
+  - 组件和 grid report 展开 ring、strap、connect、pin layer、repair channel、shape/via count。
+- via repair
+  - `PdnGen.repairVias()` 先执行 setup 检查，再保留同名算法入口并抛 `NotImplementedError`。
+  - `Connect` 增加 failed via 清理和 split cut pitch/stagger 查询。
+- sroute
+  - `PdnGen.addSrouteConnect()` 和 `SRoute.addSrouteConnect()` 只记录 Tcl 参数映射，`createSrouteWires()` 不生成线。
+- renderer
+  - `PDNRenderer` 增加状态保存和报告，`redraw()` 不绘制。
+- domain/grid lookup
+  - `VoltageDomain.findGrid()`、`getGridByName()`；`PdnGen.getGridByName()`、`findGridForInstance()`、`findGridContainingRect()`。
+- connect/ring/strap 参数边界
+  - ring report 包含 layer width/spacing、offset、pad offset、extend、allow out-of-die。
+  - strap report 包含 layer、width、pitch、spacing、count、offset、snap、extend、start/end、direction。
+  - connect report 包含 fixed vias、tech vias、cut pitch、max rows/columns、ongrid、split cuts、via/failure count。

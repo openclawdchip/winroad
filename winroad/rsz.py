@@ -448,6 +448,44 @@ class MoveStateData:
 
 
 @dataclass
+class RepairDesignLimits:
+    """RepairDesign 一轮修复使用的 violation 边界参数。"""
+
+    max_wire_length: Optional[float] = None
+    max_slew: Optional[float] = None
+    max_cap: Optional[float] = None
+    max_fanout: Optional[int] = None
+    slew_margin: float = 0.0
+    cap_margin: float = 0.0
+    corner: Any = None
+    buffer_cells: List[Any] = field(default_factory=list)
+
+
+@dataclass
+class RepairDesignViolationCounters:
+    """RepairDesign 的 long wire / max transition / cap / fanout 计数。"""
+
+    repaired_nets: int = 0
+    inserted_buffers: int = 0
+    resized_drivers: int = 0
+    long_wire: int = 0
+    max_slew: int = 0
+    max_cap: int = 0
+    max_fanout: int = 0
+
+    def as_dict(self) -> Dict[str, int]:
+        return {
+            "repaired_nets": self.repaired_nets,
+            "inserted_buffers": self.inserted_buffers,
+            "resized_drivers": self.resized_drivers,
+            "long_wire": self.long_wire,
+            "max_slew": self.max_slew,
+            "max_cap": self.max_cap,
+            "max_fanout": self.max_fanout,
+        }
+
+
+@dataclass
 class SlackEstimatorParams:
     """BaseMove 估算 move slack 时传递的上下文。"""
 
@@ -774,11 +812,20 @@ class MoveTracker:
     def setCurrentEndpoint(self, endpoint_pin: Any) -> None:
         self.current_endpoint_ = endpoint_pin
 
+    def currentEndpoint(self) -> Any:
+        return self.current_endpoint_
+
     def trackCriticalPins(self, critical_pins: Sequence[Any]) -> None:
         self.critical_pins_.extend(critical_pins)
 
+    def criticalPins(self) -> List[Any]:
+        return list(self.critical_pins_)
+
     def trackViolator(self, pin: Any) -> None:
         self.violators_.append(pin)
+
+    def violators(self) -> List[Any]:
+        return list(self.violators_)
 
     def trackViolatorWithInfo(
         self,
@@ -794,11 +841,20 @@ class MoveTracker:
             pin, gate_type, load_delay, intrinsic_delay, pin_slack, endpoint_slack
         )
 
+    def pinInfo(self, pin: Any) -> Optional[PinInfo]:
+        return self.pin_infos_.get(_obj_key(pin))
+
     def trackMove(self, pin: Any, move_type: str, state: MoveStateType) -> None:
         data = MoveStateData(pin=pin, order=len(self.moves_), move_type=move_type, state=state)
         self.moves_.append(data)
         if state is MoveStateType.ATTEMPT:
             self.pending_moves_.append(data)
+
+    def moves(self) -> List[MoveStateData]:
+        return list(self.moves_)
+
+    def pendingMoves(self) -> List[MoveStateData]:
+        return list(self.pending_moves_)
 
     def commitMoves(self) -> None:
         for data in self.pending_moves_:
@@ -813,6 +869,13 @@ class MoveTracker:
                 MoveStateData(data.pin, data.move_type, MoveStateType.ATTEMPT_REJECT, len(self.moves_))
             )
         self.pending_moves_.clear()
+
+    def moveSummary(self) -> Dict[str, int]:
+        summary = {state.name.lower(): 0 for state in MoveStateType}
+        for move in self.moves_:
+            summary[move.state.name.lower()] += 1
+        summary["pending"] = len(self.pending_moves_)
+        return summary
 
 
 class Resizer:
@@ -993,6 +1056,9 @@ class Resizer:
     def reportSwappablePins(self) -> None:
         self.repair_setup_.reportSwappablePins()
 
+    def reportSetupMoves(self) -> Dict[str, Any]:
+        return self.repair_setup_.reportMoveSummary()
+
     def rebufferNet(self, drvr_pin: Any) -> None:
         _not_translated("Resizer::rebufferNet")
 
@@ -1002,8 +1068,14 @@ class Resizer:
     def holdBufferCount(self) -> int:
         return self.repair_hold_.holdBufferCount()
 
+    def reportHoldCounters(self) -> Dict[str, int]:
+        return self.repair_hold_.reportCounters()
+
     def recoverPower(self, recover_power_percent: float, match_cell_footprint: bool = False, verbose: bool = False) -> bool:
         return self.recover_power_.recoverPower(recover_power_percent, match_cell_footprint, verbose)
+
+    def reportRecoverPowerCounters(self) -> Dict[str, Any]:
+        return self.recover_power_.reportCounters()
 
     def swapArithModules(self, path_count: int, target: str, slack_margin: float) -> None:
         _not_translated("Resizer::swapArithModules")
@@ -1046,6 +1118,9 @@ class Resizer:
 
     def repairDesignBufferCount(self) -> int:
         return self.repair_design_.insertedBufferCount()
+
+    def repairDesignViolationCounters(self) -> Dict[str, int]:
+        return self.repair_design_.reportViolationCounters()
 
     def repairNet(self, *args: Any, **kwargs: Any) -> None:
         self.repair_design_.repairNet(*args, **kwargs)
@@ -1297,6 +1372,7 @@ class RepairDesign:
         self.graphics_: Optional[ResizerObserver] = None
         self.r_strongest_buffer_ = 0.0
         self.slew_rc_factor_: Optional[float] = None
+        self.limits_ = RepairDesignLimits()
 
     def init(self) -> None:
         self.db_network_ = self.resizer_.db_network_
@@ -1308,6 +1384,83 @@ class RepairDesign:
     def insertedBufferCount(self) -> int:
         return self.inserted_buffer_count_
 
+    def configureLimits(
+        self,
+        max_wire_length: Optional[float] = None,
+        max_slew: Optional[float] = None,
+        max_cap: Optional[float] = None,
+        max_fanout: Optional[int] = None,
+        slew_margin: float = 0.0,
+        cap_margin: float = 0.0,
+        corner: Any = None,
+        buffer_cells: Optional[Sequence[Any]] = None,
+    ) -> RepairDesignLimits:
+        """记录 repair_design 的 violation 参数，不触发真实 STA/DB 修复。"""
+
+        self.limits_ = RepairDesignLimits(
+            max_wire_length=max_wire_length,
+            max_slew=max_slew,
+            max_cap=max_cap,
+            max_fanout=max_fanout,
+            slew_margin=slew_margin,
+            cap_margin=cap_margin,
+            corner=corner,
+            buffer_cells=list(buffer_cells or []),
+        )
+        self.max_wire_length_ = float(max_wire_length or 0.0)
+        self.max_length_ = int(max_wire_length or 0)
+        self.max_slew_ = float(max_slew or 0.0)
+        self.max_cap_ = float(max_cap or 0.0)
+        self.max_fanout_ = int(max_fanout or 0)
+        self.slew_margin_ = slew_margin
+        self.cap_margin_ = cap_margin
+        self.corner_ = corner
+        self.buffer_sizes_ = list(buffer_cells or [])
+        return self.limits_
+
+    def limits(self) -> RepairDesignLimits:
+        return self.limits_
+
+    def resetViolationCounters(self) -> None:
+        self.resize_count_ = 0
+        self.inserted_buffer_count_ = 0
+        self.repaired_net_count_ = 0
+        self.long_wire_count_ = 0
+        self.max_slew_count_ = 0
+        self.max_cap_count_ = 0
+        self.max_fanout_count_ = 0
+
+    def recordRepair(
+        self,
+        long_wire: int = 0,
+        max_slew: int = 0,
+        max_cap: int = 0,
+        max_fanout: int = 0,
+        inserted_buffers: int = 0,
+        resized_drivers: int = 0,
+        repaired_nets: int = 0,
+    ) -> None:
+        """累加 C++ repair pass 会维护的 counters。"""
+
+        self.long_wire_count_ += long_wire
+        self.max_slew_count_ += max_slew
+        self.max_cap_count_ += max_cap
+        self.max_fanout_count_ += max_fanout
+        self.inserted_buffer_count_ += inserted_buffers
+        self.resize_count_ += resized_drivers
+        self.repaired_net_count_ += repaired_nets
+
+    def violationCounters(self) -> RepairDesignViolationCounters:
+        return RepairDesignViolationCounters(
+            repaired_nets=self.repaired_net_count_,
+            inserted_buffers=self.inserted_buffer_count_,
+            resized_drivers=self.resize_count_,
+            long_wire=self.long_wire_count_,
+            max_slew=self.max_slew_count_,
+            max_cap=self.max_cap_count_,
+            max_fanout=self.max_fanout_count_,
+        )
+
     def repairNet(self, *_args: Any, **_kwargs: Any) -> None:
         _not_translated("RepairDesign::repairNet")
 
@@ -1317,8 +1470,8 @@ class RepairDesign:
     def repairClkInverters(self) -> None:
         _not_translated("RepairDesign::repairClkInverters")
 
-    def reportViolationCounters(self, *_args: Any, **_kwargs: Any) -> None:
-        _not_translated("RepairDesign::reportViolationCounters")
+    def reportViolationCounters(self, *_args: Any, **_kwargs: Any) -> Dict[str, int]:
+        return self.violationCounters().as_dict()
 
     def setDebugGraphics(self, graphics: ResizerObserver) -> None:
         self.graphics_ = graphics
@@ -1436,6 +1589,58 @@ class RepairSetup:
         self.move_sequence_types_ = [move for move in sequence if move not in skipped]
         self.move_sequence_ = [move_map[move] for move in self.move_sequence_types_]
 
+    def moveSequenceTypes(self) -> List[MoveType]:
+        return list(self.move_sequence_types_)
+
+    def setMoveTracker(self, tracker: Optional[MoveTracker]) -> None:
+        self.move_tracker_ = tracker
+
+    def makeMoveTracker(self) -> MoveTracker:
+        self.move_tracker_ = MoveTracker(
+            self.logger_,
+            self.resizer_.sta_,
+            self.db_network_,
+            self.resizer_.block_,
+        )
+        return self.move_tracker_
+
+    def moveTracker(self) -> Optional[MoveTracker]:
+        return self.move_tracker_
+
+    def beginEndpointRepair(self, endpoint_pin: Any) -> int:
+        """记录当前 endpoint 的一次 repair 尝试，供上层调度/报告使用。"""
+
+        key = _obj_key(endpoint_pin)
+        count = self.endpoint_pass_counts_phase1_.get(key, 0) + 1
+        self.endpoint_pass_counts_phase1_[key] = count
+        self.rejected_pin_moves_current_endpoint_.clear()
+        if self.move_tracker_ is not None:
+            self.move_tracker_.setCurrentEndpoint(endpoint_pin)
+        return count
+
+    def endpointRepairCount(self, endpoint_pin: Any) -> int:
+        return self.endpoint_pass_counts_phase1_.get(_obj_key(endpoint_pin), 0)
+
+    def recordRejectedMove(self, pin: Any, move: BaseMove) -> None:
+        key = _obj_key(pin)
+        self.rejected_pin_moves_current_endpoint_.setdefault(key, set()).add(move)
+
+    def rejectedMovesForPin(self, pin: Any) -> Set[BaseMove]:
+        return set(self.rejected_pin_moves_current_endpoint_.get(_obj_key(pin), set()))
+
+    def removedBufferCount(self) -> int:
+        return self.removed_buffer_count_
+
+    def reportMoveSummary(self) -> Dict[str, Any]:
+        move_counts = {move.name(): move.numMoves() for move in self.allMoves()}
+        return {
+            "move_sequence": [move.value for move in self.move_sequence_types_],
+            "removed_buffers": self.removed_buffer_count_,
+            "endpoint_repairs": dict(self.endpoint_pass_counts_phase1_),
+            "move_counts": move_counts,
+            "tracker": self.move_tracker_.moveSummary() if self.move_tracker_ is not None else None,
+        }
+
     def repairSetup(self, *_args: Any, **_kwargs: Any) -> bool:
         _not_translated("RepairSetup::repairSetup")
 
@@ -1483,11 +1688,35 @@ class RepairHold:
     def repairHold(self, *_args: Any, **_kwargs: Any) -> bool:
         _not_translated("RepairHold::repairHold")
 
+    def setHoldBuffer(self, buffer_cell: Any) -> None:
+        self.buffer_cell_ = buffer_cell
+
+    def holdBuffer(self) -> Any:
+        return self.buffer_cell_
+
+    def recordInsertedBuffer(self, count: int = 1, buffer_cell: Any = None) -> None:
+        if buffer_cell is not None:
+            self.buffer_cell_ = buffer_cell
+        self.inserted_buffer_count_ += count
+
+    def recordResize(self, count: int = 1) -> None:
+        self.resize_count_ += count
+
+    def recordClonedGate(self, count: int = 1) -> None:
+        self.cloned_gate_count_ += count
+
     def holdBufferCount(self) -> int:
         return self.inserted_buffer_count_
 
     def reportHoldBuffer(self) -> Any:
-        _not_translated("RepairHold::reportHoldBuffer")
+        return self.buffer_cell_
+
+    def reportCounters(self) -> Dict[str, int]:
+        return {
+            "inserted_buffers": self.inserted_buffer_count_,
+            "resized_drivers": self.resize_count_,
+            "cloned_gates": self.cloned_gate_count_,
+        }
 
     def resizeCount(self) -> int:
         return self.resize_count_
@@ -1517,6 +1746,7 @@ class RecoverPower:
         self.scene_ = None
         self.resize_count_ = 0
         self.swapped_cell_count_ = 0
+        self.sizedown_cell_count_ = 0
         self.recovered_power_ = 0.0
         self.match_cell_footprint_ = False
         self.verbose_ = False
@@ -1530,11 +1760,52 @@ class RecoverPower:
     def recoverPower(self, *_args: Any, **_kwargs: Any) -> bool:
         _not_translated("RecoverPower::recoverPower")
 
+    def configure(
+        self,
+        match_cell_footprint: bool = False,
+        verbose: bool = False,
+        scene: Any = None,
+    ) -> None:
+        self.match_cell_footprint_ = match_cell_footprint
+        self.verbose_ = verbose
+        self.scene_ = scene
+
+    def recordSwap(self, count: int = 1, recovered_power: float = 0.0) -> None:
+        self.swapped_cell_count_ += count
+        self.recovered_power_ += recovered_power
+
+    def recordSizeDown(self, count: int = 1, recovered_power: float = 0.0) -> None:
+        self.sizedown_cell_count_ += count
+        self.resize_count_ += count
+        self.recovered_power_ += recovered_power
+
+    def markBadVertex(self, vertex: Any) -> None:
+        self.bad_vertices_.add(_obj_key(vertex))
+
+    def isBadVertex(self, vertex: Any) -> bool:
+        return _obj_key(vertex) in self.bad_vertices_
+
+    def recoveredPower(self) -> float:
+        return self.recovered_power_
+
     def resizeCount(self) -> int:
         return self.resize_count_
 
     def swappedCellCount(self) -> int:
         return self.swapped_cell_count_
+
+    def sizeDownCount(self) -> int:
+        return self.sizedown_cell_count_
+
+    def reportCounters(self) -> Dict[str, Any]:
+        return {
+            "swapped_cells": self.swapped_cell_count_,
+            "sizedown_cells": self.sizedown_cell_count_,
+            "resized_cells": self.resize_count_,
+            "recovered_power": self.recovered_power_,
+            "bad_vertices": len(self.bad_vertices_),
+            "match_cell_footprint": self.match_cell_footprint_,
+        }
 
 
 class SwapArithModules:
@@ -1594,6 +1865,8 @@ __all__ = [
     "PreChecks",
     "RecoverPower",
     "RepairDesign",
+    "RepairDesignLimits",
+    "RepairDesignViolationCounters",
     "RepairHold",
     "RepairSetup",
     "Resizer",

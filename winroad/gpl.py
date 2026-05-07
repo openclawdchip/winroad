@@ -2261,27 +2261,70 @@ class InitialPlace:
         self.fixedInstForceVecX_: List[float] = []
         self.instLocVecY_: List[float] = []
         self.fixedInstForceVecY_: List[float] = []
+        self.solver_failed_ = False
+        self.last_threads_ = 0
+        self.is_initialized_ = False
 
     def doBicgstabPlace(self, threads: int) -> None:
+        self.last_threads_ = threads
         if self.ipVars_.maxIter == 0:
             return
+        self.setPlaceInstExtId()
+        self.placeInstsInitialPositions()
+        self.updatePinInfo()
+        self.createSparseMatrix()
         raise NotImplementedError("OpenROAD InitialPlace BiCGSTAB solver has not been translated yet")
 
     def placeInstsInitialPositions(self) -> None:
-        raise NotImplementedError("OpenROAD InitialPlace placement initialization has not been translated yet")
+        die = self.pbc_.getDie()
+        center_x, center_y = die.coreCx(), die.coreCy()
+        self.instLocVecX_ = []
+        self.instLocVecY_ = []
+        for inst in self.pbc_.placeInsts():
+            if self.ipVars_.forceCenter:
+                inst.setCenterLocation(center_x, center_y)
+            self.instLocVecX_.append(float(inst.cx()))
+            self.instLocVecY_.append(float(inst.cy()))
+        self.fixedInstForceVecX_ = [0.0 for _ in self.instLocVecX_]
+        self.fixedInstForceVecY_ = [0.0 for _ in self.instLocVecY_]
+        self.is_initialized_ = True
+        if self.ipVars_.debug and self.graphics_ is not None:
+            self.graphics_.debugForInitialPlace(self.pbc_, self.pbVec_)
 
     def setPlaceInstExtId(self) -> None:
         for index, inst in enumerate(self.pbc_.placeInsts()):
             inst.setExtId(index)
 
     def updatePinInfo(self) -> None:
-        raise NotImplementedError("OpenROAD InitialPlace pin update has not been translated yet")
+        for pin in self.pbc_.getPins():
+            pin.updateCoordi()
 
     def createSparseMatrix(self) -> None:
         raise NotImplementedError("OpenROAD InitialPlace sparse matrix creation has not been translated yet")
 
     def updateCoordi(self) -> None:
-        raise NotImplementedError("OpenROAD InitialPlace coordinate update has not been translated yet")
+        if len(self.instLocVecX_) != len(self.instLocVecY_):
+            raise ValueError("InitialPlace coordinate vectors have different lengths")
+        for inst, x, y in zip(self.pbc_.placeInsts(), self.instLocVecX_, self.instLocVecY_):
+            inst.setCenterLocation(int(round(x)), int(round(y)))
+            inst.dbSetLocation()
+        self.updatePinInfo()
+
+    def reportStatus(self) -> Dict[str, Any]:
+        return {
+            "max_iter": self.ipVars_.maxIter,
+            "max_solver_iter": self.ipVars_.maxSolverIter,
+            "place_insts": len(self.pbc_.placeInsts()),
+            "initialized": self.is_initialized_,
+            "solver_failed": self.solver_failed_,
+            "last_threads": self.last_threads_,
+        }
+
+    def getInstLocVecX(self) -> List[float]:
+        return self.instLocVecX_
+
+    def getInstLocVecY(self) -> List[float]:
+        return self.instLocVecY_
 
 
 class RouteBase:
@@ -2319,6 +2362,8 @@ class RouteBase:
         self.rc_metric_: List[float] = []
         self.route_overflow_: List[float] = []
         self.route_utilization_: List[float] = []
+        self.tile_inflation_ratios_: Dict[int, float] = {}
+        self.minRcCellSizes_: Dict[int, Tuple[int, int]] = {}
         self.tg_.setLogger(log)
 
     def setNesterovBaseCommon(self, nbc: NesterovBaseCommon) -> None:
@@ -2387,15 +2432,32 @@ class RouteBase:
         raise NotImplementedError("OpenROAD routability gcell size update has not been translated yet")
 
     def revertGCellSizeToMinRc(self) -> None:
-        raise NotImplementedError("OpenROAD routability min-RC revert has not been translated yet")
+        if not self.minRcCellSizes_:
+            return
+        for nb in self.nbVec_:
+            for gcell in nb.getGCells():
+                saved = self.minRcCellSizes_.get(id(gcell))
+                if saved is None:
+                    continue
+                dx, dy = saved
+                gcell.setSize(dx, dy, GCellChange.kRoutability)
+            nb.updateAreas()
 
     def saveMinRc(self) -> None:
         self.minRcTargetDensity_ = [nb.getTargetDensity() for nb in self.nbVec_]
+        self.minRcInflatedAreaDelta_ = list(self.inflatedAreaDelta_)
+        self.minRcCellSizes_ = {
+            id(gcell): (gcell.dx(), gcell.dy())
+            for nb in self.nbVec_
+            for gcell in nb.getGCells()
+        }
 
     def resetMinRc(self) -> None:
         self.minRc_ = 1e30
         self.is_min_rc_ = False
         self.minRcTargetDensity_.clear()
+        self.minRcInflatedAreaDelta_.clear()
+        self.minRcCellSizes_.clear()
 
     def inflatedAreaDelta(self) -> List[int]:
         return self.inflatedAreaDelta_
@@ -2405,6 +2467,45 @@ class RouteBase:
 
     def getRevertCount(self) -> int:
         return self.revert_count_
+
+    def saveRcMetric(self, rc: Optional[float] = None) -> None:
+        value = self.getRC() if rc is None else rc
+        self.rc_metric_.append(value)
+        if value < self.minRc_:
+            self.minRc_ = value
+            self.is_min_rc_ = True
+            self.saveMinRc()
+        else:
+            self.is_min_rc_ = False
+
+    def saveRouteOverflow(self, overflow: Optional[float] = None) -> None:
+        value = self.total_route_overflow_ if overflow is None else overflow
+        self.route_overflow_.append(value)
+
+    def saveRouteUtilization(self, utilization: float) -> None:
+        self.route_utilization_.append(utilization)
+
+    def getRcMetricHistory(self) -> List[float]:
+        return self.rc_metric_
+
+    def getRouteOverflowHistory(self) -> List[float]:
+        return self.route_overflow_
+
+    def getRouteUtilizationHistory(self) -> List[float]:
+        return self.route_utilization_
+
+    def reportCongestion(self) -> Dict[str, Any]:
+        return {
+            "use_rudy": self.rbVars_.useRudy,
+            "rc": self.final_average_rc_,
+            "target_rc": self.rbVars_.targetRC,
+            "overflowed_tiles": self.overflowed_tiles_count_,
+            "total_tiles": self.getTotalTilesCount(),
+            "total_route_overflow": self.total_route_overflow_,
+            "total_inflation": self.getTotalInflation(),
+            "revert_count": self.revert_count_,
+            "is_min_rc": self.is_min_rc_,
+        }
 
 
 class TimingBase:
@@ -2427,12 +2528,21 @@ class TimingBase:
         self.timing_driven_nets_: List[GNet] = []
         self.prev_timing_weights_: Dict[int, float] = {}
         self.run_journal_restore_ = False
+        self.timing_driven_iter_ = 0
+        self.last_overflow_ = 0.0
+        self.last_resizer_result_ = False
 
     def isTimingNetWeightOverflow(self, overflow: float) -> bool:
-        return int(round(overflow * 100)) in self.timingNetWeightOverflow_
+        checkpoint = int(round(overflow * 100))
+        self.last_overflow_ = overflow
+        if checkpoint not in self.timingOverflowChk_:
+            return False
+        self.timingOverflowChk_.remove(checkpoint)
+        return True
 
     def addTimingNetWeightOverflow(self, overflow: int) -> None:
         self.timingNetWeightOverflow_.append(overflow)
+        self.initTimingOverflowChk()
 
     def setTimingNetWeightOverflows(self, overflows: Sequence[int]) -> None:
         self.timingNetWeightOverflow_ = list(overflows)
@@ -2453,6 +2563,12 @@ class TimingBase:
         self.net_weight_max_ = max
 
     def executeTimingDriven(self, run_journal_restore: bool) -> bool:
+        self.run_journal_restore_ = run_journal_restore
+        self.timing_driven_iter_ += 1
+        self.prev_timing_weights_ = {}
+        if self.nbc_ is not None:
+            for index, gnet in enumerate(self.nbc_.getGNets()):
+                self.prev_timing_weights_[index] = gnet.getTimingWeight()
         raise NotImplementedError("OpenROAD timing-driven net reweight has not been translated yet")
 
     def resetTimingDrivenNets(self) -> None:
@@ -2474,6 +2590,27 @@ class TimingBase:
 
     def timingOverflowChk(self) -> List[int]:
         return self.timingOverflowChk_
+
+    def timingDrivenNets(self) -> List[GNet]:
+        return self.timing_driven_nets_
+
+    def restorePrevTimingWeights(self) -> None:
+        if self.nbc_ is None:
+            return
+        for index, gnet in enumerate(self.nbc_.getGNets()):
+            if index in self.prev_timing_weights_:
+                gnet.setTimingWeight(self.prev_timing_weights_[index])
+
+    def reportTimingDriven(self) -> Dict[str, Any]:
+        return {
+            "checkpoints": list(self.timingNetWeightOverflow_),
+            "remaining_checkpoints": list(self.timingOverflowChk_),
+            "max_weight": self.net_weight_max_,
+            "timing_driven_iter": self.timing_driven_iter_,
+            "timing_driven_nets": len(self.timing_driven_nets_),
+            "last_overflow": self.last_overflow_,
+            "run_journal_restore": self.run_journal_restore_,
+        }
 
 
 class NesterovPlace:
@@ -2521,9 +2658,26 @@ class NesterovPlace:
         self.recursionCntInitSLPCoef_ = 0
         self.placement_gif_key_ = -1
         self.routability_gif_key_ = -1
+        self.last_iter_ = 0
+        self.timing_driven_iter_ = 0
+        self.routability_iter_ = 0
+        self.snapshot_saved_ = False
+        self.last_report_: Dict[str, Any] = {}
         self.db_cbk_: Optional[nesterovDbCbk] = None
 
     def doNesterovPlace(self, start_iter: int = 0) -> int:
+        self.last_iter_ = start_iter
+        if self.graphics_ is not None and self.npVars_ is not None and self.npVars_.debug:
+            self.graphics_.debugForNesterovPlace(
+                self,
+                self.pbc_,  # type: ignore[arg-type]
+                self.nbc_,  # type: ignore[arg-type]
+                self.rb_,  # type: ignore[arg-type]
+                self.pbVec_,
+                self.nbVec_,
+                self.npVars_.debug_draw_bins,
+                self.npVars_.debug_inst,
+            )
         raise NotImplementedError("OpenROAD NesterovPlace main loop has not been translated yet")
 
     def init(self) -> None:
@@ -2583,9 +2737,16 @@ class NesterovPlace:
         for nb in self.nbVec_:
             nb.saveSnapshot()
         self.diverge_snapshot_average_overflow_unscaled_ = self.average_overflow_unscaled_
+        self.diverge_snapshot_iter_ = self.last_iter_
+        self.snapshot_saved_ = True
+        if self.graphics_ is not None:
+            self.graphics_.addRoutabilitySnapshot(self.last_iter_)
 
     def revertToSnapshot(self) -> bool:
-        return all(nb.revertToSnapshot() for nb in self.nbVec_)
+        reverted = all(nb.revertToSnapshot() for nb in self.nbVec_)
+        if reverted:
+            self.updateDb()
+        return reverted
 
     def checkConvergence(self, iter: int, routability_iter: int) -> bool:
         return all(nb.checkConvergence(iter, routability_iter, self.rb_) for nb in self.nbVec_)
@@ -2609,13 +2770,21 @@ class NesterovPlace:
         if self.tb_ is None or self.npVars_ is None or not self.npVars_.timingDrivenMode:
             return False
         if self.tb_.isTimingNetWeightOverflow(overflow):
+            self.timing_driven_iter_ += 1
+            self.npVars_.timingDrivenIterCounter += 1
+            if self.graphics_ is not None:
+                self.graphics_.addTimingDrivenIter(self.last_iter_)
             return self.tb_.executeTimingDriven(False)
         return False
 
     def updateRoutability(self, routability_driven_revert_count: int) -> Tuple[bool, bool]:
         if self.rb_ is None or self.npVars_ is None or not self.npVars_.routability_driven_mode:
             return (False, False)
-        return self.rb_.routability(routability_driven_revert_count)
+        self.routability_iter_ += 1
+        result = self.rb_.routability(routability_driven_revert_count)
+        if self.graphics_ is not None:
+            self.graphics_.addRoutabilityIter(self.last_iter_, result[1])
+        return result
 
     def getWireLengthCoefX(self) -> float:
         return self.wireLengthCoefX_
@@ -2633,6 +2802,27 @@ class NesterovPlace:
     def setMaxIters(self, limit: int) -> None:
         if self.npVars_ is not None:
             self.npVars_.maxNesterovIter = limit
+
+    def reportStatus(self) -> Dict[str, Any]:
+        self.last_report_ = {
+            "iter": self.last_iter_,
+            "average_overflow": self.average_overflow_,
+            "average_overflow_unscaled": self.average_overflow_unscaled_,
+            "total_sum_overflow": self.total_sum_overflow_,
+            "hpwl": self.nbc_.getHpwl() if self.nbc_ is not None else 0,
+            "min_hpwl": self.min_hpwl_,
+            "num_region_diverged": self.num_region_diverged_,
+            "timing_driven_iter": self.timing_driven_iter_,
+            "routability_iter": self.routability_iter_,
+            "snapshot_saved": self.snapshot_saved_,
+            "diverge_snapshot_iter": self.diverge_snapshot_iter_,
+            "diverge_code": self.divergeCode_,
+            "diverge_message": self.divergeMsg_,
+        }
+        return self.last_report_
+
+    def getLastReport(self) -> Dict[str, Any]:
+        return self.last_report_
 
     def resizeGCell(self, inst: DbInst) -> None:
         raise NotImplementedError("OpenROAD resize callback has not been translated yet")
@@ -2755,15 +2945,18 @@ class GraphicsNone(AbstractGraphics):
     def __init__(self, logger: Any = None):
         self.logger = logger
         self.debug_on = False
+        self.events_: List[Tuple[str, Any]] = []
 
     def MakeNew(self, logger: Any) -> "GraphicsNone":
         return GraphicsNone(logger)
 
     def debugForMbff(self) -> None:
         self.debug_on = True
+        self.events_.append(("debug_mbff", None))
 
     def debugForInitialPlace(self, pbc: PlacerBaseCommon, pbVec: List[PlacerBase]) -> None:
         self.debug_on = True
+        self.events_.append(("debug_initial", len(pbVec)))
 
     def debugForNesterovPlace(
         self,
@@ -2777,18 +2970,19 @@ class GraphicsNone(AbstractGraphics):
         inst: Optional[DbInst],
     ) -> None:
         self.debug_on = True
+        self.events_.append(("debug_nesterov", len(nbVec)))
 
     def addIter(self, iter: int, overflow: float) -> None:
-        return None
+        self.events_.append(("iter", (iter, overflow)))
 
     def addTimingDrivenIter(self, iter: int) -> None:
-        return None
+        self.events_.append(("timing_iter", iter))
 
     def addRoutabilitySnapshot(self, iter: int) -> None:
-        return None
+        self.events_.append(("routability_snapshot", iter))
 
     def addRoutabilityIter(self, iter: int, revert: bool) -> None:
-        return None
+        self.events_.append(("routability_iter", (iter, revert)))
 
     def mbffMapping(self, segs: Sequence[Any]) -> None:
         return None
@@ -2797,7 +2991,7 @@ class GraphicsNone(AbstractGraphics):
         return None
 
     def status(self, message: str) -> None:
-        return None
+        self.events_.append(("status", message))
 
     def enabled(self) -> bool:
         return False
@@ -2806,7 +3000,10 @@ class GraphicsNone(AbstractGraphics):
         self.debug_on = set_on
 
     def cellPlotImpl(self, pause: bool) -> None:
-        return None
+        self.events_.append(("cell_plot", pause))
+
+    def events(self) -> List[Tuple[str, Any]]:
+        return self.events_
 
 
 def isValidSigType(db_type: SigType) -> bool:
@@ -2876,6 +3073,18 @@ class Replace:
     def getTotalPlaceableInsts(self) -> int:
         return self.total_placeable_insts_
 
+    def getInitialPlace(self) -> Optional[InitialPlace]:
+        return self.ip_
+
+    def getNesterovPlace(self) -> Optional[NesterovPlace]:
+        return self.np_
+
+    def getRouteBase(self) -> Optional[RouteBase]:
+        return self.rb_
+
+    def getTimingBase(self) -> Optional[TimingBase]:
+        return self.tb_
+
     def checkHasCoreRows(self) -> None:
         block = _get_block(self.db_)
         if block is None:
@@ -2944,6 +3153,40 @@ class Replace:
         self.tb_ = None
         if self.np_ is not None:
             self.np_.tb_ = None
+
+    def reportInitialPlace(self) -> Dict[str, Any]:
+        if self.ip_ is None:
+            return {}
+        return self.ip_.reportStatus()
+
+    def reportNesterovPlace(self) -> Dict[str, Any]:
+        if self.np_ is None:
+            return {}
+        return self.np_.reportStatus()
+
+    def reportRoutability(self) -> Dict[str, Any]:
+        if self.rb_ is None:
+            return {}
+        return self.rb_.reportCongestion()
+
+    def reportTimingDriven(self) -> Dict[str, Any]:
+        if self.tb_ is None:
+            return {}
+        return self.tb_.reportTimingDriven()
+
+    def reportStatus(self) -> Dict[str, Any]:
+        return {
+            "placeable_insts": self.total_placeable_insts_,
+            "clusters": len(self.clusters_),
+            "has_initial_place": self.ip_ is not None,
+            "has_nesterov_place": self.np_ is not None,
+            "has_route_base": self.rb_ is not None,
+            "has_timing_base": self.tb_ is not None,
+            "initial_place": self.reportInitialPlace(),
+            "nesterov_place": self.reportNesterovPlace(),
+            "routability": self.reportRoutability(),
+            "timing": self.reportTimingDriven(),
+        }
 
     def setInitialPlaceMaxIter(self, options: PlaceOptions, max_iter: int) -> None:
         options.initialPlaceMaxIter = max_iter

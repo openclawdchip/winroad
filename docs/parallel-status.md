@@ -49,3 +49,30 @@
 - `cts`：深化 `CtsOptions`、`TechChar`、`TreeBuilder/HTreeBuilder`、`SinkClustering`、`LatencyBalancer`、`TritonCTS` 的函数边界。
 - `rcx`：深化 RC table/model、corner/config、measure、SPEF、extMain、bench/pattern 边界。
 - `pdn`：完成第一轮 PDN 顶层对象边界，包括 grid、strap、ring、via、domain、connect、report/check 等。
+
+## 2026-05-07 第三轮
+
+继续保持 6 线程并行。`odb` 仍然后置，本轮引入 `drt` 第一轮翻译。
+
+| 模块 | 线程 id | 昵称 | 状态 | 负责文件 |
+| --- | --- | --- | --- | --- |
+| `drt` | `019e026d-f1f3-7031-a5d5-fa7aa7126a29` | Averroes | 失败 | `winroad/drt.py`, `docs/drt.md` |
+| `pdn` | `019e026d-f223-7863-9fa5-f13aa88d4f73` | Sagan | 已完成 | `winroad/pdn.py`, `docs/pdn.md` |
+| `gpl` | `019e026d-f257-7943-9e57-d14d1c303272` | Singer | 已完成 | `winroad/gpl.py`, `docs/gpl.md` |
+| `grt` | `019e026d-f285-7752-8910-e5bec9c7e3ed` | Ohm | 已完成 | `winroad/grt.py`, `docs/grt.md` |
+| `rsz` | `019e026d-f2a0-7b21-8ed6-8bf2e48d46fe` | Bacon | 已完成 | `winroad/rsz.py`, `docs/rsz.md` |
+| `cts` | `019e026d-f2bc-79a3-a0db-c39bd079a437` | Wegener | 已完成 | `winroad/cts.py`, `docs/cts.md` |
+
+补位线程：
+
+| 模块 | 线程 id | 昵称 | 状态 | 负责文件 |
+| --- | --- | --- | --- | --- |
+| `drt` | `019e0272-b660-7592-8b09-9a2bb79c8798` | Parfit | 运行中 | `winroad/drt.py`, `docs/drt.md` |
+
+### 第三轮已完成摘要
+
+- `gpl`：补 initial placement、RouteBase congestion/report、TimingBase timing-driven、Nesterov snapshot/debug/report 等边界。
+- `rsz`：补 RepairDesign limit/counter、MoveTracker 报告、RepairSetup endpoint、RepairHold/RecoverPower 计数与报告边界。
+- `cts`：补 TechChar LUT 数据、TreeBuilder blockage/legalization、TritonCTS clock root/tree/report/repair/balance 等边界。
+- `pdn`：补 GridComponent build/report、Connect split-cut/via、Grid lookup/build/report、SRoute、PDNRenderer、PdnGen lookup/repair/write 边界。
+- `grt`：补 GSegment 轻量序列化、guide 读写、Net alpha/beta/gamma、resource snapshot、tile congestion、wirelength/report 边界。

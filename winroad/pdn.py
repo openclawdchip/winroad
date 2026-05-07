@@ -88,6 +88,14 @@ class FailedViaReason(Enum):
     OTHER = "OTHER"
 
 
+@dataclass(frozen=True)
+class SplitCut:
+    """对应 `pdn::Connect::SplitCut`。"""
+
+    pitch: int = 0
+    stagger: bool = False
+
+
 def _normalize_starts_with(value: StartsWith | str | bool) -> StartsWith:
     """兼容 Tcl 字符串、C++ 枚举语义和内部布尔形式。"""
 
@@ -105,6 +113,31 @@ def _starts_with_power(value: StartsWith | str | bool) -> bool:
     """`GRID` 在 C++ 中继承 grid 当前顺序，这里默认按 POWER 处理。"""
 
     return _normalize_starts_with(value) != StartsWith.GROUND
+
+
+def _normalize_extension_mode(value: ExtensionMode | str) -> ExtensionMode:
+    if isinstance(value, ExtensionMode):
+        return value
+    upper = value.upper()
+    if upper in ExtensionMode.__members__:
+        return ExtensionMode[upper]
+    raise ValueError(f"unknown ExtensionMode value: {value!r}")
+
+
+def _normalize_power_switch_network(value: PowerSwitchNetworkType | str) -> PowerSwitchNetworkType:
+    if isinstance(value, PowerSwitchNetworkType):
+        return value
+    upper = value.upper()
+    if upper in PowerSwitchNetworkType.__members__:
+        return PowerSwitchNetworkType[upper]
+    for item in PowerSwitchNetworkType:
+        if item.value.upper() == upper:
+            return item
+    raise ValueError(f"unknown PowerSwitchNetworkType value: {value!r}")
+
+
+def _rect_intersects(a: Rect, b: Rect) -> bool:
+    return a[0] < b[2] and a[2] > b[0] and a[1] < b[3] and a[3] > b[1]
 
 
 def _name(obj: Any) -> str:
@@ -282,6 +315,13 @@ class DbBaseVia(DbVia):
     def incrementCount(self, count: int = 1) -> None:
         self.count += count
 
+    def getViaReport(self) -> Dict[str, int]:
+        try:
+            name = self.getName()
+        except NotImplementedError:
+            name = type(self).__name__
+        return {name: self.count}
+
 
 @dataclass
 class DbTechVia(DbBaseVia):
@@ -356,6 +396,16 @@ class DbGenerateStackedVia(DbVia):
     bottom: Any = None
     block: Any = None
 
+    def requiresPatch(self) -> bool:
+        return any(via.requiresPatch() for via in self.vias)
+
+    def getViaReport(self) -> Dict[str, int]:
+        report: Dict[str, int] = {}
+        for via in self.vias:
+            for name, count in via.getViaReport().items():
+                report[name] = report.get(name, 0) + count
+        return report
+
 
 @dataclass
 class DbGenerateDummyVia(DbVia):
@@ -427,6 +477,10 @@ class GridComponent:
     def getShapes(self) -> List[Shape]:
         return list(self.shapes)
 
+    def addShape(self, shape: Shape) -> None:
+        shape.grid_component = self
+        self.shapes.append(shape)
+
     def clearShapes(self) -> None:
         self.shapes.clear()
 
@@ -449,6 +503,13 @@ class GridComponent:
 
     def makeShapes(self, other_shapes: Any) -> None:
         _not_implemented(f"{type(self).__name__}::makeShapes")
+
+    def build(self, other_shapes: Any = None, obstructions: Any = None) -> None:
+        self.checkLayerSpecifications()
+        self.makeShapes(other_shapes)
+        self.refineShapes(other_shapes, obstructions)
+        if obstructions is not None:
+            self.cutShapes(obstructions)
 
     def refineShapes(self, all_shapes: Any, all_obstructions: Any) -> bool:
         return False
@@ -511,6 +572,22 @@ class Rings(GridComponent):
     def getLayers(self) -> List[Any]:
         return [layer.layer for layer in self.layers if layer.layer is not None]
 
+    def report(self) -> Dict[str, Any]:
+        data = super().report()
+        data.update(
+            {
+                "layers": [
+                    {"layer": _name(layer.layer), "width": layer.width, "spacing": layer.spacing}
+                    for layer in self.layers
+                ],
+                "offset": self.offset,
+                "pad_offset": self.pad_offset,
+                "extend_to_boundary": self.extend_to_boundary,
+                "allow_outside_die": self.allow_outside_die,
+            }
+        )
+        return data
+
     def type(self) -> GridComponentType:
         return GridComponentType.RING
 
@@ -538,7 +615,7 @@ class Straps(GridComponent):
         self.snap = snap
 
     def setExtend(self, mode: ExtensionMode) -> None:
-        self.extend_mode = mode
+        self.extend_mode = _normalize_extension_mode(mode)
 
     def setStrapStartEnd(self, start: int, end: int) -> None:
         self.strap_start = start
@@ -548,6 +625,25 @@ class Straps(GridComponent):
         if self.number_of_straps <= 1:
             return self.width
         return self.number_of_straps * self.width + (self.number_of_straps - 1) * self.spacing
+
+    def report(self) -> Dict[str, Any]:
+        data = super().report()
+        data.update(
+            {
+                "layer": _name(self.layer),
+                "width": self.width,
+                "pitch": self.pitch,
+                "spacing": self.spacing,
+                "number_of_straps": self.number_of_straps,
+                "offset": self.offset,
+                "snap": self.snap,
+                "extend_mode": self.extend_mode.value,
+                "strap_start": self.strap_start,
+                "strap_end": self.strap_end,
+                "direction": _name(self.direction) if self.direction is not None else None,
+            }
+        )
+        return data
 
     def type(self) -> GridComponentType:
         return GridComponentType.STRAP
@@ -574,6 +670,11 @@ class PadDirectConnectionStraps(Straps):
     def canConnect(self) -> bool:
         _not_implemented("PadDirectConnectionStraps::canConnect")
 
+    def report(self) -> Dict[str, Any]:
+        data = super().report()
+        data.update({"iterm": _name(self.iterm), "connect_pad_layers": [_name(layer) for layer in self.connect_pad_layers]})
+        return data
+
     def type(self) -> GridComponentType:
         return GridComponentType.PAD_CONNECT
 
@@ -599,6 +700,21 @@ class RepairChannelStraps(Straps):
     def continueRepairs(self, other_shapes: Any) -> None:
         _not_implemented("RepairChannelStraps::continueRepairs")
 
+    def report(self) -> Dict[str, Any]:
+        data = super().report()
+        data.update(
+            {
+                "target": _name(self.target.layer) if self.target is not None else None,
+                "connect_to": _name(self.connect_to),
+                "area": self.area,
+                "available_area": self.available_area,
+                "obs_check_area": self.obs_check_area,
+                "repair_nets": [_name(net) for net in self.repair_nets],
+                "valid": self.isRepairValid(),
+            }
+        )
+        return data
+
     @staticmethod
     def repairGridChannels(grid: "Grid", global_shapes: Any, obstructions: Any, allow: bool, renderer: Any = None) -> None:
         _not_implemented("RepairChannelStraps::repairGridChannels")
@@ -618,9 +734,12 @@ class Connect:
     max_rows: int = 0
     max_columns: int = 0
     ongrid: Set[Any] = field(default_factory=set)
-    split_cuts: Dict[Any, int] = field(default_factory=dict)
+    split_cuts: Dict[Any, SplitCut] = field(default_factory=dict)
     vias: List[Via] = field(default_factory=list)
     failed_vias: Dict[FailedViaReason, List[Tuple[Any, Rect]]] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        self.setSplitCuts(self.split_cuts)
 
     def addFixedVia(self, via: Any) -> None:
         self.fixed_generate_vias.append(via)
@@ -641,11 +760,17 @@ class Connect:
     def setOnGrid(self, layers: Sequence[Any]) -> None:
         self.ongrid = set(layers)
 
-    def setSplitCuts(self, splits: Mapping[Any, int]) -> None:
-        self.split_cuts = dict(splits)
+    def setSplitCuts(self, splits: Mapping[Any, Any]) -> None:
+        self.split_cuts = {layer: self._normalize_split_cut(value) for layer, value in splits.items()}
+
+    def getSplitCut(self, layer: Any) -> SplitCut:
+        return self.split_cuts.get(layer, SplitCut())
 
     def getSplitCutPitch(self, layer: Any) -> int:
-        return self.split_cuts.get(layer, 0)
+        return self.getSplitCut(layer).pitch
+
+    def isSplitCutStaggered(self, layer: Any) -> bool:
+        return self.getSplitCut(layer).stagger
 
     def getLowerLayer(self) -> Any:
         return self.layer0
@@ -671,6 +796,12 @@ class Connect:
     def clearShapes(self) -> None:
         self.vias.clear()
 
+    def getVias(self) -> List[Via]:
+        return list(self.vias)
+
+    def addVia(self, via: Via) -> None:
+        self.vias.append(via)
+
     def makeVia(self, wire: Any, lower: Shape, upper: Shape, wire_type: Any, via_shapes: Any) -> None:
         _not_implemented("Connect::makeVia")
 
@@ -680,6 +811,9 @@ class Connect:
     def addFailedVia(self, reason: FailedViaReason, rect: Rect, net: Any) -> None:
         self.failed_vias.setdefault(reason, []).append((net, rect))
 
+    def clearFailedVias(self) -> None:
+        self.failed_vias.clear()
+
     def printViaReport(self) -> Dict[str, int]:
         return {reason.value: len(items) for reason, items in self.failed_vias.items()}
 
@@ -687,10 +821,31 @@ class Connect:
         return {
             "grid": self.grid.getName(),
             "layers": [_name(self.layer0), _name(self.layer1)],
+            "fixed_generate_vias": [_name(via) for via in self.fixed_generate_vias],
+            "fixed_tech_vias": [_name(via) for via in self.fixed_tech_vias],
             "cut_pitch": (self.cut_pitch_x, self.cut_pitch_y),
             "max_rows": self.max_rows,
             "max_columns": self.max_columns,
+            "ongrid": [_name(layer) for layer in self.ongrid],
+            "split_cuts": {
+                _name(layer): {"pitch": split.pitch, "stagger": split.stagger}
+                for layer, split in self.split_cuts.items()
+            },
+            "via_count": len(self.vias),
+            "failed_vias": self.printViaReport(),
         }
+
+    @staticmethod
+    def _normalize_split_cut(value: Any) -> SplitCut:
+        if isinstance(value, SplitCut):
+            return value
+        if isinstance(value, Mapping):
+            return SplitCut(int(value.get("pitch", 0)), bool(value.get("stagger", False)))
+        if isinstance(value, tuple):
+            pitch = int(value[0]) if len(value) > 0 else 0
+            stagger = bool(value[1]) if len(value) > 1 else False
+            return SplitCut(pitch, stagger)
+        return SplitCut(int(value), False)
 
 
 @dataclass
@@ -761,11 +916,49 @@ class Grid:
     def getConnect(self) -> List[Connect]:
         return list(self.connect)
 
+    def getGridComponents(self) -> List[GridComponent]:
+        return [*self.rings, *self.straps]
+
+    def getShapes(self) -> List[Shape]:
+        return [shape for component in self.getGridComponents() for shape in component.getShapes()]
+
+    def getVias(self) -> List[Via]:
+        return [via for connect in self.connect for via in connect.getVias()]
+
+    def findComponent(self, component_type: Optional[GridComponentType] = None, layer: Any = None) -> List[GridComponent]:
+        components = self.getGridComponents()
+        if component_type is not None:
+            components = [component for component in components if component.type() == component_type]
+        if layer is not None:
+            components = [
+                component
+                for component in components
+                if (isinstance(component, Rings) and layer in component.getLayers())
+                or (isinstance(component, Straps) and component.layer == layer)
+            ]
+        return components
+
+    def findConnect(self, layer0: Any = None, layer1: Any = None) -> List[Connect]:
+        result = self.connect
+        if layer0 is not None and layer1 is None:
+            result = [connect for connect in result if connect.layer0 == layer0 or connect.layer1 == layer0]
+        if layer1 is not None:
+            if layer0 is None:
+                result = [connect for connect in result if connect.layer0 == layer1 or connect.layer1 == layer1]
+            else:
+                result = [connect for connect in result if {connect.layer0, connect.layer1} == {layer0, layer1}]
+        return list(result)
+
     def makeShapes(self, global_shapes: Any, obstructions: Any) -> None:
         _not_implemented("Grid::makeShapes")
 
     def makeVias(self, global_shapes: Any, obstructions: Any, local_obstructions: Any = None) -> None:
         _not_implemented("Grid::makeVias")
+
+    def build(self, global_shapes: Any = None, obstructions: Any = None, local_obstructions: Any = None) -> None:
+        self.checkSetup()
+        self.makeShapes(global_shapes, obstructions)
+        self.makeVias(global_shapes, obstructions, local_obstructions)
 
     def writeToDb(self, net_map: Mapping[Any, Any], do_pins: bool, obstructions: Any) -> Dict[Shape, List[Any]]:
         _not_implemented("Grid::writeToDb")
@@ -783,15 +976,28 @@ class Grid:
     def checkSetup(self) -> None:
         if self.domain is None:
             raise ValueError(f"grid {self.name!r} has no voltage domain")
+        for component in self.getGridComponents():
+            if component.getGrid() is not self:
+                raise ValueError(f"component {component.type().value} is attached to the wrong grid")
+        for connect in self.connect:
+            if connect.getGrid() is not self:
+                raise ValueError(f"connect {_name(connect.layer0)}->{_name(connect.layer1)} is attached to the wrong grid")
 
     def report(self) -> Dict[str, Any]:
         return {
             "name": self.getLongName(),
             "type": self.type().value,
             "domain": self.domain.getName(),
-            "rings": len(self.rings),
-            "straps": len(self.straps),
-            "connect": len(self.connect),
+            "starts_with_power": self.starts_with_power,
+            "generate_obstructions": [_name(layer) for layer in self.generate_obstructions],
+            "pin_layers": [_name(layer) for layer in self.pin_layers],
+            "allow_repair_channels": self.allow_repair_channels,
+            "rings": [ring.report() for ring in self.rings],
+            "straps": [strap.report() for strap in self.straps],
+            "connect": [connect.report() for connect in self.connect],
+            "shape_count": len(self.getShapes()),
+            "via_count": len(self.getVias()),
+            "switched_power_cell": self.switched_power_cell.report() if self.switched_power_cell is not None else None,
         }
 
 
@@ -926,6 +1132,13 @@ class VoltageDomain:
     def getGrids(self) -> List[Grid]:
         return list(self.grids)
 
+    def findGrid(self, name: str) -> List[Grid]:
+        return [grid for grid in self.grids if grid.getName() == name or grid.getLongName() == name]
+
+    def getGridByName(self, name: str) -> Optional[Grid]:
+        matches = self.findGrid(name)
+        return matches[0] if matches else None
+
     def getDomainArea(self) -> Rect:
         _not_implemented("VoltageDomain::getDomainArea")
 
@@ -1015,6 +1228,14 @@ class SRoute:
     """对应 `pdn::SRoute`，仅保留 add_sroute_connect 的内部边界。"""
 
     pdngen: "PdnGen"
+    connects: List[Dict[str, Any]] = field(default_factory=list)
+
+    def addSrouteConnect(self, **params: Any) -> Dict[str, Any]:
+        self.connects.append(dict(params))
+        return self.connects[-1]
+
+    def getSrouteConnects(self) -> List[Dict[str, Any]]:
+        return [dict(connect) for connect in self.connects]
 
     def createSrouteWires(self, *args: Any, **kwargs: Any) -> None:
         _not_implemented("SRoute::createSrouteWires")
@@ -1025,6 +1246,33 @@ class PDNRenderer:
     """对应 `pdn::PDNRenderer`，图形调试后端占位。"""
 
     enabled: bool = False
+    block: Any = None
+    logger: Any = None
+    grids: List[Grid] = field(default_factory=list)
+    selected: List[Any] = field(default_factory=list)
+
+    def setBlock(self, block: Any) -> None:
+        self.block = block
+
+    def setLogger(self, logger: Any) -> None:
+        self.logger = logger
+
+    def setGrids(self, grids: Sequence[Grid]) -> None:
+        self.grids = list(grids)
+
+    def select(self, item: Any) -> None:
+        self.selected.append(item)
+
+    def clear(self) -> None:
+        self.selected.clear()
+
+    def report(self) -> Dict[str, Any]:
+        return {
+            "enabled": self.enabled,
+            "block": _name(self.block) if self.block is not None else None,
+            "grids": [grid.getLongName() for grid in self.grids],
+            "selected_count": len(self.selected),
+        }
 
     def redraw(self) -> None:
         _not_implemented("PDNRenderer::redraw")
@@ -1061,6 +1309,9 @@ class PdnGen:
         return {
             "domains": [domain.report() for domain in self.getDomains()],
             "switched_power_cells": [cell.report() for cell in self.switched_power_cells],
+            "allow_repair_channels": self.allow_repair_channels,
+            "sroute_connects": self.sroute.getSrouteConnects() if self.sroute is not None else [],
+            "debug_renderer": self.debug_renderer.report() if self.debug_renderer is not None else None,
         }
 
     def findSwitchedPowerCell(self, name: str) -> Optional[PowerCell]:
@@ -1111,10 +1362,46 @@ class PdnGen:
         return domain
 
     def buildGrids(self, trim: bool = True) -> None:
+        self.checkSetup()
+        for domain in self.getDomains():
+            for grid in domain.getGrids():
+                grid.checkSetup()
         _not_implemented("PdnGen::buildGrids")
 
     def findGrid(self, name: str) -> List[Grid]:
-        return [grid for domain in self.getDomains() for grid in domain.getGrids() if grid.getName() == name]
+        return [
+            grid
+            for domain in self.getDomains()
+            for grid in domain.getGrids()
+            if grid.getName() == name or grid.getLongName() == name
+        ]
+
+    def getGridByName(self, name: str, domain: Optional[VoltageDomain | str] = None) -> Optional[Grid]:
+        if isinstance(domain, str):
+            domain = self.findDomain(domain)
+        domains = [domain] if domain is not None else self.getDomains()
+        for voltage_domain in domains:
+            if voltage_domain is None:
+                continue
+            grid = voltage_domain.getGridByName(name)
+            if grid is not None:
+                return grid
+        return None
+
+    def findGridForInstance(self, inst: Any) -> Optional[InstanceGrid]:
+        for domain in self.getDomains():
+            for grid in domain.getGrids():
+                if isinstance(grid, InstanceGrid) and grid.getInstance() is inst:
+                    return grid
+        return None
+
+    def findGridContainingRect(self, rect: Rect) -> List[Grid]:
+        matches: List[Grid] = []
+        for domain in self.getDomains():
+            for grid in domain.getGrids():
+                if any(_rect_intersects(shape.getRect(), rect) for shape in grid.getShapes()):
+                    matches.append(grid)
+        return matches
 
     def makeCoreGrid(
         self,
@@ -1130,7 +1417,7 @@ class PdnGen:
         grid = CoreGrid(domain, name, _starts_with_power(starts_with), list(generate_obstructions))
         grid.setPinLayers(pin_layers)
         if powercell is not None:
-            network = PowerSwitchNetworkType(powercontrolnetwork or PowerSwitchNetworkType.STAR.value)
+            network = _normalize_power_switch_network(powercontrolnetwork or PowerSwitchNetworkType.STAR)
             grid.switched_power_cell = GridSwitchedPower(grid, powercell, powercontrol, network)
         domain.addGrid(grid)
         return grid
@@ -1241,7 +1528,7 @@ class PdnGen:
         max_rows: int = 0,
         max_columns: int = 0,
         ongrid: Sequence[Any] = (),
-        split_cuts: Mapping[Any, int] = {},
+        split_cuts: Mapping[Any, Any] = {},
         dont_use_vias: str = "",
     ) -> Connect:
         connect = Connect(grid, layer0, layer1, list(vias), list(techvias), cut_pitch_x, cut_pitch_y, max_rows, max_columns, set(ongrid), dict(split_cuts))
@@ -1251,13 +1538,16 @@ class PdnGen:
         return connect
 
     def writeToDb(self, add_pins: bool, report_file: str = "") -> None:
+        self.checkSetup()
         _not_implemented("PdnGen::writeToDb")
 
     def ripUp(self, net: Any) -> None:
         _not_implemented("PdnGen::ripUp")
 
     def setDebugRenderer(self, on: bool) -> None:
-        self.debug_renderer = PDNRenderer(on) if on else None
+        self.debug_renderer = PDNRenderer(on, block=self._get_block(), logger=self.logger) if on else None
+        if self.debug_renderer is not None:
+            self.debug_renderer.setGrids([grid for domain in self.getDomains() for grid in domain.getGrids()])
 
     def rendererRedraw(self) -> None:
         if self.debug_renderer is not None:
@@ -1284,7 +1574,13 @@ class PdnGen:
                 grid.checkSetup()
 
     def repairVias(self, nets: Set[Any]) -> None:
+        self.checkSetup()
         _not_implemented("PdnGen::repairVias")
+
+    def addSrouteConnect(self, **params: Any) -> Dict[str, Any]:
+        if self.sroute is None:
+            self.sroute = SRoute(self)
+        return self.sroute.addSrouteConnect(**params)
 
     def createSrouteWires(self, *args: Any, **kwargs: Any) -> None:
         if self.sroute is None:

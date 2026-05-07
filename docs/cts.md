@@ -4,6 +4,7 @@
 
 - 模块入口从空壳扩展为 OpenROAD `src/cts` 核心对象边界翻译。
 - 第二轮继续按 OpenROAD `src/cts` 当前源码边界深化，范围仍限 CTS 顶层 Python 骨架，不翻译/引入 `odb` 实现。
+- 第三轮继续深化 OpenROAD `src/cts` 边界，重点覆盖 TritonCTS clock root/tree init、DB write/report、NDR、dummy load、repair clock nets、latency balance；TreeBuilder legality/blockage APIs；TechChar compile/report LUT。
 - 翻译 `Util.h` 基础几何工具：
   - `fuzzyEqual`
   - `fuzzyEqualOrGreater`
@@ -29,11 +30,18 @@
   - wire segment 创建、key 计算、按 key 遍历、基础 report 字段
   - 补齐 LUT/characterization 外层字段：length/load/slew bounds、actual min input cap、length unit、cap/res per DBU、master/wirelength/load/slew sweep、solution map、key-to-segment 索引
   - 补齐 `WireSegment` buffer location/master、power、delay、first/last wirelength 查询接口
+  - 第三轮补齐 `TechCharSolutionData`、`TechCharResultData`、`TechCharKey`，对齐 `SolutionData`、`ResultData`、`CharKey`
+  - 补齐 `compileLut` 的容器索引路径：接收已求得的 characterization 结果，建立 `delay_lut`、`slew_lut`、`solution_map`、`key_to_wire_segments`
+  - 补齐 `report`、`reportSegment`、`reportSegments`、`printCharacterization`、`printSolution` 的 Python 快照返回
+  - 补齐 bounds/report 边界：`reportCharacterizationBounds`、`checkCharacterizationBounds`、`initCharacterization`
+  - 补齐后续算法入口：`finalizeRootSinkBuffers`、`getMaxCapLimit`、`collectSlewsLoadsFromTableAxis`、`reduceOrExpand`、`smallestDiffIter`、`largestDiffIter`、`createPatterns`、`createStaInstance`、`setParasitics`、`computeTopologyResults`、`updateBufferTopologies`、`cellNameToID`、`getCurrConfig`、`getNextConfig`、`getMasterFromConfig`、`swapTopologyBuffer`
+  - `WireSegment` 补齐 input cap/input slew/length/load/output slew 查询接口
 - 翻译 `TreeBuilder.h` 树构建器边界：
   - `TreeType`
   - `TreeBuilder`
   - 子树关系、buffer 标记集合、blockage/合法化入口、insertion delay、top buffer/top input net/driving net 等字段接口
   - 补齐 leaf tree 判断、tree buffer level、first/second sink driver、tree-level buffer、bbox 判断、occupied loc commit/uncommit、sink insertion delay map、DB/logger/TechChar/top net/top buffer 字段入口
+  - 第三轮补齐 `getTechChar`、`getLogger`、`addBlockage`、`getBlockages`、`clearBlockages`、`setBufferSize`、`getLegalizationCandidates`、`getOccupiedLocs`、`clearOccupiedLocs`
 - 翻译 `HTreeBuilder.h` H-tree 入口：
   - `LevelTopology`
   - `SegmentBuilder`
@@ -66,16 +74,24 @@
   - `setSinkBuffer`
   - builder 创建/遍历、characterization setup/check、NDR level 边界、clock 计数、clock network report 等接口
   - 补齐 root/sink buffer selection、buffer fanout limit、clock root/tree 初始化、macro/register 分树、DB 写回、NDR 写回、clock buffer/dummy load、ideal output cap、clock propagation、repair clock nets、macro/register latency balance 等同名入口
+  - 第三轮补齐 `net2builder`、clock root 列表、DB write 标记、NDR applied 标记、dummy load index 等顶层状态
+  - 补齐 `getSinkBufferToString`、`resetSinkBuffer`、`getBuilders`、`getBuilderForNet`、`addClockRoot`、`getClockRoots`、`clearClockRoots`
+  - 补齐 DB/report 边界：`markBuilderWrittenToDb`、`getDbWrittenBuilders`、`getClockLeafNets`、`reportClockNetwork`
+  - 补齐 NDR 边界：`setNdrStrategy`、`getNdrStrategy`、`markBuilderNdrApplied`
+  - 补齐 clock root/tree init 同名入口：`initClockRoot`、`initClockTree`、`createRootBuffer`、`createTreeBuffer`
+  - 补齐 dummy/repair/balance 边界：`nextDummyLoadName`、`repairClockNet`、`balanceLatency`
+  - 补齐 `clear`，用于释放 builders、clock roots、net/builder 索引、DB/NDR 标记和统计计数
 
 ## 未实现
 
 - `TechChar.cpp` 中真实 STA/Liberty/寄生参数特征化流程。
+- `TechChar.cpp` 中 topology 枚举、Liberty 表轴采集、parasitics 设置、buffer topology 更新、root/sink buffer finalize 等真实 characterization 算法。
 - `TreeBuilder.cpp` 中 blockage 初始化、merge、合法化检查与查找。
 - `HTreeBuilder.cpp` 中 H-tree 拓扑构建、segment 插 buffer、聚类细化、legalize、plot。
 - `SinkClustering.cpp` 中 theta 归一化、matching、容量/直径约束搜索。
 - `LatencyBalancer.cpp` 中 STA 初始化、graph 构建、delay buffer 插入与传播。
 - `TritonCTS.cpp` 中完整 run 流程、clock root 查找、DB 写回、NDR 写回、macro/register 分树、dummy load、clock net repair。
-- 真实 CTS 构树、合法化、DB 写回、STA/OpenDB/Resizer 联动入口全部保留同名函数并显式抛出 `NotImplementedError`，避免伪造算法行为。
+- 真实 CTS 构树、合法化、DB 写回、NDR 写回、dummy load 插入、repair clock nets、latency balance、STA/OpenDB/Resizer 联动入口全部保留同名函数并显式抛出 `NotImplementedError`，避免伪造算法行为。
 
 ## 说明
 

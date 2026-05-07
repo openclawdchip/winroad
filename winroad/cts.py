@@ -762,6 +762,44 @@ class CtsOptions:
 
 
 @dataclass
+class TechCharSolutionData:
+    """对应 `TechChar::SolutionData` 的外层数据载体。"""
+
+    net_vector: List[Any] = field(default_factory=list)
+    nodes_without_buf_vector: List[int] = field(default_factory=list)
+    in_port: Any = None
+    out_port: Any = None
+    inst_vector: List[Any] = field(default_factory=list)
+    topology_descriptor: List[str] = field(default_factory=list)
+    is_pure_wire: bool = True
+
+
+@dataclass
+class TechCharResultData:
+    """对应 `TechChar::ResultData` 的 LUT 编译输入记录。"""
+
+    load: float = 0.0
+    in_slew: float = 0.0
+    wirelength: float = 0.0
+    pin_slew: float = 0.0
+    pin_arrival: float = 0.0
+    totalcap: float = 0.0
+    total_power: float = 0.0
+    is_pure_wire: bool = True
+    topology: List[str] = field(default_factory=list)
+
+
+@dataclass(order=True, frozen=True)
+class TechCharKey:
+    """对应 `TechChar::CharKey`，用于 characterization 结果排序。"""
+
+    load: float
+    wirelength: float
+    pin_slew: float
+    totalcap: float
+
+
+@dataclass
 class TechChar:
     """对应 `TechChar`，保存 CTS characterization 的外层状态。"""
 
@@ -791,6 +829,9 @@ class TechChar:
     loads_to_test: List[float] = field(default_factory=list)
     slews_to_test: List[float] = field(default_factory=list)
     solution_map: Dict[Any, List[Any]] = field(default_factory=dict)
+    result_data: List[TechCharResultData] = field(default_factory=list)
+    solution_data: List[TechCharSolutionData] = field(default_factory=list)
+    characterization_initialized: bool = False
 
     def characterize(self) -> None:
         _not_translated("TechChar::characterize")
@@ -798,14 +839,32 @@ class TechChar:
     def create(self) -> None:
         _not_translated("TechChar::create")
 
-    def report(self) -> None:
-        _not_translated("TechChar::report")
+    def report(self) -> Dict[str, Any]:
+        """返回当前 LUT/segment 外层状态快照。"""
 
-    def reportSegment(self, key: int) -> None:
-        _not_translated("TechChar::reportSegment")
+        return {
+            "num_wire_segments": len(self.wire_segments),
+            "num_lut_keys": len(self.key_to_wire_segments),
+            "min_segment_length": self.min_segment_length,
+            "max_segment_length": self.max_segment_length,
+            "min_capacitance": self.min_capacitance,
+            "max_capacitance": self.max_capacitance,
+            "min_slew": self.min_slew,
+            "max_slew": self.max_slew,
+            "length_unit": self.length_unit,
+        }
 
-    def reportSegments(self, length: int, load: int, output_slew: int) -> None:
-        _not_translated("TechChar::reportSegments")
+    def reportSegment(self, key: Any) -> List[Dict[str, Any]]:
+        """按 C++ key 或 `(length, load, slew)` key 返回 segment 摘要。"""
+
+        tuple_key = self.decodeKey(key) if isinstance(key, int) else key
+        return [
+            self._segmentReport(idx, self.wire_segments[idx])
+            for idx in self.key_to_wire_segments.get(tuple_key, [])
+        ]
+
+    def reportSegments(self, length: int, load: int, output_slew: int) -> List[Dict[str, Any]]:
+        return self.reportSegment(self.makeKey(length, load, output_slew))
 
     def createWireSegment(self, length: float, cap: float = 0.0, res: float = 0.0) -> "WireSegment":
         """创建 wire segment 记录。"""
@@ -820,9 +879,12 @@ class TechChar:
         self.key_to_wire_segments.setdefault(key, []).append(idx)
         return idx
 
-    def forEachWireSegment(self, func: Callable[["WireSegment"], None]) -> None:
-        for segment in self.wire_segments:
-            func(segment)
+    def forEachWireSegment(self, func: Callable[..., None]) -> None:
+        for idx, segment in enumerate(self.wire_segments):
+            try:
+                func(idx, segment)
+            except TypeError:
+                func(segment)
 
     def forEachWireSegmentByKey(
         self, key: Tuple[int, int, int], func: Callable[[int, "WireSegment"], None]
@@ -841,6 +903,12 @@ class TechChar:
 
     def getMaxCapacitance(self) -> int:
         return self.max_capacitance
+
+    def getMinCapacitance(self) -> int:
+        return self.min_capacitance
+
+    def getMinSlew(self) -> int:
+        return self.min_slew
 
     def getMaxSlew(self) -> int:
         return self.max_slew
@@ -863,23 +931,86 @@ class TechChar:
     def getCapPerDBU(self) -> float:
         return self.cap_per_dbu
 
-    def printCharacterization(self) -> None:
-        _not_translated("TechChar::printCharacterization")
+    def getResPerDBU(self) -> float:
+        return self.res_per_dbu
 
-    def printSolution(self) -> None:
-        _not_translated("TechChar::printSolution")
+    def getLogger(self) -> Any:
+        return self.options.getLogger() if self.options is not None else None
+
+    def printCharacterization(self) -> Dict[str, Any]:
+        return self.report()
+
+    def printSolution(self) -> List[TechCharResultData]:
+        return list(self.result_data)
 
     def compileLut(self, lut_solutions: Iterable[Any]) -> None:
-        _not_translated("TechChar::compileLut")
+        """编译已给定的结果对象到 Python LUT 容器。
+
+        STA 求解、拓扑枚举和 Liberty 查表仍由未翻译的 C++ 算法负责；这里
+        只接收外部结果并建立与 `TechChar` 相同的索引边界。
+        """
+
+        for raw in lut_solutions:
+            result = raw if isinstance(raw, TechCharResultData) else TechCharResultData(
+                load=float(getattr(raw, "load", 0.0)),
+                in_slew=float(getattr(raw, "in_slew", getattr(raw, "inSlew", 0.0))),
+                wirelength=float(getattr(raw, "wirelength", 0.0)),
+                pin_slew=float(getattr(raw, "pin_slew", getattr(raw, "pinSlew", 0.0))),
+                pin_arrival=float(getattr(raw, "pin_arrival", getattr(raw, "pinArrival", 0.0))),
+                totalcap=float(getattr(raw, "totalcap", 0.0)),
+                total_power=float(getattr(raw, "total_power", getattr(raw, "totalPower", 0.0))),
+                is_pure_wire=bool(getattr(raw, "is_pure_wire", getattr(raw, "isPureWire", True))),
+                topology=list(getattr(raw, "topology", [])),
+            )
+            self.result_data.append(result)
+            length_key = self.toInternalLengthUnit(int(round(result.wirelength)))
+            load_key = int(round(result.load))
+            slew_key = int(round(result.pin_slew))
+            key = self.makeKey(length_key, load_key, slew_key)
+            segment = WireSegment(
+                length=result.wirelength,
+                power=result.total_power,
+                segment_delay=int(round(result.pin_arrival)),
+                cap=result.totalcap,
+                slew=result.pin_slew,
+                load=load_key,
+                output_slew=slew_key,
+            )
+            for master in result.topology:
+                segment.addBufferMaster(master)
+            self.addWireSegment(key, segment)
+            self.delay_lut.setdefault(key, []).append(segment.getDelay())
+            self.slew_lut.setdefault(key, []).append(slew_key)
+            self.solution_map.setdefault(TechCharKey(result.load, result.wirelength, result.pin_slew, result.totalcap), []).append(result)
 
     def computeKey(self, length: int, load: int, output_slew: int) -> int:
         return (length << 20) | (load << 10) | output_slew
+
+    def decodeKey(self, key: int) -> Tuple[int, int, int]:
+        return ((key >> 20) & 0xFFF, (key >> 10) & 0x3FF, key & 0x3FF)
 
     def makeKey(self, length: int, load: int, output_slew: int) -> Tuple[int, int, int]:
         return (length, load, output_slew)
 
     def initLengthUnits(self) -> None:
         _not_translated("TechChar::initLengthUnits")
+
+    def reportCharacterizationBounds(self) -> Dict[str, int]:
+        return {
+            "min_segment_length": self.min_segment_length,
+            "max_segment_length": self.max_segment_length,
+            "min_capacitance": self.min_capacitance,
+            "max_capacitance": self.max_capacitance,
+            "min_slew": self.min_slew,
+            "max_slew": self.max_slew,
+        }
+
+    def checkCharacterizationBounds(self) -> bool:
+        return (
+            self.min_segment_length <= self.max_segment_length
+            and self.min_capacitance <= self.max_capacitance
+            and self.min_slew <= self.max_slew
+        )
 
     def toInternalLengthUnit(self, length: int) -> int:
         if self.length_unit <= 0:
@@ -892,6 +1023,81 @@ class TechChar:
         self.wire_segments.clear()
         self.key_to_wire_segments.clear()
         self.solution_map.clear()
+        self.result_data.clear()
+        self.solution_data.clear()
+        self.characterization_initialized = False
+
+    def initCharacterization(self) -> None:
+        self.characterization_initialized = True
+
+    def finalizeRootSinkBuffers(self) -> None:
+        _not_translated("TechChar::finalizeRootSinkBuffers")
+
+    def trimSortBufferList(self, buffers: List[str]) -> None:
+        buffers[:] = sorted({buf for buf in buffers if buf})
+
+    def getMaxCapLimit(self, buf: str) -> float:
+        _not_translated("TechChar::getMaxCapLimit")
+
+    def collectSlewsLoadsFromTableAxis(self, *args: Any, **kwargs: Any) -> None:
+        _not_translated("TechChar::collectSlewsLoadsFromTableAxis")
+
+    def sortAndUniquify(self, values: List[float], name: str = "") -> None:
+        values[:] = sorted(set(values))
+
+    def reduceOrExpand(self, values: List[float], limit: int) -> None:
+        _not_translated("TechChar::reduceOrExpand")
+
+    def smallestDiffIter(self, values: List[float]) -> int:
+        _not_translated("TechChar::smallestDiffIter")
+
+    def largestDiffIter(self, values: List[float]) -> int:
+        _not_translated("TechChar::largestDiffIter")
+
+    def createPatterns(self, setup_wirelength: int) -> List[TechCharSolutionData]:
+        _not_translated("TechChar::createPatterns")
+
+    def createStaInstance(self) -> None:
+        _not_translated("TechChar::createStaInstance")
+
+    def setParasitics(self, *args: Any, **kwargs: Any) -> None:
+        _not_translated("TechChar::setParasitics")
+
+    def computeTopologyResults(self, *args: Any, **kwargs: Any) -> TechCharResultData:
+        _not_translated("TechChar::computeTopologyResults")
+
+    def updateBufferTopologies(self, solution: TechCharSolutionData) -> None:
+        _not_translated("TechChar::updateBufferTopologies")
+
+    def updateBufferTopologiesOld(self, solution: TechCharSolutionData) -> None:
+        _not_translated("TechChar::updateBufferTopologiesOld")
+
+    def cellNameToID(self, master_name: str) -> int:
+        _not_translated("TechChar::cellNameToID")
+
+    def getCurrConfig(self, solution: TechCharSolutionData) -> List[int]:
+        _not_translated("TechChar::getCurrConfig")
+
+    def getNextConfig(self, curr_config: List[int]) -> List[int]:
+        _not_translated("TechChar::getNextConfig")
+
+    def getMasterFromConfig(self, next_config: List[int], idx: int = 0) -> Any:
+        _not_translated("TechChar::getMasterFromConfig")
+
+    def swapTopologyBuffer(self, solution: TechCharSolutionData, *args: Any) -> None:
+        _not_translated("TechChar::swapTopologyBuffer")
+
+    def _segmentReport(self, idx: int, segment: "WireSegment") -> Dict[str, Any]:
+        return {
+            "idx": idx,
+            "length": segment.getLength(),
+            "load": segment.getLoad(),
+            "output_slew": segment.getOutputSlew(),
+            "delay": segment.getDelay(),
+            "power": segment.getPower(),
+            "buffer_masters": segment.getBufferMasters(),
+            "buffer_locations": segment.getBufferLocations(),
+        }
 
 
 @dataclass
@@ -901,6 +1107,10 @@ class WireSegment:
     length: float
     power: float = 0.0
     segment_delay: int = 0
+    input_cap: int = 0
+    input_slew: int = 0
+    load: int = 0
+    output_slew: int = 0
     cap: float = 0.0
     res: float = 0.0
     delay: float = 0.0
@@ -927,6 +1137,21 @@ class WireSegment:
 
     def getDelay(self) -> int:
         return self.segment_delay
+
+    def getInputCap(self) -> int:
+        return self.input_cap
+
+    def getInputSlew(self) -> int:
+        return self.input_slew
+
+    def getLength(self) -> int:
+        return int(round(self.length))
+
+    def getLoad(self) -> int:
+        return self.load
+
+    def getOutputSlew(self) -> int:
+        return self.output_slew
 
     def getWl2FirstBuffer(self) -> int:
         return self.wl2_first_buffer
@@ -997,6 +1222,9 @@ class TreeBuilder:
     def setTechChar(self, tech_char: TechChar) -> None:
         self.tech_char = tech_char
 
+    def getTechChar(self) -> Optional[TechChar]:
+        return self.tech_char
+
     def getClock(self) -> Clock:
         return self.clock
 
@@ -1045,6 +1273,22 @@ class TreeBuilder:
     def setLogger(self, logger: Any) -> None:
         self.logger = logger
 
+    def getLogger(self) -> Any:
+        return self.logger
+
+    def addBlockage(self, blockage: Box) -> None:
+        self.blockages.append(blockage)
+
+    def getBlockages(self) -> List[Box]:
+        return list(self.blockages)
+
+    def clearBlockages(self) -> None:
+        self.blockages.clear()
+
+    def setBufferSize(self, width: float, height: float) -> None:
+        self.buffer_width = width
+        self.buffer_height = height
+
     def isInsideBbox(
         self, x: float, y: float, x1: float, y1: float, x2: float, y2: float
     ) -> bool:
@@ -1076,6 +1320,18 @@ class TreeBuilder:
     def legalizeOneBuffer(self, buffer_loc: Point, buffer_name: str) -> Point:
         _not_translated("TreeBuilder::legalizeOneBuffer")
 
+    def getLegalizationCandidates(
+        self, buffer_loc: Point, scaling_factor: int
+    ) -> List[Point]:
+        candidates: List[Point] = []
+        scaling = float(scaling_factor)
+        self.addCandidatePoint(buffer_loc.x, buffer_loc.y, buffer_loc, candidates)
+        self.addCandidatePoint(buffer_loc.x + scaling, buffer_loc.y, buffer_loc, candidates)
+        self.addCandidatePoint(buffer_loc.x - scaling, buffer_loc.y, buffer_loc, candidates)
+        self.addCandidatePoint(buffer_loc.x, buffer_loc.y + scaling, buffer_loc, candidates)
+        self.addCandidatePoint(buffer_loc.x, buffer_loc.y - scaling, buffer_loc, candidates)
+        return candidates
+
     def addCandidatePoint(
         self, x: float, y: float, point: Point, candidates: List[Point]
     ) -> None:
@@ -1092,6 +1348,12 @@ class TreeBuilder:
 
     def isOccupiedLoc(self, buffer_loc: Point) -> bool:
         return buffer_loc in self.occupied_locations
+
+    def getOccupiedLocs(self) -> Set[Point]:
+        return set(self.occupied_locations)
+
+    def clearOccupiedLocs(self) -> None:
+        self.occupied_locations.clear()
 
     def commitLoc(self, buffer_loc: Point) -> None:
         self.occupied_locations.add(buffer_loc)
@@ -1598,6 +1860,7 @@ class TritonCTS:
     visited_clock_nets: Set[Any] = field(default_factory=set)
     inst2clkbuf: Dict[Any, ClockInst] = field(default_factory=dict)
     driver2subnet: Dict[ClockInst, ClockSubNet] = field(default_factory=dict)
+    net2builder: Dict[Any, TreeBuilder] = field(default_factory=dict)
     db: Any = None
     block: Any = None
     number_of_clocks: int = 0
@@ -1609,6 +1872,9 @@ class TritonCTS:
     reg_tree_root_buf_index: int = 0
     delay_buf_index: int = 0
     ndr_strategy: NdrStrategy = NdrStrategy.NONE
+    clock_roots: List[Any] = field(default_factory=list)
+    db_written_builders: List[TreeBuilder] = field(default_factory=list)
+    ndr_applied_builders: List[TreeBuilder] = field(default_factory=list)
 
     def init(
         self,
@@ -1627,6 +1893,9 @@ class TritonCTS:
         self.options.logger = logger
         self.options.stt_builder = st_builder
         self.tech_char.options = self.options
+        self.tech_char.db = db
+        self.tech_char.db_network = network
+        self.tech_char.open_sta = sta
 
     def runTritonCts(self) -> None:
         _not_translated("TritonCTS::runTritonCts")
@@ -1640,6 +1909,10 @@ class TritonCTS:
             "num_clk_nets": self.num_clk_nets,
             "num_fixed_nets": self.num_fixed_nets,
             "num_builders": len(self.builders),
+            "num_clock_roots": len(self.clock_roots),
+            "num_db_written_builders": len(self.db_written_builders),
+            "num_ndr_applied_builders": len(self.ndr_applied_builders),
+            "dummy_load_index": self.dummy_load_index,
         }
 
     def getParms(self) -> CtsOptions:
@@ -1668,6 +1941,13 @@ class TritonCTS:
     def setSinkBuffer(self, buffers: str) -> None:
         self.sink_buffers = [buf for buf in buffers.split() if buf]
         self.options.setSinkBuffer(self.sink_buffers[0] if self.sink_buffers else "")
+
+    def getSinkBufferToString(self) -> str:
+        return " ".join(self.sink_buffers)
+
+    def resetSinkBuffer(self) -> None:
+        self.sink_buffers.clear()
+        self.options.setSinkBuffer("")
 
     def getRootBufferToString(self) -> str:
         return " ".join(self.root_buffers)
@@ -1715,11 +1995,19 @@ class TritonCTS:
             )
             builder.setTopInputNet(top_input_net)
         self.builders.append(builder)
+        if top_input_net is not None:
+            self.net2builder[top_input_net] = builder
         return builder
 
     def forEachBuilder(self, func: Callable[[TreeBuilder], None]) -> None:
         for builder in self.builders:
             func(builder)
+
+    def getBuilders(self) -> List[TreeBuilder]:
+        return list(self.builders)
+
+    def getBuilderForNet(self, net: Any) -> Optional[TreeBuilder]:
+        return self.net2builder.get(net)
 
     def setupCharacterization(self) -> None:
         _not_translated("TritonCTS::setupCharacterization")
@@ -1730,11 +2018,29 @@ class TritonCTS:
     def findClockRoots(self, *args: Any, **kwargs: Any) -> None:
         _not_translated("TritonCTS::findClockRoots")
 
+    def addClockRoot(self, root: Any) -> None:
+        self.clock_roots.append(root)
+        self.options.setNumClockRoots(len(self.clock_roots))
+
+    def getClockRoots(self) -> List[Any]:
+        return list(self.clock_roots)
+
+    def clearClockRoots(self) -> None:
+        self.clock_roots.clear()
+        self.options.setNumClockRoots(0)
+
     def buildClockTrees(self) -> None:
         _not_translated("TritonCTS::buildClockTrees")
 
     def writeDataToDb(self) -> None:
         _not_translated("TritonCTS::writeDataToDb")
+
+    def markBuilderWrittenToDb(self, builder: TreeBuilder) -> None:
+        if builder not in self.db_written_builders:
+            self.db_written_builders.append(builder)
+
+    def getDbWrittenBuilders(self) -> List[TreeBuilder]:
+        return list(self.db_written_builders)
 
     def getAllClockTreeLevels(self, clock_net: Clock) -> List[int]:
         _not_translated("TritonCTS::getAllClockTreeLevels")
@@ -1752,6 +2058,17 @@ class TritonCTS:
     def applyNDRToFirstHalfLevels(self, clock_net: Clock, clock_ndr: Any) -> int:
         _not_translated("TritonCTS::applyNDRToFirstHalfLevels")
 
+    def setNdrStrategy(self, strategy: NdrStrategy) -> None:
+        self.ndr_strategy = strategy
+        self.options.setApplyNDR(strategy)
+
+    def getNdrStrategy(self) -> NdrStrategy:
+        return self.ndr_strategy
+
+    def markBuilderNdrApplied(self, builder: TreeBuilder) -> None:
+        if builder not in self.ndr_applied_builders:
+            self.ndr_applied_builders.append(builder)
+
     def masterExists(self, master: str) -> bool:
         finder = getattr(self.db, "findMaster", None)
         return bool(finder(master)) if finder else False
@@ -1768,6 +2085,9 @@ class TritonCTS:
     def writeClockNDRsToDb(self, builder: TreeBuilder) -> None:
         _not_translated("TritonCTS::writeClockNDRsToDb")
 
+    def getClockLeafNets(self, builder: TreeBuilder) -> Set[Any]:
+        _not_translated("TritonCTS::getClockLeafNets")
+
     def getNetSpacing(self, layer: Any, width1: int, width2: int) -> int:
         _not_translated("TritonCTS::getNetSpacing")
 
@@ -1779,6 +2099,12 @@ class TritonCTS:
 
     def getNumClocks(self) -> int:
         return self.number_of_clocks
+
+    def getNumClockNets(self) -> int:
+        return self.num_clk_nets
+
+    def getNumFixedNets(self) -> int:
+        return self.num_fixed_nets
 
     def cloneClockGaters(self, *args: Any, **kwargs: Any) -> None:
         _not_translated("TritonCTS::cloneClockGaters")
@@ -1795,6 +2121,12 @@ class TritonCTS:
     def initClock(self, *args: Any, **kwargs: Any) -> TreeBuilder:
         _not_translated("TritonCTS::initClock")
 
+    def initClockRoot(self, *args: Any, **kwargs: Any) -> None:
+        _not_translated("TritonCTS::initClockRoot")
+
+    def initClockTree(self, *args: Any, **kwargs: Any) -> TreeBuilder:
+        _not_translated("TritonCTS::initClockTree")
+
     def disconnectAllSinksFromNet(self, net: Any) -> None:
         _not_translated("TritonCTS::disconnectAllSinksFromNet")
 
@@ -1806,6 +2138,12 @@ class TritonCTS:
 
     def createClockBuffers(self, clock_net: Clock, parent: Any = None) -> None:
         _not_translated("TritonCTS::createClockBuffers")
+
+    def createRootBuffer(self, *args: Any, **kwargs: Any) -> Any:
+        _not_translated("TritonCTS::createRootBuffer")
+
+    def createTreeBuffer(self, *args: Any, **kwargs: Any) -> Any:
+        _not_translated("TritonCTS::createTreeBuffer")
 
     def initClockTreeForMacrosAndRegs(self, *args: Any, **kwargs: Any) -> TreeBuilder:
         _not_translated("TritonCTS::initClockTreeForMacrosAndRegs")
@@ -1852,6 +2190,11 @@ class TritonCTS:
     def writeDummyLoadsToDb(self, clock_net: Clock, dummies: Set[Any]) -> int:
         _not_translated("TritonCTS::writeDummyLoadsToDb")
 
+    def nextDummyLoadName(self) -> str:
+        name = f"{self.options.getDummyLoadPrefix()}_{self.dummy_load_index}"
+        self.dummy_load_index += 1
+        return name
+
     def computeIdealOutputCaps(self, clock_net: Clock) -> bool:
         _not_translated("TritonCTS::computeIdealOutputCaps")
 
@@ -1876,14 +2219,46 @@ class TritonCTS:
     def printClockNetwork(self, clock_net: Clock) -> None:
         _not_translated("TritonCTS::printClockNetwork")
 
+    def reportClockNetwork(self, clock_net: Clock) -> Dict[str, Any]:
+        return {
+            "name": clock_net.getName(),
+            "sdc_name": clock_net.getSdcName(),
+            "num_sinks": clock_net.getNumSinks(),
+            "num_buffers": len(clock_net.clock_buffers),
+            "num_subnets": len(clock_net.sub_nets),
+        }
+
     def setAllClocksPropagated(self) -> None:
         _not_translated("TritonCTS::setAllClocksPropagated")
 
     def repairClockNets(self) -> None:
         _not_translated("TritonCTS::repairClockNets")
 
+    def repairClockNet(self, *args: Any, **kwargs: Any) -> None:
+        _not_translated("TritonCTS::repairClockNet")
+
     def balanceMacroRegisterLatencies(self) -> None:
         _not_translated("TritonCTS::balanceMacroRegisterLatencies")
+
+    def balanceLatency(self, *args: Any, **kwargs: Any) -> None:
+        _not_translated("TritonCTS::balanceLatency")
+
+    def clear(self) -> None:
+        self.builders.clear()
+        self.sta_clock_nets.clear()
+        self.visited_clock_nets.clear()
+        self.inst2clkbuf.clear()
+        self.driver2subnet.clear()
+        self.net2builder.clear()
+        self.clock_roots.clear()
+        self.db_written_builders.clear()
+        self.ndr_applied_builders.clear()
+        self.root_buffers.clear()
+        self.sink_buffers.clear()
+        self.number_of_clocks = 0
+        self.num_clk_nets = 0
+        self.num_fixed_nets = 0
+        self.dummy_load_index = 0
 
 
 def initTritonCts() -> TritonCTS:

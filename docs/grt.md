@@ -32,6 +32,12 @@
   - `GlobalRouter`
   - `GRouteDbCbk`
   - `IncrementalGRoute`
+- 第三轮已继续深化 OpenROAD `src/grt` 边界，不触碰 `odb`：
+  - guide/segment 轻量写回与读取：`GSegment.toDict()`、`GSegment.fromDict()`、`GSegment.toGuideLine()`、`GSegment.fromGuideTokens()`、`GlobalRouter.readGuides()`、`loadGuidesFromDB()`、`saveGuidesFromDB()`、`saveGuides()`、`writeSegments()`、`readSegments()`
+  - region/layer adjustment 状态：`GlobalRouter.addLayerAdjustment()`、`addRegionAdjustment()`、`getLayerAdjustments()`、`getRegionAdjustments()`，并同步记录到 `FastRouteCore.addAdjustment()`
+  - net alpha/beta/gamma 参数：`Net.setAlpha()`、`getAlpha()`、`setBeta()`、`getBeta()`、`setGamma()`、`getGamma()`、`setCostParameters()`、`getCostParameters()`、`GlobalRouter.setNetAlphaBetaGamma()`、`getNetAlphaBetaGamma()`、`FastRouteCore.addNet(..., alpha, beta, gamma)`
+  - tile congestion 与 resource snapshot：`FastRouteCore.buildTileCongestion()`、`getTileCongestion()`、`reportCongestionSummary()`、`createResourceSnapshot()`、`getResourceSnapshot()`、`GlobalRouter.getCongestionReport()`、`getResourceSnapshot()`
+  - report 函数边界：`GlobalRouter.reportNetLayerWirelengths()`、`reportLayerWireLengths()`、`getLastLayerWirelengthReport()`、`reportNetWireLength()`、`createWLReportFile()`
 - 已提供基础便利函数：
   - `create_global_router()`
   - `print_groute()`
@@ -55,12 +61,8 @@
   - overflow/congestion rip-up and reroute
   - capacity lower bound 与 edge graph 完整初始化
 - OpenDB 真实 guide/wire 读写：
-  - `readGuides()`
-  - `loadGuidesFromDB()`
-  - `saveGuides()`
-  - `writeSegments()`
-  - `readSegments()`
   - `updateVias()`
+  - 当前 `readGuides()`、`loadGuidesFromDB()`、`saveGuides()`、`writeSegments()`、`readSegments()` 只实现 WinRoad Python 轻量文件或普通对象属性边界，不创建/修改 OpenDB guide/wire。
 - pin access 与 pin coverage 的完整 OpenDB/DRT 联动：
   - `ensurePinsPositions()`
   - `findCoveredAccessPoint()`
@@ -71,10 +73,53 @@
   - `estimatePathResistance()`
   - `getLayerResistance()`
   - `getViaResistance()`
-- CUGR 接入、RUDY/heatmap、拥塞图文件格式和报告输出仍待按 OpenROAD C++ 逐函数移植。
+- CUGR 接入、RUDY/heatmap、拥塞图文件格式和 detailed-route 报告输出仍待按 OpenROAD C++ 逐函数移植。
 - 第二轮已继续补齐的边界包括：
   - `FastRouteCore` 的 `getDbNetLayerEdgeCost()`、`initEdgesCapacityPerLayer()`、`setNumAdjustments()`、`addAdjustment()`、`saveResourcesBeforeAdjustments()`、`initAuxVar()`、`getCongestionGrid()`、`getCongestionNets()`、`getOriginalResources()`、`getTotalCapacityPerLayer()`、`getTotalUsagePerLayer()`、`getTotalOverflowPerLayer()`、`getMaxHorizontalOverflows()`、`getMaxVerticalOverflows()`、`clearNDRnets()` 等状态与报告入口
   - `GlobalRouter` 的 guide/report/resistance 入口名和增量辅助方法边界
+
+## 第三轮验证命令
+
+```powershell
+python -m py_compile D:\winroad_py\winroad\grt.py
+@'
+from io import StringIO
+from pathlib import Path
+from winroad.grt import GSegment, GlobalRouter, Net
+
+r = GlobalRouter()
+net = "n1"
+r.routes[net] = [GSegment(0, 0, 1, 2, 0, 1)]
+r.db_net_map[net] = Net(net)
+r.setNetAlphaBetaGamma(net, 0.2, 0.3, 0.4)
+assert r.getNetAlphaBetaGamma(net) == (0.2, 0.3, 0.4)
+
+r.addLayerAdjustment(2, 0.5)
+r.addRegionAdjustment(0, 0, 10, 10, 3, 0.7)
+assert r.getLayerAdjustments()[2] == 0.5
+assert len(r.getRegionAdjustments()) == 2
+
+tmp = Path("D:/winroad_py/.grt_segments.json")
+r.writeSegments(str(tmp))
+r2 = GlobalRouter()
+r2.readSegments(str(tmp))
+assert len(r2.routes[net]) == 1
+tmp.unlink()
+
+buf = StringIO()
+r.reportNetLayerWirelengths(net, buf)
+assert "layer 1: 2" in buf.getvalue()
+r.createWLReportFile("D:/winroad_py/.grt_wl.rpt", verbose=True)
+Path("D:/winroad_py/.grt_wl.rpt").unlink()
+
+r.fastroute().setGridsAndLayers(2, 2, 2)
+r.fastroute().setEdgeCapacity(0, 0, 1, 0, 1, 1)
+r.updateResources(0, 0, 1, 0, 1, 2, net)
+assert r.getCongestionReport()["congested_tile_count"] == 1
+r.fastroute().saveResourcesBeforeAdjustments()
+assert r.getResourceSnapshot()["total_usage_per_layer"][1] == 2
+'@ | python -
+```
 
 ## 说明
 

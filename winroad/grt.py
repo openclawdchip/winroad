@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import json
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 
@@ -29,6 +30,20 @@ NetRouteMap = Dict[Any, GRoute]
 CapacityReductionData = List[List[List["CapacityReduction"]]]
 TileSet = Set[Tuple[int, int]]
 NetsPerCongestedArea = Dict[Tuple[int, int, int], Set[Any]]
+
+
+def _object_name(obj: Any) -> str:
+    """返回 OpenDB-like 对象或普通 key 的稳定名称。"""
+
+    if obj is None:
+        return ""
+    name = getattr(obj, "name", None)
+    if name is not None:
+        return str(name)
+    get_name = getattr(obj, "getName", None)
+    if callable(get_name):
+        return str(get_name())
+    return str(obj)
 
 
 def _unsupported(name: str) -> None:
@@ -137,6 +152,69 @@ class GSegment:
             RoutePt(self.init_x, self.init_y, self.init_layer),
             RoutePt(self.final_x, self.final_y, self.final_layer),
         )
+
+    def toDict(self) -> Dict[str, Any]:
+        """序列化为 guide/segment 文件中使用的轻量字典。"""
+
+        return {
+            "init_x": self.init_x,
+            "init_y": self.init_y,
+            "init_layer": self.init_layer,
+            "final_x": self.final_x,
+            "final_y": self.final_y,
+            "final_layer": self.final_layer,
+            "is_jumper": self.is_jumper,
+            "is_3d_route": self.is_3d_route,
+        }
+
+    @classmethod
+    def fromDict(cls, data: Dict[str, Any]) -> "GSegment":
+        """从 ``toDict`` 的结果恢复 GSegment。"""
+
+        return cls(
+            int(data.get("init_x", 0)),
+            int(data.get("init_y", 0)),
+            int(data.get("init_layer", 0)),
+            int(data.get("final_x", 0)),
+            int(data.get("final_y", 0)),
+            int(data.get("final_layer", 0)),
+            bool(data.get("is_jumper", False)),
+            bool(data.get("is_3d_route", False)),
+        )
+
+    def toGuideLine(self, net_name: str = "") -> str:
+        """写出可读的 WinRoad guide 行。"""
+
+        prefix = f"{net_name} " if net_name else ""
+        flags = []
+        if self.is_jumper:
+            flags.append("jumper")
+        if self.is_3d_route:
+            flags.append("3d")
+        suffix = (" " + " ".join(flags)) if flags else ""
+        return (
+            f"{prefix}{self.init_x} {self.init_y} {self.init_layer} "
+            f"{self.final_x} {self.final_y} {self.final_layer}{suffix}"
+        )
+
+    @classmethod
+    def fromGuideTokens(cls, tokens: Sequence[str]) -> Tuple[Optional[str], "GSegment"]:
+        """解析 ``toGuideLine`` 风格的行，返回可选 net 名和 segment。"""
+
+        if len(tokens) < 6:
+            raise ValueError("guide segment 至少需要 6 个坐标/层字段")
+        offset = 0
+        net_name: Optional[str] = None
+        try:
+            int(tokens[0])
+        except ValueError:
+            if len(tokens) < 7:
+                raise ValueError("带 net 名的 guide 行至少需要 7 个字段")
+            net_name = tokens[0]
+            offset = 1
+        values = [int(token) for token in tokens[offset : offset + 6]]
+        flags = {token.lower() for token in tokens[offset + 6 :]}
+        return net_name, cls(*values, is_jumper="jumper" in flags, is_3d_route="3d" in flags)
 
 
 @dataclass
@@ -415,6 +493,9 @@ class Net:
     has_wires: bool = False
     pins: List[Pin] = field(default_factory=list)
     slack: float = 0.0
+    alpha: float = 1.0
+    beta: float = 1.0
+    gamma: float = 1.0
     parent_segment_indices: List[int] = field(default_factory=list)
     last_pin_positions: List[Point] = field(default_factory=list)
     merged_net: Any = None
@@ -480,6 +561,48 @@ class Net:
         """对应 C++ ``setSlack()``。"""
 
         self.slack = slack
+
+    def setAlpha(self, alpha: float) -> None:
+        """记录 FastRoute net alpha 参数。"""
+
+        self.alpha = alpha
+
+    def getAlpha(self) -> float:
+        """返回 FastRoute net alpha 参数。"""
+
+        return self.alpha
+
+    def setBeta(self, beta: float) -> None:
+        """记录 FastRoute net beta 参数。"""
+
+        self.beta = beta
+
+    def getBeta(self) -> float:
+        """返回 FastRoute net beta 参数。"""
+
+        return self.beta
+
+    def setGamma(self, gamma: float) -> None:
+        """记录 FastRoute net gamma 参数。"""
+
+        self.gamma = gamma
+
+    def getGamma(self) -> float:
+        """返回 FastRoute net gamma 参数。"""
+
+        return self.gamma
+
+    def setCostParameters(self, alpha: float, beta: float, gamma: float) -> None:
+        """一次性记录 net alpha/beta/gamma。"""
+
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+
+    def getCostParameters(self) -> Tuple[float, float, float]:
+        """返回 net alpha/beta/gamma。"""
+
+        return self.alpha, self.beta, self.gamma
 
     def setHasWires(self, value: bool) -> None:
         """对应 C++ ``setHasWires()``。"""
@@ -879,6 +1002,7 @@ class FastRouteCore:
     original_resources: List[int] = field(default_factory=list)
     edge_capacities: Dict[Tuple[int, int, int, int, int], int] = field(default_factory=dict)
     edge_usage: Dict[Tuple[int, int, int, int, int], int] = field(default_factory=dict)
+    resource_snapshot: Dict[str, Any] = field(default_factory=dict)
     tree_edges: Dict[Any, GRoute] = field(default_factory=dict)
     adjustments: List[Tuple[int, int, int, int, int, int, bool]] = field(default_factory=list)
     congestion_nets: Set[Any] = field(default_factory=set)
@@ -913,6 +1037,7 @@ class FastRouteCore:
 
         self.edge_capacities.clear()
         self.edge_usage.clear()
+        self.resource_snapshot.clear()
         self.tree_edges.clear()
         self.adjustments.clear()
         self.congestion_nets.clear()
@@ -984,6 +1109,9 @@ class FastRouteCore:
         slack: float,
         edge_cost_per_layer: Optional[List[int]],
         routed: bool = False,
+        alpha: float = 1.0,
+        beta: float = 1.0,
+        gamma: float = 1.0,
     ) -> Dict[str, Any]:
         """注册 FastRoute net，保留 C++ addNet 的参数边界。"""
 
@@ -998,6 +1126,9 @@ class FastRouteCore:
             "slack": slack,
             "edge_cost_per_layer": edge_cost_per_layer,
             "routed": routed,
+            "alpha": alpha,
+            "beta": beta,
+            "gamma": gamma,
         }
         self.nets[db_net] = fr_net
         if db_net not in self.net_ids:
@@ -1096,6 +1227,25 @@ class FastRouteCore:
         """保存 adjustment 前资源快照，供建议 adjustment/report 复用。"""
 
         self.original_resources = list(self.cap_per_layer)
+        self.resource_snapshot = self.createResourceSnapshot()
+
+    def createResourceSnapshot(self) -> Dict[str, Any]:
+        """返回当前 edge/layer resource 的可测试快照。"""
+
+        return {
+            "total_capacity_per_layer": list(self.cap_per_layer),
+            "total_usage_per_layer": list(self.usage_per_layer),
+            "total_overflow_per_layer": list(self.overflow_per_layer),
+            "max_horizontal_overflows": list(self.max_h_overflow),
+            "max_vertical_overflows": list(self.max_v_overflow),
+            "edge_capacities": dict(self.edge_capacities),
+            "edge_usage": dict(self.edge_usage),
+        }
+
+    def getResourceSnapshot(self) -> Dict[str, Any]:
+        """返回最近一次保存的 resource snapshot。"""
+
+        return dict(self.resource_snapshot)
 
     def computeSuggestedAdjustment(self) -> int:
         _unsupported("FastRouteCore::computeSuggestedAdjustment")
@@ -1142,6 +1292,15 @@ class FastRouteCore:
         while len(self.usage_per_layer) <= layer:
             self.usage_per_layer.append(0)
         self.usage_per_layer[layer] += used
+        capacity = self.edge_capacities.get(key, 0)
+        overflow = max(0, self.edge_usage[key] - capacity)
+        while len(self.overflow_per_layer) <= layer:
+            self.overflow_per_layer.append(0)
+        self.overflow_per_layer[layer] = max(self.overflow_per_layer[layer], overflow)
+        self.total_overflow_value = sum(self.overflow_per_layer)
+        if overflow > 0:
+            self.congestion_nets.add(db_net)
+            self.has_2d_overflow = True
 
     def hasAvailableResources(self, x1: int, y1: int, x2: int, y2: int, layer: int, db_net: Any) -> bool:
         return self.getAvailableResources(x1, y1, x2, y2, layer) > 0
@@ -1216,6 +1375,47 @@ class FastRouteCore:
     ) -> None:
         congestionGridV.extend(self.congestion_grid_v)
         congestionGridH.extend(self.congestion_grid_h)
+
+    def buildTileCongestion(self) -> Dict[Tuple[int, int, int], TileInformation]:
+        """按 edge usage/capacity 汇总 tile congestion 状态。"""
+
+        tiles: Dict[Tuple[int, int, int], TileInformation] = {}
+        for key, capacity in self.edge_capacities.items():
+            x1, y1, x2, y2, layer = key
+            usage = self.edge_usage.get(key, 0)
+            tile_key = (min(x1, x2), min(y1, y2), layer)
+            info = tiles.setdefault(tile_key, TileInformation())
+            info.congestion.capacity += capacity
+            info.congestion.usage += usage
+        for db_net, route in self.routes.items():
+            for segment in route:
+                layer = segment.init_layer
+                tile_key = (min(segment.init_x, segment.final_x), min(segment.init_y, segment.final_y), layer)
+                info = tiles.setdefault(tile_key, TileInformation())
+                info.nets.add(db_net)
+        return tiles
+
+    def getTileCongestion(self, x: int, y: int, layer: int) -> TileInformation:
+        """返回单个 tile 的 congestion 摘要。"""
+
+        return self.buildTileCongestion().get((x, y, layer), TileInformation())
+
+    def reportCongestionSummary(self) -> Dict[str, Any]:
+        """返回 report 边界使用的拥塞统计。"""
+
+        tiles = self.buildTileCongestion()
+        congested_tiles = {
+            key: info
+            for key, info in tiles.items()
+            if info.congestion.capacity > 0 and info.congestion.usage > info.congestion.capacity
+        }
+        return {
+            "total_overflow": self.totalOverflow(),
+            "has_2d_overflow": self.has2Doverflow(),
+            "congested_tile_count": len(congested_tiles),
+            "total_tile_count": len(tiles),
+            "congestion_nets": set(self.congestion_nets),
+        }
 
     def getSnapshotBatchCount(self) -> int:
         return self.snapshot_batch_count
@@ -1464,6 +1664,99 @@ class GlobalRouter:
             sta=self.sta,
         )
 
+    def _net_key_from_name(self, net_name: str) -> Any:
+        """按名称寻找已知 db net；找不到时保留字符串 key。"""
+
+        for db_net in list(self.db_net_map) + list(self.routes) + list(self.partial_routes):
+            if _object_name(db_net) == net_name:
+                return db_net
+        block_nets = getattr(self.block, "nets", None)
+        if isinstance(block_nets, dict):
+            if net_name in block_nets:
+                return block_nets[net_name]
+            for db_net in block_nets.values():
+                if _object_name(db_net) == net_name:
+                    return db_net
+        return net_name
+
+    def _route_payload(self, nets: Optional[Sequence[Any]] = None) -> Dict[str, Any]:
+        """构造 guide/segment JSON 载荷。"""
+
+        route_map = self.routes
+        selected_nets = list(nets) if nets is not None else list(route_map)
+        return {
+            "format": "winroad-grt-routes",
+            "version": 1,
+            "routes": [
+                {
+                    "net": _object_name(db_net),
+                    "segments": [segment.toDict() for segment in route_map.get(db_net, [])],
+                }
+                for db_net in selected_nets
+                if db_net in route_map
+            ],
+        }
+
+    def _load_route_payload(self, payload: Dict[str, Any]) -> None:
+        """从 ``_route_payload`` 的 JSON 载荷恢复 routes。"""
+
+        loaded: NetRouteMap = {}
+        for net_payload in payload.get("routes", []):
+            db_net = self._net_key_from_name(str(net_payload.get("net", "")))
+            loaded[db_net] = [GSegment.fromDict(segment) for segment in net_payload.get("segments", [])]
+        self.routes.update(loaded)
+        self.fastroute_core.routes.update(loaded)
+
+    def _write_route_text(self, file_name: str, nets: Optional[Sequence[Any]] = None) -> None:
+        """写出轻量 guide/segment 文本，不触碰 OpenDB。"""
+
+        with open(file_name, "w", encoding="utf-8") as out:
+            json.dump(self._route_payload(nets), out, indent=2)
+            out.write("\n")
+
+    def _read_route_text(self, file_name: str) -> None:
+        """读取轻量 JSON 或逐行 guide/segment 文本。"""
+
+        with open(file_name, "r", encoding="utf-8") as src:
+            text = src.read()
+        stripped = text.strip()
+        if not stripped:
+            return
+        if stripped[0] == "{":
+            self._load_route_payload(json.loads(stripped))
+            return
+        loaded: NetRouteMap = {}
+        current_net: Any = None
+        for line_no, line in enumerate(stripped.splitlines(), 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.endswith(":"):
+                current_net = self._net_key_from_name(line[:-1].strip())
+                loaded.setdefault(current_net, [])
+                continue
+            net_name, segment = GSegment.fromGuideTokens(line.split())
+            db_net = self._net_key_from_name(net_name) if net_name is not None else current_net
+            if db_net is None:
+                raise ValueError(f"{file_name}:{line_no}: guide 行缺少 net 名")
+            loaded.setdefault(db_net, []).append(segment)
+        self.routes.update(loaded)
+        self.fastroute_core.routes.update(loaded)
+
+    def getRegionAdjustments(self) -> List[RegionAdjustment]:
+        """返回用户配置的 region/layer adjustments。"""
+
+        return list(self.region_adjustments)
+
+    def getLayerAdjustments(self) -> Dict[int, float]:
+        """返回 layer-only adjustment 映射。"""
+
+        return {
+            adjustment.layer: adjustment.adjustment
+            for adjustment in self.region_adjustments
+            if adjustment.region == (0, 0, 0, 0)
+        }
+
     def initGui(self, routing_congestion_data_source: Any, routing_congestion_data_source_rudy: Any) -> None:
         self.heatmap = routing_congestion_data_source
         self.heatmap_rudy = routing_congestion_data_source_rudy
@@ -1523,6 +1816,7 @@ class GlobalRouter:
 
     def addLayerAdjustment(self, layer: int, reduction_percentage: float) -> None:
         self.region_adjustments.append(RegionAdjustment(0, 0, 0, 0, layer, reduction_percentage))
+        self.fastroute_core.addAdjustment(0, 0, 0, 0, layer, int(reduction_percentage), True)
 
     def addRegionAdjustment(
         self,
@@ -1535,6 +1829,15 @@ class GlobalRouter:
     ) -> None:
         self.region_adjustments.append(
             RegionAdjustment(min_x, min_y, max_x, max_y, layer, reduction_percentage)
+        )
+        self.fastroute_core.addAdjustment(
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            layer,
+            int(reduction_percentage),
+            True,
         )
 
     def setVerbose(self, value: bool) -> None:
@@ -1590,10 +1893,30 @@ class GlobalRouter:
         self.infinite_capacity = infinite_capacity
 
     def readGuides(self, file_name: str) -> None:
-        _unsupported("GlobalRouter::readGuides")
+        """读取 WinRoad 轻量 guide 文件到当前 routes。"""
+
+        self._read_route_text(file_name)
 
     def loadGuidesFromDB(self) -> None:
-        _unsupported("GlobalRouter::loadGuidesFromDB")
+        """从 block.guides 恢复 guide，不直接访问 OpenDB。"""
+
+        block_guides = getattr(self.block, "guides", None)
+        if block_guides is None:
+            return
+        loaded: NetRouteMap = {}
+        items = block_guides.items() if isinstance(block_guides, dict) else block_guides
+        for item in items:
+            if isinstance(item, tuple) and len(item) == 2:
+                db_net, segments = item
+            else:
+                db_net = getattr(item, "net", None)
+                segments = getattr(item, "segments", [])
+            loaded[db_net] = [
+                segment if isinstance(segment, GSegment) else GSegment.fromDict(segment)
+                for segment in segments
+            ]
+        self.routes.update(loaded)
+        self.fastroute_core.routes.update(loaded)
 
     def updateNetResources(self, net: Net, release_resources: bool) -> None:
         _unsupported("GlobalRouter::updateNetResources")
@@ -1608,16 +1931,37 @@ class GlobalRouter:
         _unsupported("GlobalRouter::updateUncoveredPinsPositions")
 
     def saveGuidesFromDB(self, guides: Dict[Any, Any]) -> None:
-        _unsupported("GlobalRouter::saveGuidesFromDB")
+        """把外部 guide 映射保存进当前 routes。"""
+
+        loaded: NetRouteMap = {}
+        for db_net, segments in guides.items():
+            loaded[db_net] = [
+                segment if isinstance(segment, GSegment) else GSegment.fromDict(segment)
+                for segment in segments
+            ]
+        self.routes.update(loaded)
+        self.fastroute_core.routes.update(loaded)
 
     def saveGuides(self, nets: Sequence[Any]) -> None:
-        _unsupported("GlobalRouter::saveGuides")
+        """把当前 routes 写回 block.guides，不写 OpenDB wire。"""
+
+        guides = {
+            db_net: [segment.toDict() for segment in self.routes.get(db_net, [])]
+            for db_net in nets
+            if db_net in self.routes
+        }
+        if self.block is not None:
+            setattr(self.block, "guides", guides)
 
     def writeSegments(self, file_name: str) -> None:
-        _unsupported("GlobalRouter::writeSegments")
+        """写出当前 routes 的轻量 segment 文件。"""
+
+        self._write_route_text(file_name)
 
     def readSegments(self, file_name: str) -> None:
-        _unsupported("GlobalRouter::readSegments")
+        """读取 ``writeSegments`` 生成的轻量 segment 文件。"""
+
+        self._read_route_text(file_name)
 
     def netIsCovered(self, db_net: Any, pins_not_covered: str = "") -> bool:
         _unsupported("GlobalRouter::netIsCovered")
@@ -1924,10 +2268,41 @@ class GlobalRouter:
         _unsupported("GlobalRouter::saveSttInputFile")
 
     def reportNetLayerWirelengths(self, db_net: Any, out: Any) -> None:
-        _unsupported("GlobalRouter::reportNetLayerWirelengths")
+        """写出单 net 的 global-route 分层线长报告。"""
+
+        lengths = self.routeLayerLengths(db_net)
+        writer = getattr(out, "write", None)
+        lines = [f"net {_object_name(db_net)}"]
+        for layer, length in enumerate(lengths):
+            if length:
+                lines.append(f"  layer {layer}: {length}")
+        text = "\n".join(lines) + "\n"
+        if callable(writer):
+            writer(text)
+        else:
+            raise TypeError("out 需要提供 write(str) 方法")
 
     def reportLayerWireLengths(self, global_route: bool, detailed_route: bool) -> None:
-        _unsupported("GlobalRouter::reportLayerWireLengths")
+        """计算并缓存分层线长报告边界。"""
+
+        if detailed_route:
+            _unsupported("GlobalRouter::reportLayerWireLengths(detailed_route)")
+        if not global_route:
+            self._last_layer_wirelength_report = []
+            return
+        totals: Dict[int, int] = {}
+        for route in self.routes.values():
+            for segment in route:
+                if segment.init_layer == segment.final_layer:
+                    totals[segment.init_layer] = totals.get(segment.init_layer, 0) + segment.length()
+        self._last_layer_wirelength_report = [
+            (layer, totals.get(layer, 0)) for layer in range(max(totals) + 1)
+        ] if totals else []
+
+    def getLastLayerWirelengthReport(self) -> List[Tuple[int, int]]:
+        """返回最近一次 ``reportLayerWireLengths`` 的结果。"""
+
+        return list(getattr(self, "_last_layer_wirelength_report", []))
 
     def globalRoutingToBox(self, route: GSegment) -> Rect:
         """把 grid segment 转成 box 边界的占位几何。"""
@@ -1955,13 +2330,48 @@ class GlobalRouter:
         verbose: bool,
         file_name: Optional[str],
     ) -> None:
-        _unsupported("GlobalRouter::reportNetWireLength")
+        """报告单 net global-route 线长；detailed route 继续保持未移植。"""
+
+        if detailed_route:
+            _unsupported("GlobalRouter::reportNetWireLength(detailed_route)")
+        if not global_route:
+            return
+        total = sum(segment.length() for segment in self.routes.get(net, []))
+        lines = [f"net {_object_name(net)} wirelength {total}"]
+        if verbose:
+            lengths = self.routeLayerLengths(net)
+            lines.extend(f"layer {layer} {length}" for layer, length in enumerate(lengths) if length)
+        text = "\n".join(lines) + "\n"
+        if file_name:
+            with open(file_name, "w", encoding="utf-8") as out:
+                out.write(text)
+        else:
+            self._last_net_wirelength_report = text
 
     def reportNetDetailedRouteWL(self, wire: Any, out: Any) -> None:
         _unsupported("GlobalRouter::reportNetDetailedRouteWL")
 
     def createWLReportFile(self, file_name: str, verbose: bool) -> None:
-        _unsupported("GlobalRouter::createWLReportFile")
+        """写出当前 global-route 线长报告文件。"""
+
+        with open(file_name, "w", encoding="utf-8") as out:
+            for db_net in self.routes:
+                total = sum(segment.length() for segment in self.routes.get(db_net, []))
+                out.write(f"net {_object_name(db_net)} wirelength {total}\n")
+                if verbose:
+                    for layer, length in enumerate(self.routeLayerLengths(db_net)):
+                        if length:
+                            out.write(f"  layer {layer}: {length}\n")
+
+    def getCongestionReport(self) -> Dict[str, Any]:
+        """返回 FastRouteCore 当前拥塞报告摘要。"""
+
+        return self.fastroute_core.reportCongestionSummary()
+
+    def getResourceSnapshot(self) -> Dict[str, Any]:
+        """返回 FastRouteCore 最近一次 resource snapshot。"""
+
+        return self.fastroute_core.getResourceSnapshot()
 
     def getPinGridPositions(self, db_net: Any) -> List[PinGridLocation]:
         net = self.db_net_map.get(db_net)
@@ -2007,6 +2417,29 @@ class GlobalRouter:
         if not layers:
             return self.getMinRoutingLayer(), self.getMaxRoutingLayer()
         return min(layers), max(layers)
+
+    def setNetAlphaBetaGamma(self, db_net: Any, alpha: float, beta: float, gamma: float) -> None:
+        """记录单 net 的 alpha/beta/gamma 参数。"""
+
+        net = self.db_net_map.get(db_net)
+        if net is not None:
+            net.setCostParameters(alpha, beta, gamma)
+        self.fastroute_core.nets.setdefault(db_net, {})["alpha"] = alpha
+        self.fastroute_core.nets.setdefault(db_net, {})["beta"] = beta
+        self.fastroute_core.nets.setdefault(db_net, {})["gamma"] = gamma
+
+    def getNetAlphaBetaGamma(self, db_net: Any) -> Tuple[float, float, float]:
+        """返回单 net 的 alpha/beta/gamma 参数。"""
+
+        net = self.db_net_map.get(db_net)
+        if net is not None:
+            return net.getCostParameters()
+        fr_net = self.fastroute_core.nets.get(db_net, {})
+        return (
+            float(fr_net.get("alpha", 1.0)),
+            float(fr_net.get("beta", 1.0)),
+            float(fr_net.get("gamma", 1.0)),
+        )
 
     def getGridSize(self) -> Tuple[int, int]:
         return self.grid.getXGrids(), self.grid.getYGrids()
