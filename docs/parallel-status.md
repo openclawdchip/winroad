@@ -195,3 +195,28 @@
 - `cts`：补 Clock/SubNet 导入导出、CtsOptions profile、TechChar solution map 与 LUT 校验、Segment/HTree 拓扑状态，以及 TritonCTS 快照载入与聚合校验。
 - `pdn`：补 strap 生命周期校验、setup warning 聚合、switched-power/connect/sroute/renderer 状态报告、sroute 配置往返和 warning 非阻塞 setup 检查。
 - `drt`：补 frDesign/frBlock/frNet/frVia/frLayer 摘要与校验、route guide/marker/snapshot/config 状态、FlexDR/FlexGR/GridGraph/GC 校验入口。
+
+## 2026-05-08 第九轮
+
+本轮按用户要求把 6 条并行线全部集中到 `gpl`，分别推进 graphics、initial place、route base、
+timing base、replace/options、nesterov 六个责任区。目标不是继续铺空接口，而是把不依赖真实
+OpenDB/FastRoute/STA/FFT 的 Python 可落地逻辑补上；真实外部依赖和未复刻算法仍保留同名入口并抛
+`NotImplementedError`。
+
+| 模块 | 线程 id | 昵称 | 状态 | 负责范围 |
+| --- | --- | --- | --- | --- |
+| `gpl` | `019e02ab-28b6-7f73-806f-525ef15949a2` | Kant | 已完成 | `winroad/gpl/graphics.py` |
+| `gpl` | `019e02ab-28de-7fc0-891c-cff8a48c8102` | Confucius | 已完成 | `winroad/gpl/initial_place.py` |
+| `gpl` | `019e02ab-2902-7090-af5b-c4ef7763deee` | Turing | 已完成 | `winroad/gpl/route_base.py` |
+| `gpl` | `019e02ab-29fd-7541-bda2-bdb233a7166e` | Carver | 已完成 | `winroad/gpl/timing_base.py` |
+| `gpl` | `019e02ab-2abd-7bf2-a4c6-9d8ac0553297` | Anscombe | 已完成 | `winroad/gpl/replace.py`, `winroad/gpl/options.py`, `winroad/gpl/__init__.py` |
+| `gpl` | `019e02ab-2ada-7621-a915-ed760dbd9e37` | Aquinas | 已完成 | `winroad/gpl/nesterov.py` |
+
+### 第九轮已完成摘要
+
+- `graphics`：`AbstractGraphics` / `GraphicsNone` 不再是硬 stub，补无 GUI 事件记录、分类统计、样本导出和调试 report。
+- `initial_place`：补 stamped 线性系统校验、纯 Python BiCGSTAB、小规模高斯回退、残差报告和坐标回写；真实 B2B stamping 未完成时明确失败。
+- `route_base`：补 RUDY tile demand/capacity/overflow、平均拥塞、heatmap 导入导出、tile congestion report、轻量 routability/inflation 数据更新。
+- `timing_base`：补纯数据 timing-driven net reweight、权重快照导入导出、更新日志、批量导入和状态校验；真实 STA/resizer hook 仍保留边界。
+- `replace/options`：补 `MBFFOptions`、顶层 flow report、阶段错误记录/传播、`runMBFF()` 结构化边界报告，不伪造 MBFF 聚类。
+- `nesterov`：补 WA wirelength 累计、pin/cell gradient、preconditioner、局部 density 近似、density penalty/phi/base wirelength 更新和可运行外层状态流。

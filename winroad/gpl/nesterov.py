@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -10,6 +11,19 @@ from ..odb import DbInst, DbNet
 from .common import Cluster, Clusters, _area
 from .options import PlaceOptions
 from .placer_base import Instance, Net, Pin, PlacerBase, PlacerBaseCommon
+
+_EXP_CLAMP = 60.0
+
+
+def _safe_exp(value: float) -> float:
+    """限制指数范围，避免纯 Python WA 计算在大坐标设计上溢出。"""
+
+    return math.exp(max(-_EXP_CLAMP, min(_EXP_CLAMP, value)))
+
+
+def _safe_div(numer: float, denom: float) -> float:
+    return numer / denom if abs(denom) > 1e-30 else 0.0
+
 
 @dataclass
 class FloatPoint:
@@ -803,6 +817,11 @@ class Bin:
     def getUtilization(self) -> float:
         return self.getPlaceArea() / max(1, self.getBinArea())
 
+    def getOverflowDensity(self) -> float:
+        """返回 bin 超过 target density 的比例；不代表 FFT 电势解。"""
+
+        return max(0.0, self.getDensity() + self.nonPlaceArea_ / max(1, self.getBinArea()) - self.targetDensity_)
+
     def resetAreas(self) -> None:
         self.nonPlaceArea_ = 0
         self.instPlacedArea_ = 0
@@ -815,6 +834,17 @@ class Bin:
         self.electroPhi_ = 0.0
         self.electroFieldX_ = 0.0
         self.electroFieldY_ = 0.0
+
+    def report(self) -> Dict[str, Any]:
+        return {
+            "index": (self.x_, self.y_),
+            "box": (self.lx_, self.ly_, self.ux_, self.uy_),
+            "density": self.density_,
+            "target_density": self.targetDensity_,
+            "overflow_density": self.getOverflowDensity(),
+            "electro_phi": self.electroPhi_,
+            "electro_field": (self.electroFieldX_, self.electroFieldY_),
+        }
 
 
 @dataclass
@@ -966,6 +996,18 @@ class BinGrid:
     def getDensityMinMaxIdxY(self, gcell: GCell) -> Tuple[int, int]:
         return self._range_to_bin_idx(gcell.dLy(), gcell.dUy(), self.ly_, self.binSizeY_, self.binCntY_)
 
+    def getBinByIdx(self, x: int, y: int) -> Bin:
+        return self.bins_[y * self.binCntX_ + x]
+
+    def getBinAtPoint(self, x: float, y: float) -> Optional[Bin]:
+        if not self.bins_ or self.binCntX_ <= 0 or self.binCntY_ <= 0:
+            return None
+        idx_x = int((x - self.lx_) // self.binSizeX_) if self.binSizeX_ > 0 else 0
+        idx_y = int((y - self.ly_) // self.binSizeY_) if self.binSizeY_ > 0 else 0
+        idx_x = min(max(idx_x, 0), self.binCntX_ - 1)
+        idx_y = min(max(idx_y, 0), self.binCntY_ - 1)
+        return self.getBinByIdx(idx_x, idx_y)
+
     def getMinMaxIdxX(self, inst: Instance) -> Tuple[int, int]:
         return self._range_to_bin_idx(inst.lx(), inst.ux(), self.lx_, self.binSizeX_, self.binCntX_)
 
@@ -1013,6 +1055,44 @@ class BinGrid:
     def resetElectro(self) -> None:
         for bin_obj in self.bins_:
             bin_obj.resetElectro()
+
+    def updateLocalDensityField(self, phi_coef: float = 1.0) -> None:
+        """用 bin overflow 构造可验证的局部 density field。
+
+        OpenROAD 真实实现通过 FFT 求解 Poisson 方程得到电势/电场；这里不伪造 FFT，
+        只把当前 bin density overflow 转成局部 phi，并用相邻 bin 的差分生成 field。
+        因此它适合 Python 状态流和 smoke，不等价于生产级 density force。
+        """
+
+        if not self.bins_:
+            return
+        phi_coef = max(0.0, phi_coef)
+        for bin_obj in self.bins_:
+            bin_obj.setElectroPhi(phi_coef * bin_obj.getOverflowDensity())
+        for y in range(self.binCntY_):
+            for x in range(self.binCntX_):
+                center = self.getBinByIdx(x, y)
+                left = self.getBinByIdx(max(0, x - 1), y)
+                right = self.getBinByIdx(min(self.binCntX_ - 1, x + 1), y)
+                down = self.getBinByIdx(x, max(0, y - 1))
+                up = self.getBinByIdx(x, min(self.binCntY_ - 1, y + 1))
+                dx = max(self.binSizeX_, 1.0)
+                dy = max(self.binSizeY_, 1.0)
+                field_x = -_safe_div(right.electroPhi() - left.electroPhi(), dx if right is not left else 1.0)
+                field_y = -_safe_div(up.electroPhi() - down.electroPhi(), dy if up is not down else 1.0)
+                if self.binCntX_ == 1:
+                    field_x = -center.electroPhi() / dx
+                if self.binCntY_ == 1:
+                    field_y = -center.electroPhi() / dy
+                center.setElectroField(field_x, field_y)
+
+    def getInterpolatedElectroField(self, x: float, y: float) -> FloatPoint:
+        """返回点所在 bin 的 field；暂不做双线性插值。"""
+
+        bin_obj = self.getBinAtPoint(x, y)
+        if bin_obj is None:
+            return FloatPoint()
+        return FloatPoint(bin_obj.electroFieldX(), bin_obj.electroFieldY())
 
     def getAverageDensity(self) -> float:
         if not self.bins_:
@@ -1162,19 +1242,80 @@ class NesterovBaseCommon:
         return self.pbToNb(pb_obj)
 
     def updateWireLengthForceWA(self, wlCoeffX: float, wlCoeffY: float) -> None:
-        raise NotImplementedError("OpenROAD WA wirelength force update has not been translated yet")
+        """更新 WA wirelength 的 net/pin 累计量。
+
+        这是 OpenROAD weighted-average wirelength 的纯 Python 版本：按 pin 坐标
+        累积 exp(+/-coord/gamma) 与 coord*exp(+/-coord/gamma)。它不依赖 FFT/ODB。
+        """
+
+        self.updatePinLocation()
+        for gnet in self.gNets_:
+            gnet.clearWaVars()
+            pins = gnet.getGPins()
+            if gnet.isDontCare() or len(pins) <= 1:
+                continue
+            for gpin in pins:
+                gpin.clearWaVars()
+                exp_max_x = _safe_exp(gpin.cx() / max(wlCoeffX, 1e-9))
+                exp_min_x = _safe_exp(-gpin.cx() / max(wlCoeffX, 1e-9))
+                exp_max_y = _safe_exp(gpin.cy() / max(wlCoeffY, 1e-9))
+                exp_min_y = _safe_exp(-gpin.cy() / max(wlCoeffY, 1e-9))
+                gpin.setMaxExpSumX(exp_max_x)
+                gpin.setMinExpSumX(exp_min_x)
+                gpin.setMaxExpSumY(exp_max_y)
+                gpin.setMinExpSumY(exp_min_y)
+                gnet.addWaExpMaxSumX(exp_max_x)
+                gnet.addWaXExpMaxSumX(gpin.cx() * exp_max_x)
+                gnet.addWaExpMinSumX(exp_min_x)
+                gnet.addWaXExpMinSumX(gpin.cx() * exp_min_x)
+                gnet.addWaExpMaxSumY(exp_max_y)
+                gnet.addWaYExpMaxSumY(gpin.cy() * exp_max_y)
+                gnet.addWaExpMinSumY(exp_min_y)
+                gnet.addWaYExpMinSumY(gpin.cy() * exp_min_y)
 
     def updateWireLengthForceWAInit(self, wlCoeffX: float, wlCoeffY: float) -> None:
-        raise NotImplementedError("OpenROAD WA wirelength force init has not been translated yet")
+        self.updateWireLengthForceWA(wlCoeffX, wlCoeffY)
 
     def getWireLengthGradientPinWA(self, gPin: GPin, wlCoeffX: float, wlCoeffY: float) -> FloatPoint:
-        raise NotImplementedError("OpenROAD WA pin gradient has not been translated yet")
+        gnet = gPin.getGNet()
+        if gnet is None or gnet.isDontCare() or len(gnet.getGPins()) <= 1:
+            return FloatPoint()
+        gamma_x = max(wlCoeffX, 1e-9)
+        gamma_y = max(wlCoeffY, 1e-9)
+        exp_max_x = gPin.maxExpSumX() if gPin.hasMaxExpSumX() else _safe_exp(gPin.cx() / gamma_x)
+        exp_min_x = gPin.minExpSumX() if gPin.hasMinExpSumX() else _safe_exp(-gPin.cx() / gamma_x)
+        exp_max_y = gPin.maxExpSumY() if gPin.hasMaxExpSumY() else _safe_exp(gPin.cy() / gamma_y)
+        exp_min_y = gPin.minExpSumY() if gPin.hasMinExpSumY() else _safe_exp(-gPin.cy() / gamma_y)
+
+        # WA 目标：sum(x*e^(x/g))/sum(e^(x/g)) - sum(x*e^(-x/g))/sum(e^(-x/g))
+        # 对单 pin 求导，得到 max/min 两项的解析梯度。
+        max_x_mean = _safe_div(gnet.waXExpMaxSumX(), gnet.waExpMaxSumX())
+        min_x_mean = _safe_div(gnet.waXExpMinSumX(), gnet.waExpMinSumX())
+        max_y_mean = _safe_div(gnet.waYExpMaxSumY(), gnet.waExpMaxSumY())
+        min_y_mean = _safe_div(gnet.waYExpMinSumY(), gnet.waExpMinSumY())
+        grad_x = _safe_div(exp_max_x * (1.0 + (gPin.cx() - max_x_mean) / gamma_x), gnet.waExpMaxSumX())
+        grad_x -= _safe_div(exp_min_x * (1.0 - (gPin.cx() - min_x_mean) / gamma_x), gnet.waExpMinSumX())
+        grad_y = _safe_div(exp_max_y * (1.0 + (gPin.cy() - max_y_mean) / gamma_y), gnet.waExpMaxSumY())
+        grad_y -= _safe_div(exp_min_y * (1.0 - (gPin.cy() - min_y_mean) / gamma_y), gnet.waExpMinSumY())
+        weight = gnet.getTotalWeight()
+        return FloatPoint(grad_x * weight, grad_y * weight)
 
     def getWireLengthGradientWA(self, gCell: GCell, wlCoeffX: float, wlCoeffY: float) -> FloatPoint:
-        raise NotImplementedError("OpenROAD WA cell gradient has not been translated yet")
+        grad = FloatPoint()
+        for gpin in gCell.gPins():
+            pin_grad = self.getWireLengthGradientPinWA(gpin, wlCoeffX, wlCoeffY)
+            grad.x += pin_grad.x
+            grad.y += pin_grad.y
+        return grad
 
     def getWireLengthPreconditioner(self, gCell: GCell) -> FloatPoint:
-        raise NotImplementedError("OpenROAD wirelength preconditioner has not been translated yet")
+        weight_sum = 0.0
+        for gpin in gCell.gPins():
+            gnet = gpin.getGNet()
+            if gnet is not None and not gnet.isDontCare():
+                weight_sum += max(0.0, gnet.getTotalWeight())
+        precond = max(1.0, weight_sum)
+        return FloatPoint(precond, precond)
 
     def updatePinLocation(self) -> None:
         for gpin in self.gPins_:
@@ -1550,10 +1691,15 @@ class NesterovBase:
         return min(max(cy, self.bg_.ly() + half), self.bg_.uy() - half)
 
     def getDensityPreconditioner(self, gCell: GCell) -> FloatPoint:
-        raise NotImplementedError("OpenROAD density preconditioner has not been translated yet")
+        area = max(1.0, float(gCell.densityArea() or gCell.area()))
+        scale = max(1.0, gCell.getDensityScale() or 1.0)
+        precond = area * scale / max(1.0, float(self.bg_.getBinSizeX() * self.bg_.getBinSizeY()))
+        return FloatPoint(max(1.0, precond), max(1.0, precond))
 
     def getDensityGradient(self, gCell: GCell) -> FloatPoint:
-        raise NotImplementedError("OpenROAD electrostatic density gradient has not been translated yet")
+        field = self.bg_.getInterpolatedElectroField(gCell.dCx(), gCell.dCy())
+        area_scale = max(1.0, float(gCell.densityArea() or gCell.area())) * max(1.0, gCell.getDensityScale() or 1.0)
+        return FloatPoint(field.x * area_scale, field.y * area_scale)
 
     def updateDensityFieldBin(self) -> None:
         raise NotImplementedError("OpenROAD FFT density field update has not been translated yet")
@@ -1582,10 +1728,25 @@ class NesterovBase:
         self.prevSLPGradient_ = list(self.curSLPGradient_)
 
     def updateCurGradient(self) -> None:
-        raise NotImplementedError("OpenROAD current SLP gradient update has not been translated yet")
+        self.curSLPGradient_ = [self._getCombinedGradient(gcell) for gcell in self.nb_gcells_]
 
     def updateNextGradient(self) -> None:
-        raise NotImplementedError("OpenROAD next SLP gradient update has not been translated yet")
+        self.nextSLPGradient_ = [self._getCombinedGradient(gcell) for gcell in self.nb_gcells_]
+
+    def _getCombinedGradient(self, gcell: GCell) -> FloatPoint:
+        wl_grad = self.nbc_.getWireLengthGradientWA(gcell, self.baseWireLengthCoef_ or 1.0, self.baseWireLengthCoef_ or 1.0)
+        density_grad = self.getDensityGradient(gcell)
+        pre_wl = self.nbc_.getWireLengthPreconditioner(gcell)
+        pre_den = self.getDensityPreconditioner(gcell)
+        pre_x = max(self._minPreconditioner(), pre_wl.x + self.densityPenalty_ * pre_den.x)
+        pre_y = max(self._minPreconditioner(), pre_wl.y + self.densityPenalty_ * pre_den.y)
+        return FloatPoint(
+            (wl_grad.x + self.densityPenalty_ * density_grad.x) / pre_x,
+            (wl_grad.y + self.densityPenalty_ * density_grad.y) / pre_y,
+        )
+
+    def _minPreconditioner(self) -> float:
+        return self.npVars_.minPreconditioner if self.npVars_ is not None else 1.0
 
     def updatePrevSLPCoordi(self) -> None:
         self.prevSLPCoordi_ = list(self.curSLPCoordi_)
@@ -1611,25 +1772,68 @@ class NesterovBase:
         return self.bg_
 
     def initDensity1(self) -> None:
-        raise NotImplementedError("OpenROAD Nesterov initDensity1 has not been translated yet")
+        """初始化 density 侧状态。
+
+        真实 OpenROAD 会联动 filler、FFT、电势求解和多轮线搜索。这里仅刷新 bin
+        密度、构造局部 density field，并保存初始 SLP 坐标，供纯 Python 外层验证。
+        """
+
+        self.refreshState()
+        self.updatePhiCoef(self.sum_overflow_)
+        self.bg_.updateLocalDensityField(self.phiCoef_)
+        self.updateInitialPrevSLPCoordi()
+        self.updateCurSLPCoordi()
 
     def initDensity2(self, wlCoeffX: float, wlCoeffY: float) -> float:
-        raise NotImplementedError("OpenROAD Nesterov initDensity2 has not been translated yet")
+        self.updateWireLengthForceWAInit(wlCoeffX, wlCoeffY)
+        self.updateGradSum()
+        if self.densityPenalty_ <= 0.0:
+            self.initDensityPenalty(self.npVars_.initDensityPenalty if self.npVars_ is not None else 1.0)
+        return self.densityPenalty_
 
     def initBaseWireLengthCoef(self) -> None:
-        raise NotImplementedError("OpenROAD base wirelength coefficient initialization has not been translated yet")
+        hpwl = self.nbc_.getHpwl() if self.nbc_ is not None else 0
+        region_extent = max(1.0, float(self.pb_.getRegionArea()) ** 0.5)
+        self.baseWireLengthCoef_ = max(1.0, hpwl / max(1.0, len(self.nbc_.getGNets())) if hpwl else region_extent / 10.0)
 
     def initDensityPenalty(self, init_density_penalty: float) -> None:
         self.densityPenalty_ = init_density_penalty
 
     def updateDensityPenalty(self, overflow: float) -> None:
-        raise NotImplementedError("OpenROAD density penalty update has not been translated yet")
+        """按 overflow 平滑更新 density penalty。
+
+        这是可验证的单调近似：overflow 高于目标时增强 density force，低于目标时缓慢降低。
+        OpenROAD 完整数值调参仍未在 Python 中复刻。
+        """
+
+        target = self.npVars_.targetOverflow if self.npVars_ is not None else self.nbVars_.targetDensity
+        target = max(1e-6, target)
+        ratio = max(0.25, min(4.0, overflow / target))
+        self.densityPenalty_ = max(1e-12, self.densityPenalty_ * (0.95 + 0.10 * ratio))
 
     def updatePhiCoef(self, overflow: float) -> None:
-        raise NotImplementedError("OpenROAD phi coefficient update has not been translated yet")
+        min_phi = self.nbVars_.minPhiCoef
+        max_phi = self.nbVars_.maxPhiCoef
+        target = self.npVars_.targetOverflow if self.npVars_ is not None else self.nbVars_.targetDensity
+        if max_phi < min_phi:
+            max_phi = min_phi
+        if target <= 0:
+            t = 1.0
+        else:
+            t = max(0.0, min(1.0, overflow / target))
+        self.phiCoef_ = min_phi + (max_phi - min_phi) * t
+        self.nbVars_.isMaxPhiCoefChanged = self.phiCoef_ >= max_phi
 
     def updateGradSum(self) -> None:
-        raise NotImplementedError("OpenROAD gradient sum update has not been translated yet")
+        wl_sum = 0.0
+        density_sum = 0.0
+        for gcell in self.nb_gcells_:
+            wl_grad = self.nbc_.getWireLengthGradientWA(gcell, self.baseWireLengthCoef_ or 1.0, self.baseWireLengthCoef_ or 1.0)
+            den_grad = self.getDensityGradient(gcell)
+            wl_sum += abs(wl_grad.x) + abs(wl_grad.y)
+            density_sum += abs(den_grad.x) + abs(den_grad.y)
+        self.wireLengthGradSum_ = wl_sum
+        self.densityGradSum_ = density_sum
 
     def setNpVars(self, npVars: NesterovPlaceVars) -> None:
         self.npVars_ = npVars
@@ -1714,6 +1918,10 @@ class NesterovBase:
             "base_wire_length_coef": self.baseWireLengthCoef_,
             "wire_length_grad_sum": self.wireLengthGradSum_,
             "density_grad_sum": self.densityGradSum_,
+            "phi_coef": self.phiCoef_,
+            "step_length": self.stepLength_,
+            "coordi_distance": self.coordiDistance_,
+            "grad_distance": self.gradDistance_,
             "iter": self.iter_,
             "converged": self.isConverged_,
             "diverged": self.isDiverged_,
@@ -1794,16 +2002,111 @@ class NesterovPlace:
                 self.npVars_.debug_draw_bins,
                 self.npVars_.debug_inst,
             )
-        raise NotImplementedError("OpenROAD NesterovPlace main loop has not been translated yet")
+        if self.npVars_ is None:
+            raise RuntimeError("NesterovPlaceVars is required before doNesterovPlace")
+        if not self.nbVec_:
+            self.updateOverflow()
+            self.reportStatus()
+            return self.last_iter_
+        self.init()
+        max_iter = max(start_iter, self.npVars_.maxNesterovIter)
+        for iter_num in range(start_iter, max_iter):
+            self.last_iter_ = iter_num
+            self.updateNextIter(iter_num)
+            self.updateWireLengthCoef(self.average_overflow_)
+            for nb in self.nbVec_:
+                nb.updatePhiCoef(nb.getSumOverflow())
+                nb.getBinGrid().updateLocalDensityField(nb.phiCoef_)
+                nb.updateDensityPenalty(nb.getSumOverflow())
+                nb.updateWireLengthForceWA(self.wireLengthCoefX_, self.wireLengthCoefY_)
+                nb.updateGradSum()
+                nb.updateCurGradient()
+                self._takePurePythonStep(nb)
+            self.updateDensityCenterCoordiLayoutInside()
+            self.updateOverflow()
+            self.updateDb()
+            hpwl = self.nbc_.getHpwl() if self.nbc_ is not None else 0
+            if hpwl < self.min_hpwl_:
+                self.min_hpwl_ = hpwl
+                self.is_min_hpwl_ = True
+            else:
+                self.is_min_hpwl_ = False
+            self.reportStatus()
+            if self.average_overflow_ <= self.npVars_.targetOverflow:
+                for nb in self.nbVec_:
+                    nb.isConverged_ = True
+                break
+            if self.checkDivergence() and not self.npVars_.disableRevertIfDiverge:
+                self.divergeMsg_ = "pure Python Nesterov state diverged"
+                self.divergeCode_ = 1
+                self.revertToSnapshot()
+                break
+        return self.last_iter_
 
     def init(self) -> None:
-        raise NotImplementedError("OpenROAD NesterovPlace initialization sequence has not been translated yet")
+        if self.npVars_ is None:
+            raise RuntimeError("NesterovPlaceVars is required before init")
+        for nb in self.nbVec_:
+            nb.setNpVars(self.npVars_)
+            nb.initBaseWireLengthCoef()
+        self.initWireLengthCoef()
+        for nb in self.nbVec_:
+            nb.initDensityPenalty(max(1e-12, self.npVars_.initDensityPenalty))
+            nb.initDensity1()
+            nb.initDensity2(self.wireLengthCoefX_, self.wireLengthCoefY_)
+            nb.updateCurGradient()
+        self.updateOverflow()
+        if not self.snapshot_saved_:
+            self.saveSnapshot()
 
     def initWireLengthCoef(self) -> None:
-        raise NotImplementedError("OpenROAD initial wirelength coefficient calculation has not been translated yet")
+        if self.nbVec_:
+            self.baseWireLengthCoef_ = sum(nb.getBaseWireLengthCoef() for nb in self.nbVec_) / len(self.nbVec_)
+        if self.baseWireLengthCoef_ <= 0.0:
+            reference = self.npVars_.referenceHpwl if self.npVars_ is not None else 0.0
+            self.baseWireLengthCoef_ = max(1.0, reference / 1000.0 if reference > 0 else 1.0)
+        init_coef = self.npVars_.initWireLengthCoef if self.npVars_ is not None else 1.0
+        self.wireLengthCoefX_ = max(1e-9, self.baseWireLengthCoef_ * init_coef)
+        self.wireLengthCoefY_ = max(1e-9, self.baseWireLengthCoef_ * init_coef)
 
     def updateWireLengthCoef(self, overflow: float) -> None:
-        raise NotImplementedError("OpenROAD wirelength coefficient update has not been translated yet")
+        """随 overflow 调整 WA gamma。
+
+        完整 OpenROAD 会按 HPWL/density force 比例调参；这里保持同名状态更新，
+        使外层循环可验证但不声称复刻生产数值。
+        """
+
+        target = self.npVars_.targetOverflow if self.npVars_ is not None else 0.1
+        ratio = max(0.25, min(4.0, overflow / max(target, 1e-6)))
+        coef = max(1e-9, self.baseWireLengthCoef_ * (0.5 + 0.5 * ratio))
+        self.wireLengthCoefX_ = coef
+        self.wireLengthCoefY_ = coef
+
+    def _takePurePythonStep(self, nb: NesterovBase) -> None:
+        """执行一小步可验证的 SLP 更新；真实 backtracking/动量仍未复刻。"""
+
+        if not nb.curSLPGradient_:
+            return
+        step = 1.0 / max(1.0, nb.densityPenalty_ + nb.getWireLengthGradSum() + nb.getDensityGradSum())
+        nb.stepLength_ = step
+        coord_dist = 0.0
+        grad_dist = 0.0
+        next_coords: List[FloatPoint] = []
+        for gcell, grad in zip(nb.getGCells(), nb.curSLPGradient_):
+            old_x = float(gcell.cx())
+            old_y = float(gcell.cy())
+            new_x = nb.getDensityCoordiLayoutInsideX(gcell, old_x - step * grad.x)
+            new_y = nb.getDensityCoordiLayoutInsideY(gcell, old_y - step * grad.y)
+            coord_dist += abs(new_x - old_x) + abs(new_y - old_y)
+            grad_dist += abs(grad.x) + abs(grad.y)
+            gcell.setCenterLocation(int(round(new_x)), int(round(new_y)))
+            gcell.setDensityCenterLocation(int(round(new_x)), int(round(new_y)))
+            next_coords.append(FloatPoint(new_x, new_y))
+        nb.nextSLPCoordi_ = next_coords
+        nb.coordiDistance_ = coord_dist
+        nb.gradDistance_ = grad_dist
+        nb.refreshDensityMetrics()
+        nb.updateNextGradient()
 
     def updateInitialPrevSLPCoordi(self) -> None:
         for nb in self.nbVec_:

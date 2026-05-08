@@ -25,7 +25,7 @@ from .nesterov import (
     NesterovPlaceVars,
     nesterovDbCbk,
 )
-from .options import PlaceOptions
+from .options import MBFFOptions, PlaceOptions
 from .placer_base import Die, Instance, Net, Pin, PlacerBase, PlacerBaseCommon, PlacerBaseVars
 from .replace import Replace, isValidSigType, make_replace
 from .route_base import RouteBase, RouteBaseVars, Tile, TileGrid
@@ -48,6 +48,7 @@ __all__ = [
     "InitialPlace",
     "InitialPlaceVars",
     "Instance",
+    "MBFFOptions",
     "Net",
     "NesterovBase",
     "NesterovBaseCommon",

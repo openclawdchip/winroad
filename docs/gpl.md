@@ -192,3 +192,41 @@
 
 - 未翻译算法边界
   - WA wirelength、FFT density、Nesterov 主循环、routability inflation、STA/resizer 交互等真实数值优化入口继续保留同名函数并抛 `NotImplementedError`，没有加入 demo 或估算替代。
+
+## 第九轮补充
+
+本轮把 6 条并行线全部集中到 `gpl`，优先消灭可以在 Windows/Python 中真实落地的 stub。
+保留的 `NotImplementedError` 只对应真实 B2B stamping、OpenROAD filler、FFT density field、
+FastRoute/OpenDB 结果读取、STA/resizer/filler hook 等外部依赖或尚未复刻的核心算法。
+
+- Graphics
+  - `AbstractGraphics` 与 `GraphicsNone` 改为可用的无 GUI 事件后端。
+  - 支持记录 debug/status/iteration/timing/routability/MBFF/cell plot 事件。
+  - 新增 `events()`、`clearEvents()`、`report()`，便于 smoke 和后续 GUI 接入验证。
+
+- InitialPlace
+  - `doBicgstabPlace()` 不再是一刀切 stub：当矩阵已由真实 stamping 或外部调用标记为 stamped 时，会求解 X/Y 两个线性系统并回写坐标。
+  - 新增纯 Python BiCGSTAB 求解器、小规模 dense Gaussian fallback、残差报告、矩阵 stamped 状态校验。
+  - 默认 `createSparseMatrix()` 仍只是 identity placeholder；未完成 B2B stamping 时会明确抛 `NotImplementedError`，不伪造初始布局。
+
+- RouteBase
+  - `updateRudyRoute()`、`updateRudyRouteAverage()`、`updateInflationRatio()`、`updateGCellSize()` 具备纯数据实现。
+  - 支持 RUDY heatmap 导入导出、tile congestion 导入、tile demand/capacity/overflow 计算、拥塞快照和 routability 轻量循环。
+  - 真实 global router 调用、FastRoute 结果抽取和 GR RC metric 仍保留未实现边界。
+
+- TimingBase
+  - `executeTimingDriven()` 和 `updateGNetWeights()` 支持基于已登记 timing-driven nets 的确定性纯数据重权重。
+  - 新增 timing-driven net 批量导入、按 GNet index 导入、权重快照导入导出、更新日志和状态校验。
+  - 真实 STA slack 读取、resizer timing repair、filler reset 仍显式保留边界。
+
+- Replace / Options
+  - 新增 `MBFFOptions`，提供独立参数校验和结构化报告。
+  - `doPlace()`、`doInitialPlace()`、`doNesterovPlace()`、`initNesterovPlace()` 会记录 flow report；异常记录 `last_error` 后继续向外抛。
+  - `runMBFF()` 改为结构化边界报告，返回 `implemented=False`，不创建或修改 cluster，不做假 MBFF 聚类。
+
+- Nesterov
+  - 补 WA wirelength 累计、pin/cell gradient、wirelength preconditioner。
+  - 补局部 density field 近似、density gradient/preconditioner、gradient sum。
+  - 补 density penalty、phi coefficient、base/wirelength coefficient 更新。
+  - `NesterovPlace` 具备可运行的纯 Python 外层状态流，适合 smoke 与状态验证。
+  - 真实 FFT/Poisson density field 和 OpenROAD 完整数值优化仍保留 `updateDensityFieldBin()` 边界。

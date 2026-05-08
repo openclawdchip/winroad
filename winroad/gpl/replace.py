@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from time import monotonic
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 
 from ..odb import DbDatabase, DbInst, PlacementStatus, SigType
 from .common import Cluster, Clusters, _get_block
 from .graphics import AbstractGraphics, GraphicsNone
 from .initial_place import InitialPlace, InitialPlaceVars
 from .nesterov import NesterovBase, NesterovBaseCommon, NesterovBaseVars, NesterovPlace, NesterovPlaceVars
-from .options import PlaceOptions
+from .options import MBFFOptions, PlaceOptions
 from .placer_base import PlacerBase, PlacerBaseCommon
 from .route_base import RouteBase, RouteBaseVars
 from .timing_base import TimingBase
@@ -18,6 +19,9 @@ def isValidSigType(db_type: SigType) -> bool:
     """对应 `isValidSigType`：GPL 只处理 SIGNAL/CLOCK。"""
 
     return db_type in {SigType.SIGNAL, SigType.CLOCK}
+
+
+T = TypeVar("T")
 
 
 class Replace:
@@ -58,6 +62,10 @@ class Replace:
         self.gui_debug_rudy_stride_ = 0
         self.gui_debug_generate_images_ = False
         self.gui_debug_images_path_ = "REPORTS_DIR"
+        self.flow_reports_: List[Dict[str, Any]] = []
+        self.last_error_: Optional[Dict[str, Any]] = None
+        self.mbff_options_: Optional[MBFFOptions] = None
+        self.mbff_report_: Dict[str, Any] = {}
 
     def setGraphicsInterface(self, graphics: AbstractGraphics) -> None:
         self.graphics_ = graphics.MakeNew(self.log_)
@@ -72,6 +80,10 @@ class Replace:
         self.tb_ = None
         self.rb_ = None
         self.total_placeable_insts_ = 0
+        self.flow_reports_.clear()
+        self.last_error_ = None
+        self.mbff_options_ = None
+        self.mbff_report_ = {}
 
     def addPlacementCluster(self, cluster: Cluster) -> None:
         self.clusters_.append(list(cluster))
@@ -110,6 +122,48 @@ class Replace:
         if not isinstance(threads, int) or threads <= 0:
             raise ValueError("threads must be a positive integer")
 
+    def _options_report(self, options: Optional[PlaceOptions]) -> Dict[str, Any]:
+        return options.report() if options is not None else {}
+
+    def _base_counts(self) -> Dict[str, Any]:
+        return {
+            "placeable_insts": self.total_placeable_insts_,
+            "clusters": len(self.clusters_),
+            "placer_bases": len(self.pbVec_),
+            "nesterov_bases": len(self.nbVec_),
+            "has_pbc": self.pbc_ is not None,
+            "has_nbc": self.nbc_ is not None,
+            "has_initial_place": self.ip_ is not None,
+            "has_nesterov_place": self.np_ is not None,
+            "has_route_base": self.rb_ is not None,
+            "has_timing_base": self.tb_ is not None,
+        }
+
+    def _run_stage(self, name: str, action: Callable[[], T], options: Optional[PlaceOptions] = None, extra: Optional[Dict[str, Any]] = None) -> T:
+        started = monotonic()
+        report: Dict[str, Any] = {
+            "stage": name,
+            "status": "running",
+            "options": self._options_report(options),
+            "before": self._base_counts(),
+        }
+        if extra:
+            report.update(extra)
+        self.flow_reports_.append(report)
+        try:
+            result = action()
+        except Exception as exc:
+            report["status"] = "error"
+            report["error"] = {"type": type(exc).__name__, "message": str(exc)}
+            report["after"] = self._base_counts()
+            report["elapsed_sec"] = monotonic() - started
+            self.last_error_ = dict(report["error"])
+            raise
+        report["status"] = "ok"
+        report["after"] = self._base_counts()
+        report["elapsed_sec"] = monotonic() - started
+        return result
+
     def doIncrementalPlace(self, threads: int, options: Optional[PlaceOptions] = None) -> None:
         options = options or PlaceOptions()
         options.validate(self.log_)
@@ -137,23 +191,29 @@ class Replace:
         options = options or PlaceOptions()
         options.validate(self.log_)
         self._validate_threads(threads)
-        self.doInitialPlace(threads, options)
-        self.doNesterovPlace(threads, options)
+        def action() -> None:
+            self.doInitialPlace(threads, options)
+            self.doNesterovPlace(threads, options)
+
+        self._run_stage("doPlace", action, options, {"threads": threads})
 
     def doInitialPlace(self, threads: int, options: Optional[PlaceOptions] = None) -> None:
         options = options or PlaceOptions()
         options.validate(self.log_)
         self._validate_threads(threads)
         self.checkHasCoreRows()
-        if self.pbc_ is None:
-            self.pbc_ = PlacerBaseCommon(self.db_, options, self.log_)  # type: ignore[arg-type]
-            self.pbVec_.append(PlacerBase(self.db_, self.pbc_, self.log_, True))
-            if self.pbVec_ and not self.pbVec_[0].placeInsts():
-                self.pbVec_.pop(0)
-            self.total_placeable_insts_ = sum(len(pb.placeInsts()) for pb in self.pbVec_)
-        ipVars = InitialPlaceVars.from_options(options, self.gui_debug_initial_)
-        self.ip_ = InitialPlace(ipVars, self.pbc_, self.pbVec_, self.graphics_.MakeNew(self.log_), self.log_)  # type: ignore[arg-type]
-        self.ip_.doBicgstabPlace(threads)
+        def action() -> None:
+            if self.pbc_ is None:
+                self.pbc_ = PlacerBaseCommon(self.db_, options, self.log_)  # type: ignore[arg-type]
+                self.pbVec_.append(PlacerBase(self.db_, self.pbc_, self.log_, True))
+                if self.pbVec_ and not self.pbVec_[0].placeInsts():
+                    self.pbVec_.pop(0)
+                self.total_placeable_insts_ = sum(len(pb.placeInsts()) for pb in self.pbVec_)
+            ipVars = InitialPlaceVars.from_options(options, self.gui_debug_initial_)
+            self.ip_ = InitialPlace(ipVars, self.pbc_, self.pbVec_, self.graphics_.MakeNew(self.log_), self.log_)  # type: ignore[arg-type]
+            self.ip_.doBicgstabPlace(threads)
+
+        self._run_stage("doInitialPlace", action, options, {"threads": threads})
 
     def doNesterovPlace(self, threads: int, options: Optional[PlaceOptions] = None, start_iter: int = 0) -> int:
         options = options or PlaceOptions()
@@ -162,15 +222,45 @@ class Replace:
         if start_iter < 0:
             raise ValueError("start_iter must be non-negative")
         self.checkHasCoreRows()
-        if not self.initNesterovPlace(options, threads, True):
-            return 0
-        if options.timingDrivenMode and self.rs_ is not None and hasattr(self.rs_, "resizeSlackPreamble"):
-            self.rs_.resizeSlackPreamble()
-        assert self.np_ is not None
-        return self.np_.doNesterovPlace(start_iter)
+        def action() -> int:
+            if not self.initNesterovPlace(options, threads, True):
+                return 0
+            if options.timingDrivenMode and self.rs_ is not None and hasattr(self.rs_, "resizeSlackPreamble"):
+                self.rs_.resizeSlackPreamble()
+            assert self.np_ is not None
+            return self.np_.doNesterovPlace(start_iter)
 
-    def runMBFF(self, max_sz: int, alpha: float, beta: float, threads: int, num_paths: int) -> None:
-        raise NotImplementedError("OpenROAD MBFF clustering has not been translated yet")
+        return self._run_stage("doNesterovPlace", action, options, {"threads": threads, "start_iter": start_iter})
+
+    def runMBFF(self, max_sz: int, alpha: float, beta: float, threads: int, num_paths: int) -> Dict[str, Any]:
+        options = MBFFOptions(max_sz=max_sz, alpha=alpha, beta=beta, threads=threads, num_paths=num_paths)
+        options.validate(self.log_)
+        self._validate_threads(threads)
+        self.mbff_options_ = options
+        block = _get_block(self.db_)
+        insts = list(getattr(block, "insts", {}).values()) if isinstance(getattr(block, "insts", None), dict) else list(getattr(block, "insts", []) or [])
+        movable = [
+            inst
+            for inst in insts
+            if getattr(inst, "status", PlacementStatus.UNPLACED) not in {PlacementStatus.FIXED, PlacementStatus.COVER, PlacementStatus.LOCKED}
+        ]
+        self.mbff_report_ = {
+            "status": "not_run",
+            "implemented": False,
+            "reason": "OpenROAD MBFF clustering has not been translated; no clustering was created or modified.",
+            "config": options.report(),
+            "design": {
+                "has_block": block is not None,
+                "inst_count": len(insts),
+                "movable_inst_count": len(movable),
+                "placeable_insts": self.total_placeable_insts_,
+            },
+            "clusters_before": len(self.clusters_),
+            "clusters_after": len(self.clusters_),
+            "clusters_created": 0,
+        }
+        self.flow_reports_.append({"stage": "runMBFF", "status": "boundary", "mbff": dict(self.mbff_report_), "after": self._base_counts()})
+        return dict(self.mbff_report_)
 
     def resetRoutabilityResources(self) -> None:
         self.rb_ = None
@@ -227,6 +317,12 @@ class Replace:
             "cluster_sizes": [len(cluster) for cluster in self.clusters_],
         }
 
+    def reportFlow(self) -> List[Dict[str, Any]]:
+        return [dict(item) for item in self.flow_reports_]
+
+    def reportMBFF(self) -> Dict[str, Any]:
+        return dict(self.mbff_report_)
+
     def reportStatus(self) -> Dict[str, Any]:
         return {
             "placeable_insts": self.total_placeable_insts_,
@@ -241,6 +337,9 @@ class Replace:
             "timing": self.reportTimingDriven(),
             "debug": self.reportDebug(),
             "cluster_report": self.reportClusters(),
+            "flow": self.reportFlow(),
+            "last_error": self.last_error_,
+            "mbff": self.reportMBFF(),
             "base_common": self.pbc_.reportConnectivity() if self.pbc_ is not None else {},
             "placer_bases": [pb.reportStatus() for pb in self.pbVec_],
             "nesterov_base_common": self.nbc_.reportStatus() if self.nbc_ is not None else {},
@@ -295,42 +394,45 @@ class Replace:
     def initNesterovPlace(self, options: PlaceOptions, threads: int, check_density: bool) -> bool:
         options.validate(self.log_)
         self._validate_threads(threads)
-        if self.pbc_ is None:
-            self.pbc_ = PlacerBaseCommon(self.db_, options, self.log_)  # type: ignore[arg-type]
-            self.pbVec_.append(PlacerBase(self.db_, self.pbc_, self.log_, check_density))
-            self.total_placeable_insts_ = sum(len(pb.placeInsts()) for pb in self.pbVec_)
-        if self.total_placeable_insts_ == 0:
-            return False
-        if self.nbc_ is None:
-            nbVars = NesterovBaseVars.from_options(options)
-            self.nbc_ = NesterovBaseCommon(nbVars, self.pbc_, self.log_, threads, self.clusters_)
-            for pb in self.pbVec_:
-                self.nbVec_.append(NesterovBase(nbVars, pb, self.nbc_, self.log_))
-        if self.rb_ is None:
-            self.rb_ = RouteBase(RouteBaseVars.from_options(options), self.db_, self.fr_, self.nbc_, self.nbVec_, self.log_)
-            self.rb_.initRouteBase()
-        if self.tb_ is None:
-            self.tb_ = TimingBase(self.nbc_, self.fr_, self.rs_, self.log_)
-            self.tb_.setTimingNetWeightOverflows(options.timingNetWeightOverflows)
-            self.tb_.setTimingNetWeightMax(options.timingNetWeightMax)
-        if self.np_ is None:
-            npVars = NesterovPlaceVars.from_options(options)
-            npVars.debug = self.gui_debug_
-            npVars.debug_pause_iterations = self.gui_debug_pause_iterations_
-            npVars.debug_update_iterations = self.gui_debug_update_iterations_
-            npVars.debug_draw_bins = self.gui_debug_draw_bins_
-            npVars.debug_inst = self.gui_debug_inst_
-            npVars.debug_start_iter = self.gui_debug_start_iter_
-            npVars.debug_rudy_start = self.gui_debug_rudy_start_
-            npVars.debug_rudy_stride = self.gui_debug_rudy_stride_
-            npVars.debug_generate_images = self.gui_debug_generate_images_
-            npVars.debug_images_path = self.gui_debug_images_path_
-            for nb in self.nbVec_:
-                nb.setNpVars(npVars)
-            self.np_ = NesterovPlace(npVars, self.pbc_, self.nbc_, self.pbVec_, self.nbVec_, self.rb_, self.tb_, self.graphics_.MakeNew(self.log_), self.log_)
-        self.np_.setTargetOverflow(options.overflow)
-        self.np_.setMaxIters(options.nesterovPlaceMaxIter)
-        return True
+        def action() -> bool:
+            if self.pbc_ is None:
+                self.pbc_ = PlacerBaseCommon(self.db_, options, self.log_)  # type: ignore[arg-type]
+                self.pbVec_.append(PlacerBase(self.db_, self.pbc_, self.log_, check_density))
+                self.total_placeable_insts_ = sum(len(pb.placeInsts()) for pb in self.pbVec_)
+            if self.total_placeable_insts_ == 0:
+                return False
+            if self.nbc_ is None:
+                nbVars = NesterovBaseVars.from_options(options)
+                self.nbc_ = NesterovBaseCommon(nbVars, self.pbc_, self.log_, threads, self.clusters_)
+                for pb in self.pbVec_:
+                    self.nbVec_.append(NesterovBase(nbVars, pb, self.nbc_, self.log_))
+            if self.rb_ is None:
+                self.rb_ = RouteBase(RouteBaseVars.from_options(options), self.db_, self.fr_, self.nbc_, self.nbVec_, self.log_)
+                self.rb_.initRouteBase()
+            if self.tb_ is None:
+                self.tb_ = TimingBase(self.nbc_, self.fr_, self.rs_, self.log_)
+                self.tb_.setTimingNetWeightOverflows(options.timingNetWeightOverflows)
+                self.tb_.setTimingNetWeightMax(options.timingNetWeightMax)
+            if self.np_ is None:
+                npVars = NesterovPlaceVars.from_options(options)
+                npVars.debug = self.gui_debug_
+                npVars.debug_pause_iterations = self.gui_debug_pause_iterations_
+                npVars.debug_update_iterations = self.gui_debug_update_iterations_
+                npVars.debug_draw_bins = self.gui_debug_draw_bins_
+                npVars.debug_inst = self.gui_debug_inst_
+                npVars.debug_start_iter = self.gui_debug_start_iter_
+                npVars.debug_rudy_start = self.gui_debug_rudy_start_
+                npVars.debug_rudy_stride = self.gui_debug_rudy_stride_
+                npVars.debug_generate_images = self.gui_debug_generate_images_
+                npVars.debug_images_path = self.gui_debug_images_path_
+                for nb in self.nbVec_:
+                    nb.setNpVars(npVars)
+                self.np_ = NesterovPlace(npVars, self.pbc_, self.nbc_, self.pbVec_, self.nbVec_, self.rb_, self.tb_, self.graphics_.MakeNew(self.log_), self.log_)
+            self.np_.setTargetOverflow(options.overflow)
+            self.np_.setMaxIters(options.nesterovPlaceMaxIter)
+            return True
+
+        return self._run_stage("initNesterovPlace", action, options, {"threads": threads, "check_density": check_density})
 
     def getUniformTargetDensity(self, options: Optional[PlaceOptions] = None, threads: int = 1) -> float:
         options = options or PlaceOptions()

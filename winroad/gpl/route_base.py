@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import ceil, floor, sqrt
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from ..odb import DbDatabase
@@ -54,9 +55,20 @@ class Tile:
     layers_: int = 0
     inflationRatio_: float = 1.0
     inflatedRatio_: float = 0.0
+    routeDemand_: float = 0.0
+    routeCapacity_: float = 0.0
+    routeOverflow_: float = 0.0
+    horizontalDemand_: float = 0.0
+    verticalDemand_: float = 0.0
 
     def area(self) -> int:
         return _area((self.lx_, self.ly_, self.ux_, self.uy_))
+
+    def dx(self) -> int:
+        return max(0, self.ux_ - self.lx_)
+
+    def dy(self) -> int:
+        return max(0, self.uy_ - self.ly_)
 
     def inflationRatio(self) -> float:
         return self.inflationRatio_
@@ -70,6 +82,27 @@ class Tile:
     def setInflatedRatio(self, ratio: float) -> None:
         self.inflatedRatio_ = ratio
 
+    def resetRouteDemand(self) -> None:
+        self.routeDemand_ = 0.0
+        self.routeOverflow_ = 0.0
+        self.horizontalDemand_ = 0.0
+        self.verticalDemand_ = 0.0
+
+    def addRouteDemand(self, demand: float, horizontal: float = 0.0, vertical: float = 0.0) -> None:
+        self.routeDemand_ += max(0.0, demand)
+        self.horizontalDemand_ += max(0.0, horizontal)
+        self.verticalDemand_ += max(0.0, vertical)
+
+    def setRouteCapacity(self, capacity: float) -> None:
+        self.routeCapacity_ = max(0.0, capacity)
+
+    def updateOverflow(self) -> float:
+        self.routeOverflow_ = max(0.0, self.routeDemand_ - self.routeCapacity_)
+        return self.routeOverflow_
+
+    def congestion(self) -> float:
+        return self.routeDemand_ / self.routeCapacity_ if self.routeCapacity_ > 0.0 else 0.0
+
     def report(self) -> Dict[str, Any]:
         """导出 tile 状态，真实 RUDY/GR 计算仍由未翻译入口负责。"""
 
@@ -80,6 +113,12 @@ class Tile:
             "area": self.area(),
             "inflation_ratio": self.inflationRatio_,
             "inflated_ratio": self.inflatedRatio_,
+            "route_demand": self.routeDemand_,
+            "route_capacity": self.routeCapacity_,
+            "route_overflow": self.routeOverflow_,
+            "horizontal_demand": self.horizontalDemand_,
+            "vertical_demand": self.verticalDemand_,
+            "congestion": self.congestion(),
         }
 
 
@@ -175,6 +214,32 @@ class TileGrid:
                 self.tileStor_.append(Tile(x, y, lx, ly, lx + self.tileSizeX_, ly + self.tileSizeY_, self.numRoutingLayers_))
         self.tiles_ = list(self.tileStor_)
 
+    def resetRouteDemand(self) -> None:
+        for tile in self.tiles_:
+            tile.resetRouteDemand()
+
+    def setDefaultCapacity(self) -> None:
+        for tile in self.tiles_:
+            # Python 层没有 routing-track 数据时，用 tile 面积乘 routing layer 数作为
+            # 归一化容量；RUDY demand 使用同一面积单位，报告值可稳定比较。
+            tile.setRouteCapacity(float(tile.area() * max(1, tile.layers_ or self.numRoutingLayers_ or 1)))
+            tile.updateOverflow()
+
+    def iterOverlappingTiles(self, lx: int, ly: int, ux: int, uy: int) -> List[Tile]:
+        if not self.tiles_ or self.tileSizeX_ <= 0 or self.tileSizeY_ <= 0:
+            return []
+        gx0 = max(0, min(self.tileCntX_ - 1, floor((lx - self.lx_) / self.tileSizeX_)))
+        gy0 = max(0, min(self.tileCntY_ - 1, floor((ly - self.ly_) / self.tileSizeY_)))
+        gx1 = max(0, min(self.tileCntX_ - 1, floor((max(lx, ux - 1) - self.lx_) / self.tileSizeX_)))
+        gy1 = max(0, min(self.tileCntY_ - 1, floor((max(ly, uy - 1) - self.ly_) / self.tileSizeY_)))
+        result: List[Tile] = []
+        for y in range(gy0, gy1 + 1):
+            for x in range(gx0, gx1 + 1):
+                tile = self.getTile(x, y)
+                if tile is not None:
+                    result.append(tile)
+        return result
+
     def reportStatus(self, sample_limit: int = 0) -> Dict[str, Any]:
         """导出 tile grid 几何配置，供 RouteBase 报告和 smoke 使用。"""
 
@@ -187,10 +252,23 @@ class TileGrid:
             "origin": (self.lx_, self.ly_),
             "box": (self.lx(), self.ly(), self.ux(), self.uy()),
             "routing_layers": self.numRoutingLayers_,
+            "average_congestion": self.averageCongestion(),
+            "overflowed_tiles": sum(1 for tile in self.tiles_ if tile.routeOverflow_ > 0.0),
         }
         if sample_limit > 0:
             report["sample_tiles"] = [tile.report() for tile in self.tiles_[:sample_limit]]
         return report
+
+    def heatmap(self) -> List[List[float]]:
+        return [
+            [self.getTile(x, y).congestion() if self.getTile(x, y) is not None else 0.0 for x in range(self.tileCntX_)]
+            for y in range(self.tileCntY_)
+        ]
+
+    def averageCongestion(self) -> float:
+        if not self.tiles_:
+            return 0.0
+        return sum(tile.congestion() for tile in self.tiles_) / len(self.tiles_)
 
 
 class RouteBase:
@@ -231,6 +309,9 @@ class RouteBase:
         self.congestion_history_: List[Dict[str, float]] = []
         self.tile_inflation_ratios_: Dict[int, float] = {}
         self.minRcCellSizes_: Dict[int, Tuple[int, int]] = {}
+        self.gcell_base_sizes_: Dict[int, Tuple[int, int]] = {}
+        self.rudy_net_count_ = 0
+        self.rudy_pin_count_ = 0
         self.tg_.setLogger(log)
 
     def setNesterovBaseCommon(self, nbc: NesterovBaseCommon) -> None:
@@ -267,14 +348,66 @@ class RouteBase:
         raise NotImplementedError("OpenROAD GR RC metric has not been translated yet")
 
     def calculateRudyTiles(self) -> None:
-        raise NotImplementedError("OpenROAD RUDY tile calculation has not been translated yet")
+        """用现有 GNet/GPin bbox 计算轻量 RUDY tile demand。
+
+        这里不调用 FastRoute/ODB。RUDY demand 只来自 Python Nesterov 对象中的
+        net pin 坐标，按 net bbox 与 tile 的重叠面积分摊到 tile。
+        """
+
+        self.tg_.resetRouteDemand()
+        self.tg_.setDefaultCapacity()
+        self.rudy_net_count_ = 0
+        self.rudy_pin_count_ = 0
+        if not self.tg_.tiles_:
+            self.final_average_rc_ = 0.0
+            self.overflowed_tiles_count_ = 0
+            self.total_route_overflow_ = 0.0
+            return
+
+        for net in self._iterGNets():
+            pins = self._netPins(net)
+            if len(pins) < 2:
+                continue
+            bbox = self._pinBBox(pins)
+            if bbox is None:
+                continue
+            lx, ly, ux, uy = bbox
+            width = max(1, ux - lx)
+            height = max(1, uy - ly)
+            bbox_area = float(max(1, width * height))
+            wire_area = float((width + height) * max(1, min(self.tg_.tileSizeX_, self.tg_.tileSizeY_)))
+            weight = float(getattr(net, "getTotalWeight", lambda: 1.0)())
+            self.rudy_net_count_ += 1
+            self.rudy_pin_count_ += len(pins)
+
+            for tile in self.tg_.iterOverlappingTiles(lx, ly, ux + 1, uy + 1):
+                overlap = self._overlapArea((lx, ly, ux + 1, uy + 1), (tile.lx_, tile.ly_, tile.ux_, tile.uy_))
+                if overlap <= 0:
+                    continue
+                share = overlap / bbox_area
+                horizontal = width * max(1, tile.dy()) * share * weight
+                vertical = height * max(1, tile.dx()) * share * weight
+                tile.addRouteDemand(wire_area * share * weight, horizontal, vertical)
+
+        for tile in self.tg_.tiles_:
+            tile.updateOverflow()
 
     def updateRudyRoute(self) -> None:
         self.calculateRudyTiles()
         self.updateRudyAverage(False)
 
     def updateRudyAverage(self, verbose: bool = True) -> None:
-        raise NotImplementedError("OpenROAD RUDY average update has not been translated yet")
+        tiles = self.tg_.tiles()
+        if not tiles:
+            self.final_average_rc_ = 0.0
+            self.overflowed_tiles_count_ = 0
+            self.total_route_overflow_ = 0.0
+            return
+        self.final_average_rc_ = sum(tile.congestion() for tile in tiles) / len(tiles)
+        self.overflowed_tiles_count_ = sum(1 for tile in tiles if tile.routeOverflow_ > 0.0)
+        self.total_route_overflow_ = sum(tile.routeOverflow_ for tile in tiles)
+        if verbose:
+            self.saveCongestionSnapshot(rc=self.final_average_rc_, overflow=self.total_route_overflow_)
 
     def updateRoute(self) -> None:
         if self.rbVars_.useRudy:
@@ -302,13 +435,64 @@ class RouteBase:
         return self.is_min_rc_
 
     def routability(self, routability_driven_revert_count: int) -> Tuple[bool, bool]:
-        raise NotImplementedError("OpenROAD routability-driven inflation loop has not been translated yet")
+        self.updateRoute()
+        rc = self.getRC()
+        self.saveCongestionSnapshot(rc=rc, overflow=self.total_route_overflow_)
+        if rc <= self.rbVars_.targetRC:
+            return False, False
+        if routability_driven_revert_count >= self.max_routability_revert_:
+            return False, True
+        self.updateInflationRatio()
+        self.updateGCellSize()
+        return True, False
 
     def updateInflationRatio(self) -> None:
-        raise NotImplementedError("OpenROAD routability inflation-ratio update has not been translated yet")
+        target = max(1.0e-12, self.rbVars_.targetRC)
+        coef = max(0.0, self.rbVars_.inflationRatioCoef)
+        min_ratio = max(1.0, self.rbVars_.minInflationRatio)
+        max_ratio = max(min_ratio, self.rbVars_.maxInflationRatio)
+        self.tile_inflation_ratios_.clear()
+        for tile in self.tg_.tiles():
+            congestion = tile.congestion()
+            excess = max(0.0, congestion - target)
+            ratio = min(max_ratio, max(min_ratio, 1.0 + coef * excess / target))
+            tile.setInflationRatio(ratio)
+            tile.setInflatedRatio(congestion / target if target > 0.0 else 0.0)
+            self.tile_inflation_ratios_[id(tile)] = ratio
 
     def updateGCellSize(self) -> None:
-        raise NotImplementedError("OpenROAD routability gcell size update has not been translated yet")
+        if not self.nbVec_:
+            return
+        if not self.tile_inflation_ratios_:
+            self.updateInflationRatio()
+        self.inflatedAreaDelta_ = [0 for _ in self.nbVec_]
+        if len(self.accumulatedInflatedAreaDelta_) != len(self.nbVec_):
+            self.accumulatedInflatedAreaDelta_ = [0 for _ in self.nbVec_]
+
+        for nb_index, nb in enumerate(self.nbVec_):
+            area_delta = 0
+            for gcell in nb.getGCells():
+                if getattr(gcell, "isLocked", lambda: False)():
+                    continue
+                tile = self._tileForPoint(gcell.cx(), gcell.cy())
+                if tile is None:
+                    continue
+                ratio = max(1.0, tile.inflationRatio())
+                key = id(gcell)
+                base_dx, base_dy = self.gcell_base_sizes_.setdefault(key, (max(1, gcell.dx()), max(1, gcell.dy())))
+                scale = sqrt(ratio)
+                new_dx = max(1, int(round(base_dx * scale)))
+                new_dy = max(1, int(round(base_dy * scale)))
+                old_area = max(0, gcell.dx() * gcell.dy())
+                new_area = max(0, new_dx * new_dy)
+                if new_area == old_area:
+                    continue
+                gcell.setSize(new_dx, new_dy, GCellChange.kRoutability)
+                area_delta += new_area - old_area
+            self.inflatedAreaDelta_[nb_index] = area_delta
+            self.accumulatedInflatedAreaDelta_[nb_index] += area_delta
+            nb.updateAreas()
+            self._updateTargetDensity(nb)
 
     def revertGCellSizeToMinRc(self) -> None:
         if not self.minRcCellSizes_:
@@ -412,6 +596,69 @@ class RouteBase:
         self.route_utilization_.clear()
         self.congestion_history_.clear()
 
+    def importRudyHeatmap(self, heatmap: Sequence[Sequence[float]], capacity: Optional[float] = None) -> None:
+        """导入外部 heatmap 到 tile demand。
+
+        heatmap 值按 congestion ratio 解释；若未指定容量，使用 tile 当前容量或默认
+        容量。该接口只更新 tile 数据，不触发 FastRoute。
+        """
+
+        self.tg_.setDefaultCapacity()
+        for y, row in enumerate(heatmap):
+            for x, value in enumerate(row):
+                tile = self.tg_.getTile(x, y)
+                if tile is None:
+                    continue
+                tile.resetRouteDemand()
+                tile_capacity = float(capacity) if capacity is not None else tile.routeCapacity_
+                tile.setRouteCapacity(tile_capacity)
+                tile.addRouteDemand(max(0.0, float(value)) * tile.routeCapacity_)
+                tile.updateOverflow()
+        self.updateRudyAverage(False)
+
+    def importTileCongestion(self, items: Sequence[Dict[str, Any]]) -> None:
+        """按 tile 字典导入 congestion/demand/capacity。"""
+
+        self.tg_.setDefaultCapacity()
+        for item in items:
+            index = item.get("index", (item.get("x", 0), item.get("y", 0)))
+            x, y = int(index[0]), int(index[1])
+            tile = self.tg_.getTile(x, y)
+            if tile is None:
+                continue
+            tile.resetRouteDemand()
+            if "route_capacity" in item:
+                tile.setRouteCapacity(float(item["route_capacity"]))
+            elif "capacity" in item:
+                tile.setRouteCapacity(float(item["capacity"]))
+            if "route_demand" in item:
+                tile.addRouteDemand(float(item["route_demand"]))
+            elif "demand" in item:
+                tile.addRouteDemand(float(item["demand"]))
+            elif "congestion" in item:
+                tile.addRouteDemand(float(item["congestion"]) * tile.routeCapacity_)
+            tile.updateOverflow()
+        self.updateRudyAverage(False)
+
+    def exportRudyHeatmap(self) -> List[List[float]]:
+        return self.tg_.heatmap()
+
+    def reportTileCongestion(self, sample_limit: int = 0) -> Dict[str, Any]:
+        tiles = self.tg_.tiles()
+        worst = max((tile.congestion() for tile in tiles), default=0.0)
+        report: Dict[str, Any] = {
+            "average_congestion": self.final_average_rc_,
+            "worst_congestion": worst,
+            "overflowed_tiles": self.overflowed_tiles_count_,
+            "total_overflow": self.total_route_overflow_,
+            "rudy_nets": self.rudy_net_count_,
+            "rudy_pins": self.rudy_pin_count_,
+            "heatmap": self.exportRudyHeatmap(),
+        }
+        if sample_limit > 0:
+            report["sample_tiles"] = [tile.report() for tile in tiles[:sample_limit]]
+        return report
+
     def reportCongestion(self) -> Dict[str, Any]:
         return {
             "use_rudy": self.rbVars_.useRudy,
@@ -429,8 +676,73 @@ class RouteBase:
             "utilization_history": list(self.route_utilization_),
             "congestion_history": [dict(item) for item in self.congestion_history_],
             "tile_grid": self.tg_.reportStatus(),
+            "tile_congestion": self.reportTileCongestion(),
             "min_rc_saved_cells": len(self.minRcCellSizes_),
             "min_rc_saved_regions": len(self.minRcTargetDensity_),
         }
+
+    def _iterGNets(self) -> List[Any]:
+        nets: List[Any] = []
+        seen = set()
+        for nb in self.nbVec_:
+            getter = getattr(nb, "getGNets", None)
+            if not callable(getter):
+                continue
+            for net in getter():
+                key = id(net)
+                if key not in seen:
+                    seen.add(key)
+                    nets.append(net)
+        if self.nbc_ is not None:
+            getter = getattr(self.nbc_, "getGNets", None)
+            if callable(getter):
+                for net in getter():
+                    key = id(net)
+                    if key not in seen:
+                        seen.add(key)
+                        nets.append(net)
+        return nets
+
+    def _netPins(self, net: Any) -> List[Any]:
+        getter = getattr(net, "getGPins", None)
+        return list(getter()) if callable(getter) else list(getattr(net, "gPins_", []))
+
+    def _pinBBox(self, pins: Sequence[Any]) -> Optional[Tuple[int, int, int, int]]:
+        coords: List[Tuple[int, int]] = []
+        for pin in pins:
+            cx = getattr(pin, "cx", None)
+            cy = getattr(pin, "cy", None)
+            x = cx() if callable(cx) else getattr(pin, "cx_", None)
+            y = cy() if callable(cy) else getattr(pin, "cy_", None)
+            if x is not None and y is not None:
+                coords.append((int(x), int(y)))
+        if len(coords) < 2:
+            return None
+        xs = [coord[0] for coord in coords]
+        ys = [coord[1] for coord in coords]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def _overlapArea(self, a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> int:
+        lx = max(a[0], b[0])
+        ly = max(a[1], b[1])
+        ux = min(a[2], b[2])
+        uy = min(a[3], b[3])
+        return _area((lx, ly, ux, uy))
+
+    def _tileForPoint(self, x: int, y: int) -> Optional[Tile]:
+        if self.tg_.tileSizeX_ <= 0 or self.tg_.tileSizeY_ <= 0:
+            return None
+        tx = int((x - self.tg_.lx_) // self.tg_.tileSizeX_)
+        ty = int((y - self.tg_.ly_) // self.tg_.tileSizeY_)
+        return self.tg_.getTile(tx, ty)
+
+    def _updateTargetDensity(self, nb: NesterovBase) -> None:
+        max_density = min(1.0, max(0.0, self.rbVars_.maxDensity))
+        if max_density <= 0.0:
+            return
+        region_area = max(1, getattr(nb.pb_, "getRegionArea", lambda: 1)())
+        movable_area = max(0, nb.getMovableArea())
+        target_density = min(max_density, max(0.01, movable_area / region_area))
+        nb.setTargetDensity(target_density)
 
 

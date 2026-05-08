@@ -184,3 +184,39 @@ class PlaceOptions:
         }
 
 
+@dataclass
+class MBFFOptions:
+    """对应 Replace::runMBFF 的参数边界。
+
+    真实 multi-bit flip-flop 聚类需要 OpenROAD 的时序/物理聚类算法；这里仅保存
+    Tcl/Python 入口参数并做可复用校验，避免上层把未翻译算法误认为已经执行。
+    """
+
+    max_sz: int
+    alpha: float
+    beta: float
+    threads: int
+    num_paths: int
+
+    def validate(self, logger: Any = None) -> None:
+        if not isinstance(self.max_sz, int) or self.max_sz <= 1:
+            raise ValueError("MBFF max_sz must be an integer greater than 1")
+        if not isinstance(self.threads, int) or self.threads <= 0:
+            raise ValueError("MBFF threads must be a positive integer")
+        if not isinstance(self.num_paths, int) or self.num_paths < 0:
+            raise ValueError("MBFF num_paths must be a non-negative integer")
+        if not isfinite(self.alpha) or self.alpha < 0.0:
+            raise ValueError("MBFF alpha must be a finite non-negative number")
+        if not isfinite(self.beta) or self.beta < 0.0:
+            raise ValueError("MBFF beta must be a finite non-negative number")
+
+    def report(self) -> Dict[str, Any]:
+        return {
+            "max_sz": self.max_sz,
+            "alpha": self.alpha,
+            "beta": self.beta,
+            "threads": self.threads,
+            "num_paths": self.num_paths,
+        }
+
+
