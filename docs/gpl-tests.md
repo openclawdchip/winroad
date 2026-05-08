@@ -222,5 +222,6 @@ python -m unittest discover -s tests\gpl -p "test_*.py"
 ## 当前状态
 
 - OpenROAD GPL test 目录已经登记到 WinRoad 项目文档。
-- `fft_test.cc` 应作为第一批测试移植目标，因为它不依赖完整 OpenDB/Tcl 流程，直接验证已经翻译的 `FFT` 数值核心。
+- 已新增 `tests/gpl/test_fft.py`，作为 `fft_test.cc` 的 Python 对照测试。
+- `fft_test.cc` 是第一批已可落地的数值测试，因为它不依赖完整 OpenDB/Tcl 流程，直接验证已经翻译的 `FFT` 数值核心。
 - 其余集成测试需要随着 ODB/LEF/DEF/Tcl/STA/GRT 支撑逐步打开完整 golden diff。
