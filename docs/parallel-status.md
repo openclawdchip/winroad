@@ -265,3 +265,10 @@ OpenDB/FastRoute/STA/FFT 的 Python 可落地逻辑补上；真实外部依赖�
 - `initialPlace/solver`：按 `initialPlace.cpp` 与 `solver.cpp` 翻译 B2B sparse matrix stamping、min/max pin 标记、BiCGSTAB `cpuSparseSolve()` 调用形状。
 - `routeBase/timingBase`：按 `routeBase.cpp`、`timingBase.cpp` 对齐 RUDY/GR congestion、routability 回退、timing overflow checkpoint 和 timing-driven weight update。
 - `replace/placer/graphics/mbff`：补 `Replace.h` setter、`Replace::init`、`Instance::area`、core overlap helpers、unusable site init、graphics heatmap/no-GUI 入口和 MBFF 边界报告。
+
+### 第十一轮测试要求补充
+
+- OpenROAD GPL 原测试目录固定为 `C:\Users\yh-PC-003\Desktop\codex\OpenROAD\src\gpl\test`。
+- 已新增 `docs/gpl-tests.md`，登记原 CMake 集成测试、`fft_test.cc`、`.py/.tcl/.ok/.defok` 资产和源码责任区对应测试。
+- 后续 GPL 每轮完成后，除了 `py_compile`、import smoke、`git diff --check`，还必须按本轮修改的源码责任区运行或补齐 `docs/gpl-tests.md` 中对应测试。
+- 第一批应优先移植 `fft_test.cc`，因为它直接验证 `fft.py` 数值结果且不依赖完整 OpenDB/Tcl 流程。

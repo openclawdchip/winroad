@@ -3,6 +3,7 @@
 ## OpenROAD 原 README 中文翻译
 
 - `docs/gpl-readme.zh.md`：由 `C:\Users\yh-PC-003\Desktop\codex\OpenROAD\src\gpl\README.md` 翻译而来，记录 OpenROAD GPL 的原始功能说明、Tcl 命令、参数、Python 接口、测试和参考文献。
+- `docs/gpl-tests.md`：登记 `C:\Users\yh-PC-003\Desktop\codex\OpenROAD\src\gpl\test` 的原始测试清单、源码责任区对应测试和 WinRoad 后续执行规则。以后 GPL 完成后必须对照这里跑相应测试。
 
 ## 包结构
 
