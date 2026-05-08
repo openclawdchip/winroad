@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .options import PlaceOptions
 from .placer_base import PlacerBase, PlacerBaseCommon
@@ -157,6 +157,209 @@ class InitialPlace:
             self.solutionVecY_[index] = float(inst.cy())
         self.matrix_nonzero_count_ = sum(len(row) for row in self.sparseMatrix_)
         self.matrix_is_b2b_stamped_ = False
+        if self.stampSparseMatrixFromPlaceBaseNets(raise_on_empty=False).get("stamped"):
+            return
+
+    def _add_matrix_value(self, rows: List[Dict[int, float]], row: int, col: int, value: float) -> None:
+        if value == 0.0:
+            return
+        rows[row][col] = rows[row].get(col, 0.0) + value
+
+    def _stamp_movable_pair(self, rows: List[Dict[int, float]], left: int, right: int, weight: float) -> None:
+        self._add_matrix_value(rows, left, left, weight)
+        self._add_matrix_value(rows, right, right, weight)
+        self._add_matrix_value(rows, left, right, -weight)
+        self._add_matrix_value(rows, right, left, -weight)
+
+    def _stamp_fixed_pair(
+        self,
+        rows: List[Dict[int, float]],
+        movable: int,
+        fixed_x: float,
+        fixed_y: float,
+        weight: float,
+    ) -> None:
+        self._add_matrix_value(rows, movable, movable, weight)
+        self.rhsVecX_[movable] += weight * fixed_x
+        self.rhsVecY_[movable] += weight * fixed_y
+        self.fixedInstForceVecX_[movable] += weight * fixed_x
+        self.fixedInstForceVecY_[movable] += weight * fixed_y
+
+    def _pin_mapping_value(self, pin: Mapping[str, Any], names: Sequence[str]) -> Any:
+        for name in names:
+            if name in pin:
+                return pin[name]
+        return None
+
+    def _resolve_python_pin(self, pin: Any, place_inst_index: Dict[int, int]) -> Optional[Dict[str, Any]]:
+        """Resolve a GPL Pin or a pure-Python pin spec without inventing connectivity."""
+
+        inst = None
+        index = None
+        x = y = None
+        fixed = False
+        if isinstance(pin, Mapping):
+            index = self._pin_mapping_value(pin, ("index", "inst_index", "place_inst_index", "ext_id"))
+            inst = self._pin_mapping_value(pin, ("inst", "instance", "place_inst"))
+            fixed = bool(self._pin_mapping_value(pin, ("fixed", "is_fixed")) or False)
+            x = self._pin_mapping_value(pin, ("x", "cx", "center_x"))
+            y = self._pin_mapping_value(pin, ("y", "cy", "center_y"))
+        elif isinstance(pin, (tuple, list)):
+            if len(pin) >= 3:
+                index, x, y = pin[0], pin[1], pin[2]
+            if len(pin) >= 4:
+                fixed = bool(pin[3])
+        else:
+            get_inst = getattr(pin, "getInstance", None)
+            inst = get_inst() if callable(get_inst) else getattr(pin, "inst_", None)
+            fixed = bool(getattr(pin, "isBTerm", lambda: False)())
+            x = pin.cx() if callable(getattr(pin, "cx", None)) else getattr(pin, "cx_", None)
+            y = pin.cy() if callable(getattr(pin, "cy", None)) else getattr(pin, "cy_", None)
+
+        if inst is not None:
+            index = place_inst_index.get(id(inst), index)
+            is_place = getattr(inst, "isPlaceInstance", None)
+            if callable(is_place) and not is_place():
+                fixed = True
+            if x is None:
+                x = inst.cx() if callable(getattr(inst, "cx", None)) else None
+            if y is None:
+                y = inst.cy() if callable(getattr(inst, "cy", None)) else None
+
+        if index is None:
+            if x is None or y is None:
+                return None
+            return {"movable": False, "x": float(x), "y": float(y)}
+
+        try:
+            index_int = int(index)
+        except (TypeError, ValueError):
+            return None
+        if index_int < 0 or index_int >= len(self.sparseMatrix_):
+            if x is None or y is None:
+                return None
+            return {"movable": False, "x": float(x), "y": float(y)}
+        if fixed:
+            if x is None or y is None:
+                return None
+            return {"movable": False, "x": float(x), "y": float(y)}
+        return {"movable": True, "index": index_int}
+
+    def _net_pins_and_weight(self, net: Any) -> Tuple[List[Any], float, Any]:
+        if isinstance(net, Mapping):
+            pins = self._pin_mapping_value(net, ("pins", "pin_specs"))
+            weight = self._pin_mapping_value(net, ("weight", "net_weight"))
+            name = self._pin_mapping_value(net, ("name", "net", "id"))
+        else:
+            get_pins = getattr(net, "getPins", None)
+            pins = get_pins() if callable(get_pins) else getattr(net, "pins", net)
+            weight = getattr(net, "weight", None)
+            db_net = net.getDbNet() if callable(getattr(net, "getDbNet", None)) else None
+            name = getattr(db_net, "name", None)
+        return list(pins or []), float(weight if weight is not None else 1.0), name
+
+    def _finalize_stamped_rows(self, rows: List[Dict[int, float]]) -> None:
+        self.sparseMatrix_ = [
+            sorted(
+                ((col, value) for col, value in row.items() if abs(value) > 1e-15),
+                key=lambda item: item[0],
+            )
+            for row in rows
+        ]
+        self.markSparseMatrixStamped(True)
+
+    def stampSparseMatrixFromPythonNets(self, nets: Sequence[Any], raise_on_empty: bool = True) -> Dict[str, Any]:
+        """Build a stamped sparse matrix from explicit Python net/pin data.
+
+        Accepted pin specs are GPL ``Pin`` objects, dicts containing an instance/index
+        plus optional coordinates, fixed coordinate dicts, or ``(index, x, y[, fixed])``.
+        Unknown connectivity is skipped or reported; it is never synthesized.
+        """
+
+        place_insts = self.pbc_.placeInsts()
+        if len(self.sparseMatrix_) != len(place_insts):
+            self.resizeReusableState(len(place_insts))
+        rows: List[Dict[int, float]] = [{} for _ in place_insts]
+        self.rhsVecX_ = [0.0 for _ in place_insts]
+        self.rhsVecY_ = [0.0 for _ in place_insts]
+        self.solutionVecX_ = [float(inst.cx()) for inst in place_insts]
+        self.solutionVecY_ = [float(inst.cy()) for inst in place_insts]
+        self.fixedInstForceVecX_ = [0.0 for _ in place_insts]
+        self.fixedInstForceVecY_ = [0.0 for _ in place_insts]
+
+        place_inst_index = {id(inst): index for index, inst in enumerate(place_insts)}
+        report: Dict[str, Any] = {
+            "format": "winroad-gpl-initial-place-python-net-stamp",
+            "version": 1,
+            "nets": len(nets),
+            "stamped_nets": 0,
+            "skipped_nets": 0,
+            "skipped_pins": 0,
+            "movable_pins": 0,
+            "fixed_pins": 0,
+            "fanout_limited_nets": 0,
+            "stamped": False,
+            "skips": [],
+        }
+
+        for net_index, net in enumerate(nets):
+            raw_pins, net_weight, name = self._net_pins_and_weight(net)
+            if net_weight <= 0.0 or not math.isfinite(net_weight):
+                raise ValueError(f"InitialPlace net weight must be positive and finite: {net_weight}")
+            if len(raw_pins) > self.ipVars_.maxFanout:
+                report["fanout_limited_nets"] += 1
+                report["skipped_nets"] += 1
+                report["skips"].append({"net": name, "index": net_index, "reason": "max_fanout"})
+                continue
+
+            movable: List[int] = []
+            fixed_pins: List[Tuple[float, float]] = []
+            for raw_pin in raw_pins:
+                resolved = self._resolve_python_pin(raw_pin, place_inst_index)
+                if resolved is None:
+                    report["skipped_pins"] += 1
+                    continue
+                if resolved["movable"]:
+                    movable.append(int(resolved["index"]))
+                else:
+                    fixed_pins.append((float(resolved["x"]), float(resolved["y"])))
+            movable = sorted(set(movable))
+            report["movable_pins"] += len(movable)
+            report["fixed_pins"] += len(fixed_pins)
+            if len(movable) + len(fixed_pins) < 2 or not movable:
+                report["skipped_nets"] += 1
+                report["skips"].append({"net": name, "index": net_index, "reason": "insufficient_known_pins"})
+                continue
+
+            weight = self.ipVars_.netWeightScale * net_weight / max(1, len(movable) + len(fixed_pins) - 1)
+            for left_pos, left in enumerate(movable):
+                for right in movable[left_pos + 1 :]:
+                    self._stamp_movable_pair(rows, left, right, weight)
+                for fixed_x, fixed_y in fixed_pins:
+                    self._stamp_fixed_pair(rows, left, fixed_x, fixed_y, weight)
+            report["stamped_nets"] += 1
+
+        if report["stamped_nets"] == 0:
+            self.matrix_is_b2b_stamped_ = False
+            self.matrix_nonzero_count_ = sum(len(row) for row in rows)
+            if raise_on_empty:
+                raise ValueError("InitialPlace cannot stamp sparse matrix: no net has enough known pins")
+            return report
+        self._finalize_stamped_rows(rows)
+        report["stamped"] = True
+        report["nonzeros"] = self.matrix_nonzero_count_
+        self.last_solver_report_ = {"status": "stamped", "stamping": report}
+        return report
+
+    def stampSparseMatrixFromPlaceBaseNets(self, raise_on_empty: bool = True) -> Dict[str, Any]:
+        """Stamp from the Python PlacerBaseCommon net graph when it is populated."""
+
+        nets = self.pbc_.getNets()
+        if not nets:
+            if raise_on_empty:
+                raise ValueError("InitialPlace cannot stamp sparse matrix: PlacerBaseCommon has no nets")
+            return {"stamped": False, "nets": 0, "stamped_nets": 0, "skipped_nets": 0}
+        return self.stampSparseMatrixFromPythonNets(nets, raise_on_empty=raise_on_empty)
 
     def markSparseMatrixStamped(self, stamped: bool = True) -> None:
         """标记 sparse matrix 已由调用方完成真实 B2B stamping。
@@ -359,7 +562,7 @@ class InitialPlace:
                 "rows": n,
                 "message": "pure Python InitialPlace solver is limited to 4096 rows",
             }
-            raise NotImplementedError(self.last_solver_report_["message"])
+            raise RuntimeError(self.last_solver_report_["message"])
 
         self.solutionVecX_, x_report = self._solve_vector(self.rhsVecX_, self.solutionVecX_, "x")
         self.solutionVecY_, y_report = self._solve_vector(self.rhsVecY_, self.solutionVecY_, "y")

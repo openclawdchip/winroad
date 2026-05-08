@@ -1056,34 +1056,84 @@ class BinGrid:
         for bin_obj in self.bins_:
             bin_obj.resetElectro()
 
-    def updateLocalDensityField(self, phi_coef: float = 1.0) -> None:
-        """用 bin overflow 构造可验证的局部 density field。
+    def updateLocalDensityField(self, phi_coef: float = 1.0, iterations: Optional[int] = None) -> None:
+        """Build a pure-Python local density field for smoke-sized designs.
 
-        OpenROAD 真实实现通过 FFT 求解 Poisson 方程得到电势/电场；这里不伪造 FFT，
-        只把当前 bin density overflow 转成局部 phi，并用相邻 bin 的差分生成 field。
-        因此它适合 Python 状态流和 smoke，不等价于生产级 density force。
+        The production OpenROAD path solves Poisson with FFT.  This fallback keeps
+        that boundary explicit: it uses a small deterministic Jacobi relaxation on
+        signed bin density charge, then takes finite differences of the resulting
+        local potential.  It is intentionally local and not a fake FFT substitute.
         """
 
         if not self.bins_:
             return
         phi_coef = max(0.0, phi_coef)
-        for bin_obj in self.bins_:
-            bin_obj.setElectroPhi(phi_coef * bin_obj.getOverflowDensity())
+        bin_count = len(self.bins_)
+        charges = [self._density_charge(bin_obj) for bin_obj in self.bins_]
+        mean_charge = sum(charges) / bin_count
+        charges = [charge - mean_charge for charge in charges]
+        if all(abs(charge) <= 1e-18 for charge in charges):
+            self.resetElectro()
+            return
+
+        if iterations is None:
+            iterations = max(8, min(64, 2 * (self.binCntX_ + self.binCntY_)))
+        iterations = max(1, iterations)
+        phi = [0.0 for _ in self.bins_]
+        for _ in range(iterations):
+            next_phi = phi[:]
+            for y in range(self.binCntY_):
+                for x in range(self.binCntX_):
+                    idx = y * self.binCntX_ + x
+                    left = phi[y * self.binCntX_ + max(0, x - 1)]
+                    right = phi[y * self.binCntX_ + min(self.binCntX_ - 1, x + 1)]
+                    down = phi[max(0, y - 1) * self.binCntX_ + x]
+                    up = phi[min(self.binCntY_ - 1, y + 1) * self.binCntX_ + x]
+                    next_phi[idx] = 0.25 * (left + right + down + up + charges[idx])
+            mean_phi = sum(next_phi) / bin_count
+            phi = [value - mean_phi for value in next_phi]
+
+        for bin_obj, value in zip(self.bins_, phi):
+            bin_obj.setElectroPhi(phi_coef * value)
+        self._update_electro_field_from_phi()
+
+    def _density_charge(self, bin_obj: Bin) -> float:
+        bin_area = max(1, bin_obj.getBinArea())
+        blocked_density = bin_obj.getNonPlaceArea() / bin_area
+        return bin_obj.getDensity() + blocked_density - bin_obj.getTargetDensity()
+
+    def _update_electro_field_from_phi(self) -> None:
+        dx = max(self.binSizeX_, 1.0)
+        dy = max(self.binSizeY_, 1.0)
         for y in range(self.binCntY_):
             for x in range(self.binCntX_):
                 center = self.getBinByIdx(x, y)
-                left = self.getBinByIdx(max(0, x - 1), y)
-                right = self.getBinByIdx(min(self.binCntX_ - 1, x + 1), y)
-                down = self.getBinByIdx(x, max(0, y - 1))
-                up = self.getBinByIdx(x, min(self.binCntY_ - 1, y + 1))
-                dx = max(self.binSizeX_, 1.0)
-                dy = max(self.binSizeY_, 1.0)
-                field_x = -_safe_div(right.electroPhi() - left.electroPhi(), dx if right is not left else 1.0)
-                field_y = -_safe_div(up.electroPhi() - down.electroPhi(), dy if up is not down else 1.0)
                 if self.binCntX_ == 1:
-                    field_x = -center.electroPhi() / dx
+                    field_x = 0.0
+                elif x == 0:
+                    right = self.getBinByIdx(x + 1, y)
+                    field_x = -_safe_div(right.electroPhi() - center.electroPhi(), dx)
+                elif x == self.binCntX_ - 1:
+                    left = self.getBinByIdx(x - 1, y)
+                    field_x = -_safe_div(center.electroPhi() - left.electroPhi(), dx)
+                else:
+                    left = self.getBinByIdx(x - 1, y)
+                    right = self.getBinByIdx(x + 1, y)
+                    field_x = -_safe_div(right.electroPhi() - left.electroPhi(), 2.0 * dx)
+
                 if self.binCntY_ == 1:
-                    field_y = -center.electroPhi() / dy
+                    field_y = 0.0
+                elif y == 0:
+                    up = self.getBinByIdx(x, y + 1)
+                    field_y = -_safe_div(up.electroPhi() - center.electroPhi(), dy)
+                elif y == self.binCntY_ - 1:
+                    down = self.getBinByIdx(x, y - 1)
+                    field_y = -_safe_div(center.electroPhi() - down.electroPhi(), dy)
+                else:
+                    down = self.getBinByIdx(x, y - 1)
+                    up = self.getBinByIdx(x, y + 1)
+                    field_y = -_safe_div(up.electroPhi() - down.electroPhi(), 2.0 * dy)
+
                 center.setElectroField(field_x, field_y)
 
     def getInterpolatedElectroField(self, x: float, y: float) -> FloatPoint:
@@ -1629,8 +1679,89 @@ class NesterovBase:
         self.totalFillerArea_ = sum(cell.area() for cell in self.fillerStor_)
         self.whiteSpaceArea_ = max(0, self.pb_.getRegionArea() - self.pb_.nonPlaceInstsArea())
 
+    def _fillerInitFailure(self, reason: str, **details: Any) -> RuntimeError:
+        report = {
+            "reason": reason,
+            "target_density": self.targetDensity_,
+            "white_space_area": self.whiteSpaceArea_,
+            "movable_area": self.movableArea_,
+            "bin_count": (self.bg_.getBinCntX(), self.bg_.getBinCntY()),
+            **details,
+        }
+        error = RuntimeError(f"Cannot initialize filler GCells: {reason}")
+        setattr(error, "report", report)
+        return error
+
+    def _deriveFillerCellSize(self) -> Tuple[int, int]:
+        candidates = [
+            (inst.dx(), inst.dy())
+            for inst in self.pb_.placeInsts()
+            if not inst.isMacro() and inst.dx() > 0 and inst.dy() > 0
+        ]
+        if not candidates:
+            raise self._fillerInitFailure(
+                "missing filler cell dimensions",
+                place_insts=len(self.pb_.placeInsts()),
+                std_place_insts=0,
+            )
+        candidates.sort(key=lambda size: (size[1], size[0]))
+        dx, dy = candidates[0]
+        if dx <= 0 or dy <= 0:
+            raise self._fillerInitFailure("invalid filler cell dimensions", filler_dx=dx, filler_dy=dy)
+        return dx, dy
+
+    def _appendFillerGCell(self, cx: int, cy: int, dx: int, dy: int, max_area: int) -> int:
+        if max_area <= 0:
+            return 0
+        fill_dx = min(dx, max_area // dy)
+        if fill_dx <= 0:
+            return 0
+        fill_dx = max(1, fill_dx)
+        filler = GCell.filler(cx, cy, fill_dx, dy)
+        self.updateDensityCoordiLayoutInside(filler)
+        self.fillerStor_.append(filler)
+        self.nb_gcells_.append(filler)
+        return filler.area()
+
+    def _createFillerGCellsInBin(self, bin_obj: Bin, target_area: int) -> int:
+        if target_area <= 0:
+            return 0
+        dx, dy = self.fillerDx_, self.fillerDy_
+        if dx <= 0 or dy <= 0:
+            raise self._fillerInitFailure("missing filler cell dimensions", filler_dx=dx, filler_dy=dy)
+
+        placed_area = 0
+        min_cx = bin_obj.lx() + dx // 2
+        max_cx = bin_obj.ux() - (dx - dx // 2)
+        min_cy = bin_obj.ly() + dy // 2
+        max_cy = bin_obj.uy() - (dy - dy // 2)
+        if min_cx > max_cx or min_cy > max_cy:
+            return self._appendFillerGCell(bin_obj.cx(), bin_obj.cy(), dx, dy, target_area)
+
+        y = min_cy
+        while y <= max_cy and placed_area < target_area:
+            x = min_cx
+            while x <= max_cx and placed_area < target_area:
+                placed_area += self._appendFillerGCell(x, y, dx, dy, target_area - placed_area)
+                x += dx
+            y += dy
+        return placed_area
+
     def initFillerGCells(self) -> None:
-        raise NotImplementedError("OpenROAD filler creation and placement has not been translated yet")
+        self.resetFillerGCells()
+        self.fillerDx_, self.fillerDy_ = self._deriveFillerCellSize()
+        self.bg_.updateBinsNonPlaceArea()
+        self.bg_.updateBinsGCellDensityArea(self.nb_gcells_)
+
+        created_area = 0
+        for bin_obj in self.bg_.getBins():
+            allowed_area = int(round(bin_obj.getBinArea() * self.targetDensity_))
+            target_area = max(0, allowed_area - bin_obj.getNonPlaceArea() - bin_obj.instPlacedArea())
+            created_area += self._createFillerGCellsInBin(bin_obj, target_area)
+
+        self.updateAreas()
+        self.totalFillerArea_ = created_area
+        self.bg_.updateBinsGCellDensityArea(self.nb_gcells_)
 
     def resetFillerGCells(self) -> None:
         self.fillerStor_.clear()
@@ -1702,7 +1833,15 @@ class NesterovBase:
         return FloatPoint(field.x * area_scale, field.y * area_scale)
 
     def updateDensityFieldBin(self) -> None:
-        raise NotImplementedError("OpenROAD FFT density field update has not been translated yet")
+        """Update bin electrostatic state through the pure-Python fallback.
+
+        Full FFT/Poisson support belongs behind this method when translated.  For
+        now the method refreshes density metrics and builds a local relaxation
+        field, which is enough for small smoke flows without pretending to be FFT.
+        """
+
+        self.refreshDensityMetrics()
+        self.bg_.updateLocalDensityField(self.phiCoef_)
 
     def updateWireLengthForceWA(self, wlCoeffX: float, wlCoeffY: float) -> None:
         self.nbc_.updateWireLengthForceWA(wlCoeffX, wlCoeffY)
@@ -1780,7 +1919,7 @@ class NesterovBase:
 
         self.refreshState()
         self.updatePhiCoef(self.sum_overflow_)
-        self.bg_.updateLocalDensityField(self.phiCoef_)
+        self.updateDensityFieldBin()
         self.updateInitialPrevSLPCoordi()
         self.updateCurSLPCoordi()
 
@@ -2016,7 +2155,7 @@ class NesterovPlace:
             self.updateWireLengthCoef(self.average_overflow_)
             for nb in self.nbVec_:
                 nb.updatePhiCoef(nb.getSumOverflow())
-                nb.getBinGrid().updateLocalDensityField(nb.phiCoef_)
+                nb.updateDensityFieldBin()
                 nb.updateDensityPenalty(nb.getSumOverflow())
                 nb.updateWireLengthForceWA(self.wireLengthCoefX_, self.wireLengthCoefY_)
                 nb.updateGradSum()

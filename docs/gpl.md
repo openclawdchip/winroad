@@ -230,3 +230,47 @@ FastRoute/OpenDB 结果读取、STA/resizer/filler hook 等外部依赖或尚未
   - 补 density penalty、phi coefficient、base/wirelength coefficient 更新。
   - `NesterovPlace` 具备可运行的纯 Python 外层状态流，适合 smoke 与状态验证。
   - 真实 FFT/Poisson density field 和 OpenROAD 完整数值优化仍保留 `updateDensityFieldBin()` 边界。
+
+## 第十轮补充
+
+本轮继续只盯 `gpl`，不扩到其他模块。6 条并行线分别推进 InitialPlace stamping、
+Nesterov filler、Nesterov density field、RouteBase GRT adapter、TimingBase hook adapter 和文档。
+目标是继续压缩硬 stub，但真实 OpenDB/FastRoute/STA/FFT/Poisson 依赖仍保持清晰边界。
+
+- InitialPlace
+  - 新增 `stampSparseMatrixFromPythonNets()`，可从 GPL `Net/Pin` 对象或 dict/tuple pin spec 构建 stamped sparse matrix。
+  - 新增 `stampSparseMatrixFromPlaceBaseNets()`，在 `PlacerBaseCommon.getNets()` 已有 Python net graph 时自动尝试 stamping。
+  - 未知连接、缺固定 pin 坐标和超 fanout net 会跳过并写入 report，不伪造 netlist。
+
+- Nesterov filler
+  - `initFillerGCells()` 不再直接抛 `NotImplementedError`。
+  - 纯 Python filler 只生成 `GCell` 状态，进入 `fillerStor_` / `nb_gcells_`，不写 OpenDB，也不伪造库单元。
+  - 缺少可推导 filler cell 尺寸时结构化失败，report 中给出 reason。
+
+- Nesterov density field
+  - `updateDensityFieldBin()` 改为局部 Jacobi relaxation fallback，使用 signed density charge 计算有限 phi/field。
+  - 该 fallback 只服务小规模 Python 状态流和 smoke，不声称复刻 OpenROAD FFT/Poisson solver。
+
+- RouteBase
+  - `updateGrtRoute()`、`getGrtResult()`、`loadGrt()`、`getGrtRC()` 改为可注入 global-router adapter 边界。
+  - 如果 router/core 暴露 `updateRoutes`、`globalRoute`、`route`、`run` 或 congestion/resource/guide 数据，则消费真实对象数据；缺失时抛结构化 `GrtAdapterError`。
+
+- TimingBase
+  - `runResizerForTiming()` 和 `resetFillerCells()` 改为 adapter hook。
+  - 发现 Resizer/Replace/Nesterov-like 对象上存在兼容 hook 时调用并记录 `status/source/hook/args/result`；缺失时返回 `False` 和 `missing_hook`，不伪造 timing repair。
+
+### 当前剩余边界
+
+- InitialPlace 默认 OpenROAD B2B stamping 仍是边界；但纯 Python net graph 已可 stamping。
+- RouteBase 仍不伪造 FastRoute/全局布线结果；只消费注入 adapter 的真实数据。
+- TimingBase 仍不伪造 STA slack/resizer/filler 行为；只调用注入 hook。
+- Nesterov density field 已有局部 fallback，但真实 FFT/Poisson solver 仍未复刻。
+- `runMBFF()` 的真实聚类与 DB 写回仍未接入。
+
+### 验证命令
+
+```powershell
+python -m py_compile (Get-ChildItem D:\winroad_py\winroad\gpl -Recurse -Filter *.py | ForEach-Object { $_.FullName })
+$env:PYTHONPATH='D:\winroad_py'; python -c "import winroad.gpl; print('gpl import ok')"
+git diff --check
+```

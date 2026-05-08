@@ -220,3 +220,25 @@ OpenDB/FastRoute/STA/FFT 的 Python 可落地逻辑补上；真实外部依赖�
 - `timing_base`：补纯数据 timing-driven net reweight、权重快照导入导出、更新日志、批量导入和状态校验；真实 STA/resizer hook 仍保留边界。
 - `replace/options`：补 `MBFFOptions`、顶层 flow report、阶段错误记录/传播、`runMBFF()` 结构化边界报告，不伪造 MBFF 聚类。
 - `nesterov`：补 WA wirelength 累计、pin/cell gradient、preconditioner、局部 density 近似、density penalty/phi/base wirelength 更新和可运行外层状态流。
+
+## 2026-05-08 第十轮
+
+本轮继续只做 `gpl`，并把 6 条线程拆回各自责任区，文档侧只记录主线约束、剩余边界和验证命令，不扩散到其他模块。
+
+| 模块 | 线程 id | 昵称 | 状态 | 负责范围 |
+| --- | --- | --- | --- | --- |
+| `gpl` | `019e058e-f7f2-7172-a0f4-c644b584ce48` | Chandrasekhar | 已完成 | `winroad/gpl/initial_place.py` |
+| `gpl` | `019e058e-f89b-7f23-9dd5-3960d7502079` | Feynman | 已完成 | `winroad/gpl/nesterov.py` filler |
+| `gpl` | `019e058e-f8ba-78a2-a785-599daa6b64db` | Lagrange | 已完成 | `winroad/gpl/nesterov.py` density field |
+| `gpl` | `019e058e-f8ee-7e72-947a-d6096a8825f2` | Newton | 已完成 | `winroad/gpl/route_base.py` |
+| `gpl` | `019e058e-f93a-77f2-9010-2c6aec82ae76` | Aristotle | 已完成 | `winroad/gpl/timing_base.py` |
+| `gpl` | `019e058e-f987-7d80-be3e-e714d855c9d7` | Laplace | 已完成 | `docs/gpl.md`, `docs/parallel-status.md` |
+
+### 第十轮已完成摘要
+
+- `initial_place`：新增纯 Python net graph stamping，可从 GPL `Net/Pin` 或 dict/tuple pin spec 构建 stamped sparse matrix；未知连接、缺固定 pin 坐标和超 fanout net 只跳过并报告。
+- `nesterov` filler：`initFillerGCells()` 改为纯 Python filler 状态生成，基于 bin grid、target density、non-place area 和可推导 cell 尺寸创建 filler `GCell`，不写 OpenDB。
+- `nesterov` density：`updateDensityFieldBin()` 改为局部 Jacobi relaxation fallback，基于 signed density charge 生成有限 phi/field，不伪装成真实 FFT/Poisson。
+- `route_base`：GR 四个入口改为可注入 router/global-route adapter 的结构化边界，可消费 congestion/resource/guide 数据；缺 adapter 时给出 `GrtAdapterError`。
+- `timing_base`：`runResizerForTiming()` 与 `resetFillerCells()` 改为可注入 Resizer/Replace/Nesterov hook，记录 hook/result；缺 hook 时返回 `False` 和 `missing_hook`。
+- `docs`：记录只做 GPL 的主线约束、线程分工、剩余真实边界和验证命令；其他模块暂停。

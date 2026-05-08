@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .nesterov import GNet, NesterovBaseCommon
@@ -37,6 +38,8 @@ class TimingBase:
         self.last_update_changed_count_ = 0
         self.last_update_max_weight_ = 1.0
         self.last_execute_result_ = False
+        self.last_resizer_hook_: Dict[str, Any] = {}
+        self.last_filler_reset_: Dict[str, Any] = {}
 
     def isTimingNetWeightOverflow(self, overflow: float) -> bool:
         checkpoint = int(round(overflow * 100))
@@ -161,10 +164,38 @@ class TimingBase:
             self.addTimingDrivenNet(all_nets[idx])
 
     def runResizerForTiming(self, run_journal_restore: bool) -> bool:
-        raise NotImplementedError("OpenROAD resizer timing repair hook has not been translated yet")
+        self.run_journal_restore_ = run_journal_restore
+        report = self._invokeAdapterHook(
+            hook_names=(
+                "runResizerForTiming",
+                "repairTiming",
+                "repairTimingDriven",
+                "runTimingRepair",
+                "runTimingDrivenRepair",
+                "timingRepair",
+            ),
+            args=(run_journal_restore,),
+            sources=self._hookSources(),
+            label="resizer_timing_repair",
+        )
+        self.last_resizer_hook_ = report
+        self.last_resizer_result_ = report.get("status") == "ok"
+        return self.last_resizer_result_
 
-    def resetFillerCells(self) -> None:
-        raise NotImplementedError("OpenROAD timing-driven filler reset has not been translated yet")
+    def resetFillerCells(self) -> bool:
+        report = self._invokeAdapterHook(
+            hook_names=(
+                "resetFillerCells",
+                "resetFillerGCells",
+                "resetFillers",
+                "resetTimingDrivenFillerCells",
+            ),
+            args=(),
+            sources=self._hookSources(),
+            label="filler_reset",
+        )
+        self.last_filler_reset_ = report
+        return report.get("status") == "ok"
 
     def initTimingOverflowChk(self) -> None:
         self.timingOverflowChk_ = sorted(set(self.timingNetWeightOverflow_), reverse=True)
@@ -220,6 +251,8 @@ class TimingBase:
             "restore_count": self.restore_count_,
             "last_restored_weights": self.last_restored_weights_,
             "last_resizer_result": self.last_resizer_result_,
+            "last_resizer_hook": dict(self.last_resizer_hook_),
+            "last_filler_reset": dict(self.last_filler_reset_),
             "last_execute_result": self.last_execute_result_,
             "last_update_count": self.last_update_count_,
             "last_update_changed_count": self.last_update_changed_count_,
@@ -338,5 +371,166 @@ class TimingBase:
         if callable(getter):
             return str(getter())
         return str(gnet)
+
+    def _hookSources(self) -> List[Tuple[str, Any]]:
+        sources: List[Tuple[str, Any]] = []
+        seen = set()
+        for name, obj in (("resizer", self.rs_), ("router", self.grt_), ("nesterov_common", self.nbc_)):
+            if obj is None:
+                continue
+            if obj is self:
+                continue
+            marker = id(obj)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            sources.append((name, obj))
+            for nested_name, nested_obj in self._nestedHookSources(name, obj):
+                if nested_obj is self:
+                    continue
+                nested_marker = id(nested_obj)
+                if nested_marker in seen:
+                    continue
+                seen.add(nested_marker)
+                sources.append((nested_name, nested_obj))
+        return sources
+
+    def _nestedHookSources(self, prefix: str, obj: Any) -> List[Tuple[str, Any]]:
+        sources: List[Tuple[str, Any]] = []
+        for attr in ("nbVec_", "pbVec_", "tb_", "np_", "ip_"):
+            nested = getattr(obj, attr, None)
+            if isinstance(nested, (list, tuple)):
+                for index, item in enumerate(nested):
+                    if item is not None and item is not self:
+                        sources.append((f"{prefix}.{attr}[{index}]", item))
+            elif nested is not None and nested is not self and attr in {"tb_", "np_", "ip_"}:
+                sources.append((f"{prefix}.{attr}", nested))
+        return sources
+
+    def _invokeAdapterHook(
+        self,
+        hook_names: Sequence[str],
+        args: Tuple[Any, ...],
+        sources: Sequence[Tuple[str, Any]],
+        label: str,
+    ) -> Dict[str, Any]:
+        attempts: List[Dict[str, Any]] = []
+        for source_name, source in sources:
+            for hook_name in hook_names:
+                hook = getattr(source, hook_name, None)
+                if not callable(hook):
+                    attempts.append(
+                        {
+                            "source": source_name,
+                            "hook": hook_name,
+                            "status": "missing",
+                        }
+                    )
+                    continue
+                call_args: Optional[Tuple[Any, ...]] = None
+                signature_notes: List[str] = []
+                for candidate_args in self._hookArgVariants(args):
+                    compatible, signature_note = self._hookAcceptsArgs(hook, candidate_args)
+                    if compatible:
+                        call_args = candidate_args
+                        break
+                    signature_notes.append(f"{len(candidate_args)} args: {signature_note}")
+                if call_args is None:
+                    attempts.append(
+                        {
+                            "source": source_name,
+                            "hook": hook_name,
+                            "status": "incompatible",
+                            "detail": "; ".join(signature_notes),
+                        }
+                    )
+                    continue
+                try:
+                    result = hook(*call_args)
+                except Exception as exc:
+                    report = {
+                        "label": label,
+                        "status": "error",
+                        "source": source_name,
+                        "hook": hook_name,
+                        "args": len(call_args),
+                        "detail": {
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                        "attempts": attempts + [
+                            {
+                                "source": source_name,
+                                "hook": hook_name,
+                                "status": "error",
+                                "args": len(call_args),
+                                "detail": {
+                                    "type": type(exc).__name__,
+                                    "message": str(exc),
+                                },
+                            }
+                        ],
+                    }
+                    return report
+                return {
+                    "label": label,
+                    "status": "ok",
+                    "source": source_name,
+                    "hook": hook_name,
+                    "args": len(call_args),
+                    "result": self._summarizeHookResult(result),
+                    "result_type": type(result).__name__,
+                    "attempts": attempts
+                    + [
+                        {
+                            "source": source_name,
+                            "hook": hook_name,
+                            "status": "called",
+                            "args": len(call_args),
+                            "result_type": type(result).__name__,
+                        }
+                    ],
+                }
+        return {
+            "label": label,
+            "status": "missing_hook",
+            "detail": "no compatible adapter method was found",
+            "attempts": attempts,
+        }
+
+    def _hookArgVariants(self, args: Tuple[Any, ...]) -> List[Tuple[Any, ...]]:
+        if not args:
+            return [()]
+        return [args, ()]
+
+    def _hookAcceptsArgs(self, hook: Any, args: Tuple[Any, ...]) -> Tuple[bool, str]:
+        try:
+            sig = inspect.signature(hook)
+        except (TypeError, ValueError):
+            return True, "signature_unavailable"
+        positional = 0
+        required = 0
+        has_varargs = False
+        for param in sig.parameters.values():
+            if param.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD):
+                positional += 1
+                if param.default is inspect.Signature.empty:
+                    required += 1
+            elif param.kind == inspect.Parameter.VAR_POSITIONAL:
+                has_varargs = True
+        if len(args) < required:
+            return False, f"requires_at_least_{required}_args"
+        if not has_varargs and len(args) > positional:
+            return False, f"accepts_at_most_{positional}_args"
+        return True, "ok"
+
+    def _summarizeHookResult(self, result: Any) -> Any:
+        if isinstance(result, (type(None), bool, int, float, str)):
+            return result
+        if isinstance(result, dict):
+            return {str(key): self._summarizeHookResult(value) for key, value in result.items()}
+        if isinstance(result, (list, tuple)):
+            return [self._summarizeHookResult(item) for item in result]
+        return repr(result)
 
 

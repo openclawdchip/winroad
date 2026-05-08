@@ -11,6 +11,23 @@ from .common import _area
 from .nesterov import GCell, GCellChange, NesterovBase, NesterovBaseCommon
 from .options import PlaceOptions
 
+
+class GrtAdapterError(RuntimeError):
+    """Structured failure for injected global-router boundaries."""
+
+    def __init__(self, stage: str, message: str, *, method: Optional[str] = None, cause: Optional[BaseException] = None):
+        self.stage = stage
+        self.method = method
+        self.cause = cause
+        detail = {"stage": stage, "message": message}
+        if method is not None:
+            detail["method"] = method
+        if cause is not None:
+            detail["cause"] = f"{type(cause).__name__}: {cause}"
+        self.detail = detail
+        super().__init__(str(detail))
+
+
 @dataclass
 class RouteBaseVars:
     """对应 `gpl::RouteBaseVars`。"""
@@ -312,6 +329,9 @@ class RouteBase:
         self.gcell_base_sizes_: Dict[int, Tuple[int, int]] = {}
         self.rudy_net_count_ = 0
         self.rudy_pin_count_ = 0
+        self.grt_congestion_report_: Dict[str, Any] = {}
+        self.grt_resource_snapshot_: Dict[str, Any] = {}
+        self.grt_guide_report_: Dict[str, Any] = {}
         self.tg_.setLogger(log)
 
     def setNesterovBaseCommon(self, nbc: NesterovBaseCommon) -> None:
@@ -336,16 +356,96 @@ class RouteBase:
         self.accumulatedInflatedAreaDelta_ = [0 for _ in self.nbVec_]
 
     def updateGrtRoute(self) -> None:
-        raise NotImplementedError("OpenROAD GR route update has not been translated yet")
+        router = self._requireGrtAdapter("update_route")
+        last_error: Optional[BaseException] = None
+        for name in ("updateRoutes", "globalRoute", "route", "run"):
+            method = getattr(router, name, None)
+            if not callable(method):
+                continue
+            try:
+                if name == "updateRoutes":
+                    method(save_guides=True)
+                elif name == "globalRoute":
+                    method(save_guides=True)
+                else:
+                    method()
+                return
+            except NotImplementedError as exc:
+                last_error = exc
+                continue
+            except Exception as exc:
+                raise GrtAdapterError("update_route", "global-router adapter route call failed", method=name, cause=exc) from exc
+
+        core = self._grtCore(router)
+        if core is not None and core is not router:
+            run = getattr(core, "run", None)
+            if callable(run):
+                try:
+                    run()
+                    return
+                except NotImplementedError as exc:
+                    last_error = exc
+                except Exception as exc:
+                    raise GrtAdapterError("update_route", "global-router core route call failed", method="fastroute.run", cause=exc) from exc
+
+        raise GrtAdapterError(
+            "update_route",
+            "global-router adapter has no translated route/update entry",
+            cause=last_error,
+        )
 
     def getGrtResult(self) -> None:
-        raise NotImplementedError("OpenROAD GR result extraction has not been translated yet")
+        router = self._requireGrtAdapter("result")
+        self.grt_congestion_report_ = self._callGrtReport(
+            router,
+            "result",
+            ("createCongestionReport", "getCongestionReport"),
+            "congestion report",
+        )
+        self.grt_resource_snapshot_ = self._callGrtReport(
+            router,
+            "result",
+            ("createResourceSnapshot", "getResourceSnapshot"),
+            "resource snapshot",
+        )
+        try:
+            self.grt_guide_report_ = self._callGrtReport(
+                router,
+                "result",
+                ("createGuideReport",),
+                "guide report",
+            )
+        except GrtAdapterError:
+            self.grt_guide_report_ = self._routesGuideSummary(router)
+        self.loadGrt()
 
     def loadGrt(self) -> None:
-        raise NotImplementedError("OpenROAD GR heatmap loading has not been translated yet")
+        router = self._requireGrtAdapter("load")
+        if not self.grt_congestion_report_:
+            self.grt_congestion_report_ = self._callGrtReport(
+                router,
+                "load",
+                ("createCongestionReport", "getCongestionReport"),
+                "congestion report",
+            )
+        if not self.grt_resource_snapshot_:
+            self.grt_resource_snapshot_ = self._callGrtReport(
+                router,
+                "load",
+                ("createResourceSnapshot", "getResourceSnapshot"),
+                "resource snapshot",
+            )
+        records = self._grtTileRecords(self.grt_congestion_report_)
+        if not records:
+            records = self._grtTileRecordsFromResource(self.grt_resource_snapshot_)
+        if not records:
+            raise GrtAdapterError("load", "global-router adapter returned no tile/resource congestion records")
+        self.importTileCongestion(records)
 
     def getGrtRC(self) -> float:
-        raise NotImplementedError("OpenROAD GR RC metric has not been translated yet")
+        if not self.tg_.tiles_ or (not self.grt_congestion_report_ and not self.grt_resource_snapshot_):
+            self.loadGrt()
+        return self.final_average_rc_
 
     def calculateRudyTiles(self) -> None:
         """用现有 GNet/GPin bbox 计算轻量 RUDY tile demand。
@@ -677,6 +777,9 @@ class RouteBase:
             "congestion_history": [dict(item) for item in self.congestion_history_],
             "tile_grid": self.tg_.reportStatus(),
             "tile_congestion": self.reportTileCongestion(),
+            "grt_congestion_report": dict(self.grt_congestion_report_),
+            "grt_resource_snapshot": dict(self.grt_resource_snapshot_),
+            "grt_guide_report": dict(self.grt_guide_report_),
             "min_rc_saved_cells": len(self.minRcCellSizes_),
             "min_rc_saved_regions": len(self.minRcTargetDensity_),
         }
@@ -728,6 +831,116 @@ class RouteBase:
         ux = min(a[2], b[2])
         uy = min(a[3], b[3])
         return _area((lx, ly, ux, uy))
+
+    def _requireGrtAdapter(self, stage: str) -> Any:
+        if self.grouter_ is None:
+            raise GrtAdapterError(stage, "global-router adapter is not injected")
+        return self.grouter_
+
+    def _grtCore(self, router: Any) -> Optional[Any]:
+        getter = getattr(router, "fastroute", None)
+        if callable(getter):
+            core = getter()
+            if core is not None:
+                return core
+        return getattr(router, "fastroute_core", None)
+
+    def _callGrtReport(
+        self,
+        router: Any,
+        stage: str,
+        names: Sequence[str],
+        label: str,
+    ) -> Dict[str, Any]:
+        targets = [router]
+        core = self._grtCore(router)
+        if core is not None and core is not router:
+            targets.append(core)
+        for target in targets:
+            for name in names:
+                method = getattr(target, name, None)
+                if not callable(method):
+                    continue
+                try:
+                    result = method()
+                except NotImplementedError as exc:
+                    raise GrtAdapterError(stage, f"global-router adapter {label} entry is not translated", method=name, cause=exc) from exc
+                except Exception as exc:
+                    raise GrtAdapterError(stage, f"global-router adapter {label} call failed", method=name, cause=exc) from exc
+                if isinstance(result, dict) and result:
+                    return result
+                raise GrtAdapterError(stage, f"global-router adapter returned empty {label}", method=name)
+        raise GrtAdapterError(stage, f"global-router adapter has no {label} entry", method="|".join(names))
+
+    def _grtTileRecords(self, report: Dict[str, Any]) -> List[Dict[str, Any]]:
+        records = report.get("tiles") or report.get("tile_records") or report.get("congestion_tiles") or []
+        result: List[Dict[str, Any]] = []
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            mapped = self._mapGrtTileRecord(record)
+            if mapped is not None:
+                result.append(mapped)
+        return result
+
+    def _grtTileRecordsFromResource(self, snapshot: Dict[str, Any]) -> List[Dict[str, Any]]:
+        buckets: Dict[Tuple[int, int], Dict[str, float]] = {}
+        for record in snapshot.get("edge_capacity_records", []):
+            if not isinstance(record, dict):
+                continue
+            try:
+                x = min(int(record.get("x1", 0)), int(record.get("x2", 0)))
+                y = min(int(record.get("y1", 0)), int(record.get("y2", 0)))
+                value = float(record.get("value", 0.0))
+            except (TypeError, ValueError):
+                continue
+            bucket = buckets.setdefault((x, y), {"index": (x, y), "route_capacity": 0.0, "route_demand": 0.0})
+            bucket["route_capacity"] += value
+        for record in snapshot.get("edge_usage_records", []):
+            if not isinstance(record, dict):
+                continue
+            try:
+                x = min(int(record.get("x1", 0)), int(record.get("x2", 0)))
+                y = min(int(record.get("y1", 0)), int(record.get("y2", 0)))
+                value = float(record.get("value", 0.0))
+            except (TypeError, ValueError):
+                continue
+            bucket = buckets.setdefault((x, y), {"index": (x, y), "route_capacity": 0.0, "route_demand": 0.0})
+            bucket["route_demand"] += value
+        return [item for item in buckets.values() if item["route_capacity"] > 0.0 or item["route_demand"] > 0.0]
+
+    def _mapGrtTileRecord(self, record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        try:
+            if "index" in record:
+                index = record["index"]
+                x, y = int(index[0]), int(index[1])
+            else:
+                x, y = int(record.get("x", 0)), int(record.get("y", 0))
+            capacity = float(record.get("capacity", record.get("route_capacity", 0.0)))
+            demand = float(record.get("usage", record.get("route_demand", record.get("demand", 0.0))))
+        except (TypeError, ValueError, IndexError):
+            return None
+        if capacity <= 0.0 and "congestion" not in record:
+            return None
+        mapped = {"index": (x, y), "route_capacity": capacity}
+        if demand > 0.0:
+            mapped["route_demand"] = demand
+        elif "congestion" in record:
+            mapped["congestion"] = float(record["congestion"])
+        else:
+            mapped["route_demand"] = 0.0
+        return mapped
+
+    def _routesGuideSummary(self, router: Any) -> Dict[str, Any]:
+        getter = getattr(router, "getRoutes", None)
+        routes = getter() if callable(getter) else getattr(router, "routes", None)
+        if not isinstance(routes, dict):
+            raise GrtAdapterError("result", "global-router adapter has no guide report or route map")
+        return {
+            "format": "winroad-gpl-grt-guide-summary",
+            "net_count": len(routes),
+            "segment_count": sum(len(route) for route in routes.values()),
+        }
 
     def _tileForPoint(self, x: int, y: int) -> Optional[Tile]:
         if self.tg_.tileSizeX_ <= 0 or self.tg_.tileSizeY_ <= 0:
