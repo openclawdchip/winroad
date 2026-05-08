@@ -172,3 +172,23 @@
   - `RouteBase.reportCongestion()` 现在包含 tile grid、min-RC 保存 cell/region 数。
   - `TimingBase.addTimingDrivenNet()`、`clearTimingDrivenNets()`、`reportTimingNets()` 补齐 timing-driven net 容器状态；真实 STA slack 筛选、resizer 交互仍抛 `NotImplementedError`。
   - `Replace` 新增 cluster 拷贝读取、debug 报告、cluster 报告，以及 timing/routability/bin/pad/timing weight 配置 setter。
+
+## 第八轮补充
+
+- 对象生命周期
+  - `Instance.removePin()`、`Net.removePin()`、`Pin.clearInstance()`、`Pin.clearNet()` 补齐双向关系断开入口。
+  - `PlacerBaseCommon.addDbITerm()`、`addDbBTerm()`、`removeDbTerm()` 可按当前 ODB 骨架增删 term pin，并同步 Instance/Net 反向关系。
+  - `NesterovBaseCommon.removeGCellForInstance()` / `removeGNetForNet()` 删除对象时会清理 GPin 反向引用；callback 创建/删除 inst/net 后会重建 GPin 关系。
+
+- Placer state snapshot/restore
+  - 新增 `GCellSnapshot`，保存/恢复 gcell 位置、density box、density scale、梯度和 change 类型。
+  - `NesterovBase.saveSnapshot()` / `revertToSnapshot()` 现在恢复完整 gcell 状态、overflow 和 target density，并在 gcell 数量变化时显式抛 `RuntimeError`。
+  - `NesterovPlace.revertToSnapshot()` 修正空 base 误判成功的问题，恢复成功后刷新 DB 与 overflow；新增 `clearSnapshot()` / `reportSnapshot()`。
+
+- 参数校验与报告边界
+  - `PlaceOptions.validate()` 增加有限浮点检查，timing-driven 模式要求 timing overflow checkpoint 非空。
+  - `Replace` 的 place/nesterov 入口统一校验 `threads` 为正整数，`start_iter` 为非负。
+  - `NesterovBase.reportStatus()` 和 `NesterovPlace.reportStatus()` 现在包含 snapshot 细节。
+
+- 未翻译算法边界
+  - WA wirelength、FFT density、Nesterov 主循环、routability inflation、STA/resizer 交互等真实数值优化入口继续保留同名函数并抛 `NotImplementedError`，没有加入 demo 或估算替代。

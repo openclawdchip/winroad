@@ -54,6 +54,7 @@ class FlexGR:
             "has_cmap2d": self.cmap2D_ is not None,
             "nets": len(block.getNets()) if block is not None else 0,
             "markers": len(block.getMarkers()) if block is not None else 0,
+            "route_guides": block.getGuideSummary() if block is not None else [],
         }
 
     def main(self, db: Any = None) -> None:

@@ -5,7 +5,15 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, Optional, Set
 
-from .common import RecoverPowerConfig, RepairFlowState, _json_value, _not_translated, _obj_key
+from .common import (
+    RecoverPowerConfig,
+    RepairFlowPhase,
+    RepairFlowState,
+    RepairPhaseEvent,
+    _json_value,
+    _not_translated,
+    _obj_key,
+)
 
 
 class RecoverPower:
@@ -37,6 +45,8 @@ class RecoverPower:
         self.initial_design_area_ = 0.0
         self.print_interval_ = 0
         self.config_ = RecoverPowerConfig(setup_slack_margin=self.setup_slack_margin_)
+        self.phase_ = RepairFlowPhase.IDLE
+        self.phase_history_ = []
 
     def init(self) -> None:
         self.db_network_ = self.resizer_.db_network_
@@ -73,6 +83,7 @@ class RecoverPower:
             scene=scene,
             setup_slack_margin=setup_slack_margin,
         )
+        self.setPhase(RepairFlowPhase.CONFIGURED, "configure")
         return self.config_
 
     def resetConfig(self) -> None:
@@ -81,6 +92,7 @@ class RecoverPower:
         self.verbose_ = False
         self.setup_slack_margin_ = type(self).setup_slack_margin_
         self.config_ = RecoverPowerConfig(setup_slack_margin=self.setup_slack_margin_)
+        self.setPhase(RepairFlowPhase.IDLE, "reset_config")
 
     def config(self) -> RecoverPowerConfig:
         return self.config_
@@ -108,6 +120,8 @@ class RecoverPower:
             raise ValueError("swap count must be non-negative")
         self.swapped_cell_count_ += count
         self.recovered_power_ += recovered_power
+        if count:
+            self.setPhase(RepairFlowPhase.REPAIRING, "record_swap")
 
     def recordSizeDown(self, count: int = 1, recovered_power: float = 0.0) -> None:
         if count < 0:
@@ -115,11 +129,15 @@ class RecoverPower:
         self.sizedown_cell_count_ += count
         self.resize_count_ += count
         self.recovered_power_ += recovered_power
+        if count:
+            self.setPhase(RepairFlowPhase.REPAIRING, "record_size_down")
 
     def recordResize(self, count: int = 1) -> None:
         if count < 0:
             raise ValueError("resize count must be non-negative")
         self.resize_count_ += count
+        if count:
+            self.setPhase(RepairFlowPhase.REPAIRING, "record_resize")
 
     def resetCounters(self) -> None:
         self.resize_count_ = 0
@@ -127,6 +145,7 @@ class RecoverPower:
         self.sizedown_cell_count_ = 0
         self.recovered_power_ = 0.0
         self.bad_vertices_.clear()
+        self.setPhase(RepairFlowPhase.IDLE, "reset_counters")
 
     def markBadVertex(self, vertex: Any) -> None:
         self.bad_vertices_.add(_obj_key(vertex))
@@ -166,7 +185,17 @@ class RecoverPower:
             config=self.reportConfig(),
             counters=self.reportCounters(),
             details={"bad_vertices_detail": _json_value(self.bad_vertices_)},
+            phase=self.phase_,
+            history=self.phase_history_,
         ).as_dict()
+
+    def setPhase(self, phase: RepairFlowPhase, reason: str = "") -> None:
+        self.phase_ = phase
+        self.phase_history_.append(RepairPhaseEvent(phase=phase, reason=reason, order=len(self.phase_history_)))
+
+    def finishPass(self, committed: bool, reason: str = "") -> None:
+        phase = RepairFlowPhase.COMMITTED if committed else RepairFlowPhase.ROLLED_BACK
+        self.setPhase(phase, reason)
 
     def validateBatch(self, batch: Any) -> Dict[str, Any]:
         """校验 recover_power 批处理配置列表。"""

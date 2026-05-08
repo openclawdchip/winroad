@@ -96,6 +96,21 @@ class MoveStateType(Enum):
     ATTEMPT_REJECT = 1
     ATTEMPT_COMMIT = 2
 
+class RepairFlowPhase(Enum):
+    """Repair flow 的轻量状态机阶段。
+
+    C++ repair pass 会在收集 violator、尝试 move、提交/回滚之间切换；Python
+    接口层只记录这些阶段，不执行真实 STA 查询或 DB 修改。
+    """
+
+    IDLE = "idle"
+    CONFIGURED = "configured"
+    COLLECTING = "collecting"
+    REPAIRING = "repairing"
+    COMMITTED = "committed"
+    ROLLED_BACK = "rolled_back"
+    FAILED = "failed"
+
 @dataclass(order=True, frozen=True)
 class VTCategory:
     """Voltage Threshold 分类键，对应 C++ ``VTCategory``。"""
@@ -181,6 +196,84 @@ class MoveStateData:
     move_type: str
     state: MoveStateType
     order: int = 0
+
+@dataclass
+class RepairPhaseEvent:
+    """Repair flow 状态机的一次阶段切换记录。"""
+
+    phase: RepairFlowPhase
+    reason: str = ""
+    order: int = 0
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {"phase": self.phase.value, "reason": self.reason, "order": self.order}
+
+@dataclass
+class EndpointRepairState:
+    """单个 endpoint 在 setup repair 调度中的状态。"""
+
+    endpoint: Any
+    repair_count: int = 0
+    committed_count: int = 0
+    rejected_count: int = 0
+    last_phase: RepairFlowPhase = RepairFlowPhase.IDLE
+    last_reason: str = ""
+
+    def begin(self) -> None:
+        self.repair_count += 1
+        self.last_phase = RepairFlowPhase.REPAIRING
+        self.last_reason = ""
+
+    def finish(self, committed: bool, reason: str = "") -> None:
+        if committed:
+            self.committed_count += 1
+            self.last_phase = RepairFlowPhase.COMMITTED
+        else:
+            self.rejected_count += 1
+            self.last_phase = RepairFlowPhase.ROLLED_BACK
+        self.last_reason = reason
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "endpoint": _json_value(self.endpoint),
+            "repair_count": self.repair_count,
+            "committed_count": self.committed_count,
+            "rejected_count": self.rejected_count,
+            "last_phase": self.last_phase.value,
+            "last_reason": self.last_reason,
+        }
+
+@dataclass
+class NetBufferRelation:
+    """记录一次 net repair 中 endpoint/net/buffer 的关系。
+
+    这是报告面和 smoke test 可用的数据结构；buffer insertion 和 netlist mutation
+    仍由未翻译的 C++ 边界负责。
+    """
+
+    net: Any
+    driver_pin: Any = None
+    load_pins: List[Any] = field(default_factory=list)
+    inserted_buffers: List[Any] = field(default_factory=list)
+    removed_buffers: List[Any] = field(default_factory=list)
+    endpoint_pins: List[Any] = field(default_factory=list)
+    buffer_to_loads: Dict[Any, List[Any]] = field(default_factory=dict)
+
+    def add_buffer_loads(self, buffer: Any, loads: List[Any]) -> None:
+        self.buffer_to_loads[_obj_key(buffer)] = list(loads)
+        if buffer not in self.inserted_buffers:
+            self.inserted_buffers.append(buffer)
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "net": _json_value(self.net),
+            "driver_pin": _json_value(self.driver_pin),
+            "load_pins": _json_value(self.load_pins),
+            "inserted_buffers": _json_value(self.inserted_buffers),
+            "removed_buffers": _json_value(self.removed_buffers),
+            "endpoint_pins": _json_value(self.endpoint_pins),
+            "buffer_to_loads": _json_value(self.buffer_to_loads),
+        }
 
 @dataclass
 class RepairDesignLimits:
@@ -388,13 +481,17 @@ class RepairFlowState:
     config: Dict[str, Any] = field(default_factory=dict)
     counters: Dict[str, Any] = field(default_factory=dict)
     details: Dict[str, Any] = field(default_factory=dict)
+    phase: RepairFlowPhase = RepairFlowPhase.IDLE
+    history: List[RepairPhaseEvent] = field(default_factory=list)
 
     def as_dict(self) -> Dict[str, Any]:
         return {
             "name": self.name,
+            "phase": self.phase.value,
             "config": _json_value(self.config),
             "counters": _json_value(self.counters),
             "details": _json_value(self.details),
+            "history": [event.as_dict() for event in self.history],
         }
 
 @dataclass

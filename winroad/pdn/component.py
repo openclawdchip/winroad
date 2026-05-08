@@ -210,8 +210,7 @@ class Straps(GridComponent):
         self.spacing = _validate_non_negative(self.spacing, "strap spacing")
         self.number_of_straps = _validate_non_negative(self.number_of_straps, "number_of_straps")
         self.offset = _validate_non_negative(self.offset, "strap offset")
-        self.strap_start = int(self.strap_start)
-        self.strap_end = int(self.strap_end)
+        self.setStrapStartEnd(self.strap_start, self.strap_end)
 
     def setOffset(self, offset: int) -> None:
         self.offset = _validate_non_negative(offset, "strap offset")
@@ -269,6 +268,8 @@ class Straps(GridComponent):
         _validate_non_negative(self.number_of_straps, "number_of_straps")
         if self.number_of_straps > 1 and self.spacing == 0:
             raise ValueError("multi-strap groups require positive spacing")
+        if self.strap_start and self.strap_end and self.strap_start > self.strap_end:
+            raise ValueError("strap start must be <= strap end")
 
 
 @dataclass

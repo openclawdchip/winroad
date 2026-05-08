@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
 
-from .types import _not_implemented
+from .types import PdnIssue, _name, _not_implemented
 
 @dataclass
 class SRoute:
@@ -17,11 +17,35 @@ class SRoute:
     def addSrouteConnect(self, **params: Any) -> Dict[str, Any]:
         if not params:
             raise ValueError("addSrouteConnect requires at least one parameter")
-        self.connects.append(dict(params))
+        normalized = dict(params)
+        if any(not str(key) for key in normalized):
+            raise ValueError("addSrouteConnect parameter names must be non-empty")
+        self.connects.append(normalized)
         return self.connects[-1]
 
     def getSrouteConnects(self) -> List[Dict[str, Any]]:
         return [dict(connect) for connect in self.connects]
+
+    def clear(self) -> None:
+        """清理 Tcl 参数缓存；不触发真实 special route ripup。"""
+
+        self.connects.clear()
+
+    def collectSetupIssues(self, path: str = "sroute") -> List[PdnIssue]:
+        issues: List[PdnIssue] = []
+        for index, connect in enumerate(self.connects):
+            location = f"{path}/connect[{index}]"
+            if not connect:
+                issues.append(PdnIssue(location, "sroute connect has no parameters"))
+                continue
+            if not any(key in connect for key in ("net", "nets", "power", "ground")):
+                issues.append(PdnIssue(location, "sroute connect has no net parameter", severity="warning"))
+            if not any(key in connect for key in ("layer", "layers", "metal", "metal_layers")):
+                issues.append(PdnIssue(location, "sroute connect has no layer parameter", severity="warning"))
+            none_keys = [str(key) for key, value in connect.items() if value is None]
+            if none_keys:
+                issues.append(PdnIssue(location, f"sroute connect has None parameter values: {', '.join(none_keys)}", severity="warning"))
+        return issues
 
     def summary(self) -> Dict[str, Any]:
         net_count = 0
@@ -40,4 +64,7 @@ class SRoute:
         _not_implemented("SRoute::createSrouteWires")
 
     def report(self) -> Dict[str, Any]:
-        return {**self.summary(), "connects": self.getSrouteConnects()}
+        connects = []
+        for connect in self.connects:
+            connects.append({str(key): _name(value) if key in {"net", "power", "ground", "layer", "metal"} else value for key, value in connect.items()})
+        return {**self.summary(), "connects": connects, "setup_issues": [issue.report() for issue in self.collectSetupIssues()]}

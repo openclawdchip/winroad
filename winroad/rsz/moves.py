@@ -111,6 +111,28 @@ class BaseMove:
             "accepted_insts": len(self.accepted_inst_set_),
         }
 
+    def snapshot(self) -> Dict[str, Any]:
+        """导出 move 计数快照；inst 集合只导出 JSON-safe 名称。"""
+
+        data = self.moveCounters()
+        data.update(
+            {
+                "name": self.name(),
+                "all_insts": _json_value(self.all_inst_set_),
+                "pending_insts": _json_value(self.pending_inst_set_),
+                "accepted_insts": _json_value(self.accepted_inst_set_),
+            }
+        )
+        return data
+
+    def restoreCounters(self, data: Dict[str, Any]) -> None:
+        """恢复计数值，不重建外部 DB/STA 对象集合。"""
+
+        self.all_count_ = int(data.get("all", 0))
+        self.pending_count_ = int(data.get("pending", 0))
+        self.accepted_count_ = int(data.get("accepted", 0))
+        self.rejected_count_ = int(data.get("rejected", 0))
+
 class BufferMove(BaseMove):
     """对应 ``BufferMove``，setup repair 的重缓冲动作边界。"""
 
@@ -353,6 +375,16 @@ class MoveTracker:
     def clearPendingMoves(self) -> None:
         self.pending_moves_.clear()
 
+    def clear(self) -> None:
+        """清空 tracker 的所有轻量记录。"""
+
+        self.current_endpoint_ = None
+        self.critical_pins_.clear()
+        self.violators_.clear()
+        self.pin_infos_.clear()
+        self.moves_.clear()
+        self.pending_moves_.clear()
+
     def moveSummary(self) -> Dict[str, int]:
         summary = {state.name.lower(): 0 for state in MoveStateType}
         for move in self.moves_:
@@ -370,6 +402,20 @@ class MoveTracker:
         for move in self.pending_moves_:
             summary.setdefault(move.move_type, {state.name.lower(): 0 for state in MoveStateType})
             summary[move.move_type]["pending"] += 1
+        return summary
+
+    def moveSummaryByPin(self) -> Dict[str, Dict[str, int]]:
+        """按 pin 统计 attempt/commit/reject，便于定位 endpoint repair 结果。"""
+
+        summary: Dict[str, Dict[str, int]] = {}
+        for move in self.moves_:
+            key = str(_json_value(move.pin))
+            bucket = summary.setdefault(key, {state.name.lower(): 0 for state in MoveStateType})
+            bucket[move.state.name.lower()] += 1
+        for move in self.pending_moves_:
+            key = str(_json_value(move.pin))
+            bucket = summary.setdefault(key, {state.name.lower(): 0 for state in MoveStateType})
+            bucket["pending"] = bucket.get("pending", 0) + 1
         return summary
 
     def _move_as_dict(self, move: MoveStateData) -> Dict[str, Any]:
@@ -398,6 +444,7 @@ class MoveTracker:
         if include_moves:
             data["moves"] = [self._move_as_dict(move) for move in self.moves_]
             data["pending_moves"] = [self._move_as_dict(move) for move in self.pending_moves_]
+        data["move_summary_by_pin"] = self.moveSummaryByPin()
         return data
 
     def state(self) -> MoveTrackerState:
@@ -424,5 +471,6 @@ class MoveTracker:
             "violators": _json_value(self.violators_),
             "move_summary": self.moveSummary(),
             "move_summary_by_type": self.moveSummaryByType(),
+            "move_summary_by_pin": self.moveSummaryByPin(),
             "moves": [self._move_as_dict(move) for move in self.moves_],
         }

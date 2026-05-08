@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Dict
 
-from .common import RepairFlowState, RepairHoldConfig, _json_value, _not_translated
+from .common import RepairFlowPhase, RepairFlowState, RepairHoldConfig, RepairPhaseEvent, _json_value, _not_translated
 
 
 class RepairHold:
@@ -29,6 +29,8 @@ class RepairHold:
         self.setup_slack_margin_ = 0.0
         self.initial_design_area_ = 0.0
         self.config_ = RepairHoldConfig()
+        self.phase_ = RepairFlowPhase.IDLE
+        self.phase_history_ = []
 
     def init(self) -> None:
         self.db_network_ = self.resizer_.db_network_
@@ -69,6 +71,7 @@ class RepairHold:
             allow_setup_violations=self.allow_setup_violations_,
             setup_slack_margin=self.setup_slack_margin_,
         )
+        self.setPhase(RepairFlowPhase.CONFIGURED, "configure")
         return self.config_
 
     def resetConfig(self) -> None:
@@ -78,6 +81,7 @@ class RepairHold:
         self.allow_setup_violations_ = False
         self.setup_slack_margin_ = 0.0
         self.config_ = RepairHoldConfig()
+        self.setPhase(RepairFlowPhase.IDLE, "reset_config")
 
     def config(self) -> RepairHoldConfig:
         return self.config_
@@ -107,21 +111,28 @@ class RepairHold:
             self.buffer_cell_ = buffer_cell
             self.config_.buffer_cell = buffer_cell
         self.inserted_buffer_count_ += count
+        if count:
+            self.setPhase(RepairFlowPhase.REPAIRING, "record_inserted_buffer")
 
     def recordResize(self, count: int = 1) -> None:
         if count < 0:
             raise ValueError("resize count must be non-negative")
         self.resize_count_ += count
+        if count:
+            self.setPhase(RepairFlowPhase.REPAIRING, "record_resize")
 
     def recordClonedGate(self, count: int = 1) -> None:
         if count < 0:
             raise ValueError("cloned gate count must be non-negative")
         self.cloned_gate_count_ += count
+        if count:
+            self.setPhase(RepairFlowPhase.REPAIRING, "record_cloned_gate")
 
     def resetCounters(self) -> None:
         self.resize_count_ = 0
         self.inserted_buffer_count_ = 0
         self.cloned_gate_count_ = 0
+        self.setPhase(RepairFlowPhase.IDLE, "reset_counters")
 
     def holdBufferCount(self) -> int:
         return self.inserted_buffer_count_
@@ -146,7 +157,17 @@ class RepairHold:
             config=self.reportConfig(),
             counters=self.reportCounters(),
             details={"hold_buffer": _json_value(self.buffer_cell_)},
+            phase=self.phase_,
+            history=self.phase_history_,
         ).as_dict()
+
+    def setPhase(self, phase: RepairFlowPhase, reason: str = "") -> None:
+        self.phase_ = phase
+        self.phase_history_.append(RepairPhaseEvent(phase=phase, reason=reason, order=len(self.phase_history_)))
+
+    def finishPass(self, committed: bool, reason: str = "") -> None:
+        phase = RepairFlowPhase.COMMITTED if committed else RepairFlowPhase.ROLLED_BACK
+        self.setPhase(phase, reason)
 
     def validateBatch(self, batch: Any) -> Dict[str, Any]:
         """校验 hold 批处理配置列表。"""

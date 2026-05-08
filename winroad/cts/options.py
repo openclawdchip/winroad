@@ -606,11 +606,31 @@ class CtsOptions:
             else:
                 setattr(self, key, value)
 
-    def dumpProfile(self, path: str) -> Dict[str, Any]:
+    def importProfile(self, profile_or_path: Any) -> None:
+        """兼容 OpenROAD/Tcl 习惯命名的 profile 导入别名。"""
+
+        self.loadProfile(profile_or_path)
+
+    def exportProfile(self, path: Optional[str] = None) -> Dict[str, Any]:
+        """导出可 JSON 化的 CTS options/profile 纯状态。"""
+
         profile = self.toProfile()
-        with open(path, "w", encoding="utf-8") as stream:
-            json.dump(profile, stream, indent=2, sort_keys=True)
+        if path is not None:
+            with open(path, "w", encoding="utf-8") as stream:
+                json.dump(profile, stream, indent=2, sort_keys=True)
         return profile
+
+    def snapshot(self) -> Dict[str, Any]:
+        validation = self.validate()
+        return {
+            "profile": self.toProfile(),
+            "report": self.reportProfile(),
+            "valid": not validation,
+            "validation_errors": validation,
+        }
+
+    def dumpProfile(self, path: str) -> Dict[str, Any]:
+        return self.exportProfile(path)
 
     @classmethod
     def fromProfile(cls, profile_or_path: Any) -> "CtsOptions":
@@ -663,6 +683,10 @@ class CtsOptions:
             errors.append("slew_steps 必须为正数")
         if self.clock_tree_max_depth <= 0:
             errors.append("clock_tree_max_depth 必须为正数")
+        if self.clock_roots < 0 or self.clock_subnets < 0:
+            errors.append("clock_roots/clock_subnets 不能为负数")
+        if self.buffers_inserted < 0 or self.sinks < 0:
+            errors.append("buffers_inserted/sinks 不能为负数")
         if self.buf_dist_ratio < 0.0:
             errors.append("buf_dist_ratio 不能为负数")
         if self.clustering_capacity < 0.0:

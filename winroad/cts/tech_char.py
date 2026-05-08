@@ -22,6 +22,9 @@ class TechCharSolutionData:
     topology_descriptor: List[str] = field(default_factory=list)
     is_pure_wire: bool = True
 
+    def toDict(self) -> Dict[str, Any]:
+        return asdict(self)
+
 
 @dataclass
 class TechCharResultData:
@@ -36,6 +39,9 @@ class TechCharResultData:
     total_power: float = 0.0
     is_pure_wire: bool = True
     topology: List[str] = field(default_factory=list)
+
+    def toDict(self) -> Dict[str, Any]:
+        return asdict(self)
 
 
 @dataclass(order=True, frozen=True)
@@ -200,6 +206,21 @@ class TechChar:
     def printSolution(self) -> List[TechCharResultData]:
         return list(self.result_data)
 
+    def snapshot(self, include_lut: bool = True) -> Dict[str, Any]:
+        """返回 characterization 状态快照。
+
+        `include_lut=False` 时只返回摘要，适合 report；为 True 时携带可导入
+        的 LUT/segment payload。
+        """
+
+        validation = self.validateLut()
+        return {
+            "payload": self.exportLut() if include_lut else None,
+            "report": self.report(),
+            "valid": not validation,
+            "validation_errors": validation,
+        }
+
     def compileLut(self, lut_solutions: Iterable[Any]) -> None:
         """编译已给定的结果对象到 Python LUT 容器。
 
@@ -351,6 +372,7 @@ class TechChar:
             "slews_to_test": list(self.slews_to_test),
             "result_data": [asdict(result) for result in self.result_data],
             "solution_data": [asdict(solution) for solution in self.solution_data],
+            "solution_map": self._encodeSolutionMap(),
             "characterization_initialized": self.characterization_initialized,
         }
         if path is not None:
@@ -389,6 +411,7 @@ class TechChar:
         self.slews_to_test = list(data.get("slews_to_test", self.slews_to_test))
         self.result_data.extend(TechCharResultData(**item) for item in data.get("result_data", []))
         self.solution_data.extend(TechCharSolutionData(**item) for item in data.get("solution_data", []))
+        self.solution_map.update(self._decodeSolutionMap(data.get("solution_map", {})))
         self.characterization_initialized = bool(
             data.get("characterization_initialized", self.characterization_initialized)
         )
@@ -424,6 +447,9 @@ class TechChar:
             for idx in self.key_to_wire_segments.get(key, []):
                 if idx < 0 or idx >= len(self.wire_segments):
                     errors.append(f"key_to_wire_segments[{key}] 引用越界 segment {idx}")
+            if key in self.delay_lut and key in self.slew_lut:
+                if len(self.delay_lut[key]) != len(self.slew_lut[key]):
+                    errors.append(f"LUT key {key} 的 delay/slew 数量不一致")
         for idx, segment in enumerate(self.wire_segments):
             errors.extend(f"wire_segments[{idx}]: {error}" for error in segment.validate())
         if not self.checkCharacterizationBounds():
@@ -536,6 +562,33 @@ class TechChar:
         if len(parts) != 3:
             raise ValueError(f"无效 TechChar LUT key: {key}")
         return (parts[0], parts[1], parts[2])
+
+    def _encodeSolutionMap(self) -> Dict[str, List[Dict[str, Any]]]:
+        encoded: Dict[str, List[Dict[str, Any]]] = {}
+        for key, values in self.solution_map.items():
+            if isinstance(key, TechCharKey):
+                name = f"{key.load},{key.wirelength},{key.pin_slew},{key.totalcap}"
+            else:
+                name = str(key)
+            encoded[name] = [
+                value.toDict() if isinstance(value, TechCharResultData) else dict(value)
+                for value in values
+                if isinstance(value, (TechCharResultData, dict))
+            ]
+        return encoded
+
+    def _decodeSolutionMap(self, data: Dict[str, List[Dict[str, Any]]]) -> Dict[Any, List[Any]]:
+        decoded: Dict[Any, List[Any]] = {}
+        for key, values in data.items():
+            parts = key.split(",")
+            map_key: Any = key
+            if len(parts) == 4:
+                try:
+                    map_key = TechCharKey(*(float(part) for part in parts))
+                except ValueError:
+                    map_key = key
+            decoded[map_key] = [TechCharResultData(**value) for value in values]
+        return decoded
 
 
 @dataclass
@@ -650,7 +703,7 @@ class WireSegment:
             errors.append("load/output_slew 不能为负数")
         if self.cap < 0.0 or self.res < 0.0:
             errors.append("cap/res 不能为负数")
-        if len(self.buffer_masters) not in {0, len(self.buffer_locations)}:
+        if self.buffer_locations and len(self.buffer_masters) not in {0, len(self.buffer_locations)}:
             errors.append("buffer_masters 数量需要为 0 或与 buffer_locations 一致")
         return errors
 

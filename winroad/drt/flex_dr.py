@@ -136,10 +136,13 @@ class FlexDR:
 
     def reportGuideCoverage(self) -> None:
         block = self.design_.getTopBlock()
-        rows: List[str] = ["net,guides,orig_guides,has_guides"]
+        rows: List[str] = ["net,guides,orig_guides,route_objs,has_guides"]
         if block is not None:
             for net in block.getNets():
-                rows.append(f"{net.getName()},{len(net.getGuides())},{len(net.getOrigGuides())},{int(net.hasGuides())}")
+                rows.append(
+                    f"{net.getName()},{len(net.getGuides())},{len(net.getOrigGuides())},"
+                    f"{net.getRouteObjCount()},{int(net.hasGuides())}"
+                )
         report = "\n".join(rows) + "\n"
         if self.router_cfg_.GUIDE_REPORT_FILE:
             Path(self.router_cfg_.GUIDE_REPORT_FILE).write_text(report, encoding="utf-8")
@@ -154,15 +157,21 @@ class FlexDR:
         if block is None:
             return rows
         for net in block.getNets():
-            rows.append(
-                {
-                    "net": net.getName(),
-                    "guides": len(net.getGuides()),
-                    "orig_guides": len(net.getOrigGuides()),
-                    "has_guides": net.hasGuides(),
-                }
-            )
+            row = net.getGuideSummary()
+            row["has_guides"] = net.hasGuides()
+            rows.append(row)
         return rows
+
+    def validateGuides(self) -> List[str]:
+        """检查已有 guide 的基础状态；不计算真实覆盖率。"""
+
+        block = self.design_.getTopBlock()
+        if block is None:
+            return []
+        errors: List[str] = []
+        for net in block.getNets():
+            errors.extend(net.validateGuides())
+        return errors
 
     def snapshot(self) -> Dict[str, Any]:
         """返回 DR 阶段状态快照；不运行 detailed routing 或 DRC 修复。"""
@@ -173,6 +182,7 @@ class FlexDR:
             "via_data": self.via_data_.to_dict(),
             "distributed": self.getDistributedState(),
             "guide_coverage": self.getGuideCoverageRows(),
+            "guide_validation_errors": self.validateGuides(),
         }
 
     def fixMaxSpacing(self) -> None:

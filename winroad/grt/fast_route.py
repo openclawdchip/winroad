@@ -402,6 +402,60 @@ class FastRouteCore:
             json.dump(self._json_safe_snapshot(self.createResourceSnapshot()), out, indent=2)
             out.write("\n")
 
+    def applyResourceSnapshot(self, snapshot: Dict[str, Any], *, clear: bool = False) -> Dict[str, int]:
+        """从 resource snapshot 恢复 FastRoute 资源表。
+
+        这里只恢复接口层显式保存的 layer 汇总和 edge records；不会重新构图、
+        折减 obstruction 或触发 maze/rip-up 之类真实 FastRoute 算法。
+        """
+
+        if clear:
+            self.edge_capacities.clear()
+            self.edge_usage.clear()
+        layer_fields = {
+            "total_capacity_per_layer": "cap_per_layer",
+            "total_usage_per_layer": "usage_per_layer",
+            "total_overflow_per_layer": "overflow_per_layer",
+            "max_horizontal_overflows": "max_h_overflow",
+            "max_vertical_overflows": "max_v_overflow",
+        }
+        restored_layers = 0
+        for json_key, attr in layer_fields.items():
+            if json_key in snapshot:
+                setattr(self, attr, [int(value) for value in snapshot.get(json_key, [])])
+                restored_layers += 1
+
+        restored_edges = 0
+        for rec in snapshot.get("edge_capacity_records", []):
+            self.setEdgeCapacity(rec["x1"], rec["y1"], rec["x2"], rec["y2"], rec["layer"], int(rec["value"]))
+            restored_edges += 1
+        for rec in snapshot.get("edge_usage_records", []):
+            self.setEdgeUsage(rec["x1"], rec["y1"], rec["x2"], rec["y2"], rec["layer"], int(rec["value"]))
+            restored_edges += 1
+        for rec in snapshot.get("edge_records", []):
+            # 兼容第七轮 report record：同一条记录里可同时带 capacity/usage。
+            self.applyEdgeResourceRecords([rec])
+            restored_edges += 1
+
+        self.resource_snapshot = self.createResourceSnapshot()
+        return {"layer_field_count": restored_layers, "edge_record_count": restored_edges}
+
+    def readResourceReport(self, filename: str, *, clear: bool = False) -> Dict[str, int]:
+        """读取 ``writeResourceReport`` 生成的 JSON resource snapshot。"""
+
+        with open(filename, "r", encoding="utf-8") as src:
+            return self.applyResourceSnapshot(json.load(src), clear=clear)
+
+    def importResourceSnapshot(self, filename: str, *, clear: bool = False) -> Dict[str, int]:
+        """OpenROAD 风格导入命名，转发到轻量 resource JSON 读取。"""
+
+        return self.readResourceReport(filename, clear=clear)
+
+    def exportResourceSnapshot(self, filename: str) -> None:
+        """OpenROAD 风格导出命名，写出轻量 resource JSON。"""
+
+        self.writeResourceReport(filename)
+
     def computeSuggestedAdjustment(self) -> int:
         _unsupported("FastRouteCore::computeSuggestedAdjustment")
 
@@ -644,6 +698,34 @@ class FastRouteCore:
             "overflow": max(0, info.congestion.usage - info.congestion.capacity),
             "nets": [str(net) for net in info.nets],
         }
+
+    def iterTileCongestionRecords(
+        self,
+        *,
+        layer: Optional[int] = None,
+        overflow_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """列出 tile congestion records，供批处理 report/filter 使用。"""
+
+        records: List[Dict[str, Any]] = []
+        for (x, y, tile_layer), info in sorted(self.buildTileCongestion().items()):
+            if layer is not None and tile_layer != layer:
+                continue
+            overflow = max(0, info.congestion.usage - info.congestion.capacity)
+            if overflow_only and overflow == 0:
+                continue
+            records.append(
+                {
+                    "x": x,
+                    "y": y,
+                    "layer": tile_layer,
+                    "capacity": info.congestion.capacity,
+                    "usage": info.congestion.usage,
+                    "overflow": overflow,
+                    "nets": [str(net) for net in info.nets],
+                }
+            )
+        return records
 
     def getResourceSummary(self) -> Dict[str, Any]:
         """返回 resource 的紧凑摘要，供 GlobalRouter 状态页和 smoke 使用。"""

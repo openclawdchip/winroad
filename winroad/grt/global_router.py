@@ -413,6 +413,17 @@ class GlobalRouter:
 
         self._read_route_text(file_name)
 
+    def importGuides(self, file_name: str, *, clear: bool = False) -> None:
+        """导入 guide/segment 文件，保留 OpenROAD 边界层命名。
+
+        ``clear=True`` 时先清掉当前 Python route 状态；这里仍只处理轻量
+        JSON/guide 文本，不从 OpenDB 生成 wire。
+        """
+
+        if clear:
+            self.clearRoutes()
+        self.readGuides(file_name)
+
     def writeGuides(
         self,
         file_name: str,
@@ -433,6 +444,73 @@ class GlobalRouter:
         else:
             raise ValueError("format 必须是 'json'、'guide' 或 'text'")
 
+    def exportGuides(
+        self,
+        file_name: str,
+        nets: Optional[Sequence[Any]] = None,
+        *,
+        format: str = "json",
+    ) -> None:
+        """导出当前 guide/segment 状态，作为 ``writeGuides`` 的显式别名。"""
+
+        self.writeGuides(file_name, nets, format=format)
+
+    def inspectGuideFile(self, file_name: str) -> Dict[str, Any]:
+        """不改当前状态地读取并汇总 guide 文件内容。"""
+
+        with open(file_name, "r", encoding="utf-8") as src:
+            guide_file = GuideFile.fromText(src.read())
+        return {
+            "format": "winroad-grt-guide-inspection",
+            "version": 1,
+            "file": file_name,
+            "net_count": len(guide_file.guides),
+            "segment_count": sum(len(guide.segments) for guide in guide_file.guides),
+            "nets": [
+                {
+                    "net": guide.net,
+                    "segment_count": len(guide.segments),
+                    "segments": [segment.toDict() for segment in guide.segments],
+                }
+                for guide in guide_file.guides
+            ],
+        }
+
+    def validateGuideFile(self, file_name: str) -> Dict[str, Any]:
+        """不污染当前 routes 地校验磁盘 guide 文件。"""
+
+        inspection = self.inspectGuideFile(file_name)
+        issues: List[Dict[str, Any]] = []
+        seen: Set[str] = set()
+        for net_info in inspection["nets"]:
+            net_name = net_info["net"]
+            if not net_name:
+                issues.append({"type": "empty_net_name", "message": "guide 中存在空 net 名"})
+            if net_name in seen:
+                issues.append({"type": "duplicate_net", "net": net_name, "message": "guide 文件中 net 重复"})
+            seen.add(net_name)
+            for index, segment_data in enumerate(net_info["segments"]):
+                segment_report = self.validateSegment(GSegment.fromDict(segment_data), net=net_name, index=index)
+                for issue in segment_report["issues"]:
+                    issues.append(
+                        {
+                            "type": issue["type"],
+                            "net": net_name,
+                            "segment_index": index,
+                            "message": issue["message"],
+                        }
+                    )
+        return {
+            "format": "winroad-grt-guide-validation",
+            "version": 1,
+            "file": file_name,
+            "valid": not issues,
+            "issue_count": len(issues),
+            "net_count": inspection["net_count"],
+            "segment_count": inspection["segment_count"],
+            "issues": issues,
+        }
+
     def readGuideFiles(self, file_names: Sequence[str], *, clear: bool = False) -> List[str]:
         """批量读取 guide/segment 文件，返回已读取文件列表。"""
 
@@ -443,6 +521,19 @@ class GlobalRouter:
             self.readGuides(file_name)
             loaded.append(file_name)
         return loaded
+
+    def importGuideFiles(self, file_names: Sequence[str], *, clear: bool = False) -> Dict[str, Any]:
+        """批量导入 guide 文件，并返回每个文件的预检结果。"""
+
+        validations = [self.validateGuideFile(file_name) for file_name in file_names]
+        loaded = self.readGuideFiles(file_names, clear=clear)
+        return {
+            "format": "winroad-grt-guide-import",
+            "version": 1,
+            "loaded": loaded,
+            "valid": all(item["valid"] for item in validations),
+            "validations": validations,
+        }
 
     def writeGuideFiles(
         self,
@@ -461,6 +552,37 @@ class GlobalRouter:
             self.writeGuides(file_name, nets, format=format)
             written.append(file_name)
         return written
+
+    def exportGuideFiles(
+        self,
+        outputs: Dict[str, Optional[Sequence[Any]]],
+        *,
+        format: str = "json",
+    ) -> List[str]:
+        """批量导出 guide 文件，作为 ``writeGuideFiles`` 的显式别名。"""
+
+        return self.writeGuideFiles(outputs, format=format)
+
+    def createGuideReport(self, nets: Optional[Sequence[Any]] = None) -> Dict[str, Any]:
+        """创建当前内存 guide/segment 的 JSON 安全报告。"""
+
+        route_payload = self._route_payload(nets)
+        guides = GuideFile.fromDict(route_payload).guides
+        return {
+            "format": "winroad-grt-guide-report",
+            "version": 1,
+            "net_count": len(guides),
+            "segment_count": sum(len(guide.segments) for guide in guides),
+            "routes": route_payload,
+            "validation": self.validateRoutes(nets),
+        }
+
+    def writeGuideReport(self, file_name: str, nets: Optional[Sequence[Any]] = None) -> None:
+        """写出当前 guide/segment 报告。"""
+
+        with open(file_name, "w", encoding="utf-8") as out:
+            json.dump(self.createGuideReport(nets), out, indent=2)
+            out.write("\n")
 
     def splitGuidesByNet(
         self,
@@ -932,7 +1054,8 @@ class GlobalRouter:
         """批量写 report 文件。
 
         ``reports`` 的 key 是 report 类型，value 是输出文件名；支持
-        ``route``、``resource``、``congestion``、``state`` 和 ``validation``。
+        ``route``、``guide``、``resource``、``resource_validation``、
+        ``congestion``、``congestion_tiles``、``state`` 和 ``validation``。
         返回实际写出的类型到文件名映射。
         """
 
@@ -940,10 +1063,28 @@ class GlobalRouter:
         for report_type, file_name in reports.items():
             if report_type == "route":
                 self.writeRouteReport(file_name, nets)
+            elif report_type == "guide":
+                self.writeGuideReport(file_name, nets)
             elif report_type == "resource":
                 self.writeResourceReport(file_name)
+            elif report_type == "resource_validation":
+                with open(file_name, "w", encoding="utf-8") as out:
+                    json.dump(self.fastroute_core.validateResources(), out, indent=2)
+                    out.write("\n")
             elif report_type == "congestion":
                 self.writeCongestionReport(file_name)
+            elif report_type == "congestion_tiles":
+                with open(file_name, "w", encoding="utf-8") as out:
+                    json.dump(
+                        {
+                            "format": "winroad-grt-congestion-tiles",
+                            "version": 1,
+                            "tiles": self.getTileCongestionRecords(),
+                        },
+                        out,
+                        indent=2,
+                    )
+                    out.write("\n")
             elif report_type == "state":
                 self.saveState(file_name)
             elif report_type == "validation":
@@ -969,6 +1110,31 @@ class GlobalRouter:
         """批量导入 edge resource records。"""
 
         return self.fastroute_core.applyEdgeResourceRecords(records, clear=clear)
+
+    def applyResourceSnapshot(self, snapshot: Dict[str, Any], *, clear: bool = False) -> Dict[str, int]:
+        """批量导入 resource snapshot dict。"""
+
+        return self.fastroute_core.applyResourceSnapshot(snapshot, clear=clear)
+
+    def importResourceSnapshot(self, file_name: str, *, clear: bool = False) -> Dict[str, int]:
+        """从磁盘导入 resource snapshot JSON。"""
+
+        return self.fastroute_core.importResourceSnapshot(file_name, clear=clear)
+
+    def exportResourceSnapshot(self, file_name: str) -> None:
+        """把当前 resource snapshot 导出到磁盘 JSON。"""
+
+        self.fastroute_core.exportResourceSnapshot(file_name)
+
+    def getTileCongestionRecords(
+        self,
+        *,
+        layer: Optional[int] = None,
+        overflow_only: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """批量返回 tile congestion records。"""
+
+        return self.fastroute_core.iterTileCongestionRecords(layer=layer, overflow_only=overflow_only)
 
     def startIncremental(self) -> None:
         self.is_incremental = True

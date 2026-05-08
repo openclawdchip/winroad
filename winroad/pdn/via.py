@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
-from .types import FailedViaReason, Rect, Shape, SplitCut, _name, _normalize_failed_via_reason, _not_implemented, _validate_non_negative, _validate_rect
+from .types import FailedViaReason, PdnIssue, Rect, Shape, SplitCut, _name, _normalize_failed_via_reason, _not_implemented, _validate_non_negative, _validate_rect
 
 @dataclass
 class Via:
@@ -354,6 +354,12 @@ class Connect:
                 via.upper.removeVia(via)
         self.vias.clear()
 
+    def resetRuntimeState(self) -> None:
+        """清理 via 和 failed-via runtime 状态，保留 connect 配置参数。"""
+
+        self.clearShapes()
+        self.clearFailedVias()
+
     def getVias(self) -> List[Via]:
         return list(self.vias)
 
@@ -383,6 +389,22 @@ class Connect:
 
     def clearFailedVias(self) -> None:
         self.failed_vias.clear()
+
+    def collectSetupIssues(self, path: str = "") -> List[PdnIssue]:
+        issues: List[PdnIssue] = []
+        base = path or f"connect:{_name(self.layer0)}->{_name(self.layer1)}"
+        if self.grid is None:
+            issues.append(PdnIssue(base, "connect is not attached to a grid"))
+        if self.layer0 is None or self.layer1 is None:
+            issues.append(PdnIssue(base, "connect requires both lower and upper layers"))
+        if self.max_rows and self.max_columns and (self.cut_pitch_x == 0 or self.cut_pitch_y == 0):
+            issues.append(PdnIssue(base, "via array row/column limits require both cut pitch values", severity="warning"))
+        for layer, split in self.split_cuts.items():
+            if layer is None:
+                issues.append(PdnIssue(base, "split cut layer cannot be None"))
+            if split.pitch == 0:
+                issues.append(PdnIssue(base, f"split cut on layer {_name(layer)} has zero pitch", severity="warning"))
+        return issues
 
     def printViaReport(self) -> Dict[str, int]:
         report = {reason.value: len(items) for reason, items in self.failed_vias.items()}

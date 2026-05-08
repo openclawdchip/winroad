@@ -62,6 +62,30 @@ class TritonRoute:
 
         self.router_cfg_.update(**values)
 
+    def resolveRouterLayerNames(self) -> None:
+        """把已加载 tech 中的 routing layer 名称解析到配置层号；找不到则保留原值。
+
+        该入口只同步 Python 配置状态，不解析 LEF/DEF，也不修改 tech。
+        """
+
+        if self.design_ is None:
+            return
+        name_to_field = {
+            "BOTTOM_ROUTING_LAYER_NAME": "BOTTOM_ROUTING_LAYER",
+            "TOP_ROUTING_LAYER_NAME": "TOP_ROUTING_LAYER",
+            "VIAINPIN_BOTTOMLAYER_NAME": "VIAINPIN_BOTTOMLAYERNUM",
+            "VIAINPIN_TOPLAYER_NAME": "VIAINPIN_TOPLAYERNUM",
+            "VIA_ACCESS_LAYER_NAME": "VIA_ACCESS_LAYERNUM",
+            "REPAIR_PDN_LAYER_NAME": "REPAIR_PDN_LAYER_NUM",
+        }
+        for name_field, num_field in name_to_field.items():
+            layer_name = getattr(self.router_cfg_, name_field)
+            if not layer_name:
+                continue
+            layer_num = self.design_.resolveLayerNum(layer_name)
+            if layer_num:
+                setattr(self.router_cfg_, num_field, layer_num)
+
     def getDb(self) -> Any:
         return self.db_
 
@@ -269,30 +293,78 @@ class TritonRoute:
     def getMarkerSummary(self) -> Dict[str, Any]:
         """返回 marker 摘要，供 report/snapshot 使用。"""
 
-        markers = self.collectMarkers()
-        by_layer: Dict[int, int] = {}
-        for marker in markers:
-            by_layer[marker.getLayerNum()] = by_layer.get(marker.getLayerNum(), 0) + 1
-        return {"count": len(markers), "by_layer": by_layer}
+        if self.design_ is None:
+            return {"count": 0, "by_layer": {}}
+        return self.design_.getMarkerSummary()
+
+    def getMarkerRows(self) -> List[Dict[str, Any]]:
+        """展开当前已有 marker，供 UI/测试读取；不调用 checkDRC。"""
+
+        rows: List[Dict[str, Any]] = []
+        for idx, marker in enumerate(self.collectMarkers(), start=1):
+            bbox = marker.getBBox()
+            rows.append(
+                {
+                    "idx": idx,
+                    "layer": marker.getLayerNum(),
+                    "bbox": bbox,
+                    "constraint": getattr(marker.getConstraint(), "getName", lambda: getattr(marker.getConstraint(), "name", ""))(),
+                    "sources": len(marker.getSrcs()),
+                }
+            )
+        return rows
 
     def getRouteGuideSummary(self) -> List[Dict[str, Any]]:
         """返回 net guide 摘要；只统计已有 guide，不估算覆盖或修补 guide。"""
 
+        if self.design_ is None:
+            return []
+        return self.design_.getGuideSummary()
+
+    def validateConfiguration(self) -> List[str]:
+        """检查 drt 配置状态中的明显错误；不补默认值、不读 ODB。"""
+
+        errors: List[str] = []
+        if self.router_cfg_.MAX_THREADS < 1:
+            errors.append("MAX_THREADS must be >= 1")
+        if self.router_cfg_.BOTTOM_ROUTING_LAYER > self.router_cfg_.TOP_ROUTING_LAYER:
+            errors.append("BOTTOM_ROUTING_LAYER is above TOP_ROUTING_LAYER")
+        if self.router_cfg_.END_ITERATION < 0:
+            errors.append("END_ITERATION must be >= 0")
+        if self.router_cfg_.BATCHSIZE < 1 or self.router_cfg_.BATCHSIZETA < 1:
+            errors.append("BATCHSIZE and BATCHSIZETA must be >= 1")
+        return errors
+
+    def validateRouteGuides(self) -> List[str]:
+        """检查 route guide 容器关系；不计算覆盖率，不生成 guide。"""
+
         if self.design_ is None or self.design_.getTopBlock() is None:
             return []
-        rows: List[Dict[str, Any]] = []
+        errors: List[str] = []
         for net in self.design_.getTopBlock().getNets():
-            rows.append(
-                {
-                    "net": net.getName(),
-                    "guides": len(net.getGuides()),
-                    "orig_guides": len(net.getOrigGuides()),
-                    "routes": len(net.getShapes()),
-                    "vias": len(net.getVias()),
-                    "modified": net.isModified(),
-                }
-            )
-        return rows
+            errors.extend(net.validateGuides())
+        return errors
+
+    def validateMarkers(self) -> List[str]:
+        """检查现有 marker 的 bbox/layer/owner；不运行 DRC。"""
+
+        if self.design_ is None or self.design_.getTopBlock() is None:
+            return []
+        errors: List[str] = []
+        for idx, marker in enumerate(self.design_.getTopBlock().getMarkers()):
+            for error in marker.validate():
+                errors.append(f"marker[{idx}]: {error}")
+            if marker.getOwner() is not self.design_.getTopBlock():
+                errors.append(f"marker[{idx}] owner mismatch")
+        return errors
+
+    def validateState(self) -> List[str]:
+        """汇总 Python 接口层状态校验；所有真实 routing/DRC 仍由未实现入口承担。"""
+
+        errors = self.validateConfiguration()
+        if self.design_ is not None:
+            errors.extend(self.design_.validate())
+        return errors
 
     def snapshot(self) -> Dict[str, Any]:
         """返回 TritonRoute 顶层状态；真实 drt/ODB 处理仍由未实现入口承载。"""
@@ -305,7 +377,9 @@ class TritonRoute:
             "router_cfg": self.router_cfg_.to_dict(),
             "debug": self.debug_.to_dict(),
             "markers": self.getMarkerSummary(),
+            "marker_rows": self.getMarkerRows(),
             "route_guides": self.getRouteGuideSummary(),
+            "validation_errors": self.validateState(),
             "design": self.design_.snapshot() if self.design_ is not None else None,
             "dr": self.dr_.snapshot() if self.dr_ is not None else None,
             "pa": self.pa_.snapshot() if self.pa_ is not None else None,
@@ -396,6 +470,31 @@ class TritonRoute:
         """报告当前已有 marker；不调用 GC，也不创建新的 violation。"""
 
         self.reportDRC(file_name, self.collectMarkers(), "DRT_MARKER")
+
+    def writeRouteGuideReport(self, file_name: str = "") -> None:
+        """写出已有 route guide 摘要；不读取 guide 文件，也不修补 guide。"""
+
+        rows = ["net,guides,orig_guides,route_objs,modified,guide_layers"]
+        for row in self.getRouteGuideSummary():
+            guide_layers = ";".join(f"{layer}:{count}" for layer, count in sorted(row["guide_layers"].items()))
+            rows.append(
+                ",".join(
+                    [
+                        str(row["net"]),
+                        str(row["guides"]),
+                        str(row["orig_guides"]),
+                        str(row["route_objs"]),
+                        str(int(row["modified"])),
+                        guide_layers,
+                    ]
+                )
+            )
+        report = "\n".join(rows) + "\n"
+        target = file_name or self.router_cfg_.GUIDE_REPORT_FILE
+        if target:
+            Path(target).write_text(report, encoding="utf-8")
+        elif self.logger_ is not None and hasattr(self.logger_, "info"):
+            self.logger_.info(report.rstrip())
 
     def reportConstraints(self) -> None:
         if self.design_ is None:

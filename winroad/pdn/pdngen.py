@@ -100,7 +100,7 @@ class PdnGen:
             "allow_repair_channels": self.allow_repair_channels,
             "domains": [self._export_domain_config(domain, domain is self.core_domain) for domain in self.getDomains()],
             "switched_power_cells": [cell.report() for cell in self.switched_power_cells],
-            "sroute": self.sroute.report() if self.sroute is not None else None,
+            "sroute": self._export_sroute_config() if self.sroute is not None else None,
             "renderer": self.debug_renderer.snapshot() if self.debug_renderer is not None else None,
         }
 
@@ -164,13 +164,13 @@ class PdnGen:
                 domain.addGrid(grid)
         if data.get("sroute"):
             for connect in data["sroute"].get("connects", []):
-                self.sroute.addSrouteConnect(**connect)
+                self.sroute.addSrouteConnect(**{str(key): self._import_sroute_value(value, resolver) for key, value in connect.items()})
         if data.get("renderer"):
             renderer_data = data["renderer"]
             self.debug_renderer = PDNRenderer(bool(renderer_data.get("enabled", False)), block=self._get_block(), logger=self.logger)
             self.debug_renderer.setGrids([grid for domain in self.getDomains() for grid in domain.getGrids()])
             for selected in renderer_data.get("selected", []):
-                self.debug_renderer.select(selected.get("name", selected))
+                self.debug_renderer.select(self._resolve_renderer_selection(selected, resolver))
         self.setAllowRepairChannels(self.allow_repair_channels)
         return self
 
@@ -460,7 +460,7 @@ class PdnGen:
                     connect.filterVias(filter_text)
 
     def checkSetup(self) -> None:
-        issues = self.collectSetupIssues()
+        issues = [issue for issue in self.collectSetupIssues() if issue.severity == "error"]
         if issues:
             raise ValueError("; ".join(f"{issue.path}: {issue.message}" for issue in issues))
 
@@ -480,6 +480,17 @@ class PdnGen:
             if domain.pdngen is not self:
                 issues.append(PdnIssue(domain_path, f"voltage domain {domain.getName()!r} is attached to the wrong PdnGen"))
             issues.extend(domain.collectSetupIssues(domain_path))
+        seen_cells: Set[str] = set()
+        for index, cell in enumerate(self.switched_power_cells):
+            cell_path = f"pdngen/power_cell[{index}]/{cell.getName()}"
+            if cell.getName() in seen_cells:
+                issues.append(PdnIssue(cell_path, f"duplicate power switch cell {cell.getName()!r}"))
+            seen_cells.add(cell.getName())
+            issues.extend(cell.collectSetupIssues(cell_path))
+        if self.sroute is not None:
+            issues.extend(self.sroute.collectSetupIssues("pdngen/sroute"))
+        if self.debug_renderer is not None:
+            issues.extend(self.debug_renderer.collectSetupIssues("pdngen/renderer"))
         return issues
 
     def reportSetupIssues(self) -> List[Dict[str, str]]:
@@ -518,6 +529,7 @@ class PdnGen:
 
     def updateRenderer(self) -> None:
         if self.debug_renderer is not None:
+            self.debug_renderer.setGrids([grid for domain in self.getDomains() for grid in domain.getGrids()])
             self.debug_renderer.redraw()
 
     def importUPF(self, target: Any, network_type: Optional[PowerSwitchNetworkType] = None) -> bool:
@@ -621,6 +633,36 @@ class PdnGen:
                 for layer, split in connect.split_cuts.items()
             },
         }
+
+    def _export_sroute_config(self) -> Dict[str, Any]:
+        if self.sroute is None:
+            return {"connect_count": 0, "connects_with_nets": 0, "connects_with_layers": 0, "parameter_keys": [], "connects": []}
+        data = self.sroute.summary()
+        data["connects"] = [
+            {str(key): self._export_sroute_value(value) for key, value in connect.items()}
+            for connect in self.sroute.getSrouteConnects()
+        ]
+        return data
+
+    def _export_sroute_value(self, value: Any) -> Any:
+        if isinstance(value, (list, tuple)):
+            return [self._export_sroute_value(item) for item in value]
+        if isinstance(value, set):
+            return [self._export_sroute_value(item) for item in sorted(value, key=_name)]
+        if isinstance(value, Mapping):
+            return {str(key): self._export_sroute_value(item) for key, item in value.items()}
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        return self._ref(value)
+
+    def _import_sroute_value(self, value: Any, resolver: Any = None) -> Any:
+        if isinstance(value, list):
+            return [self._import_sroute_value(item, resolver) for item in value]
+        if isinstance(value, Mapping):
+            return {str(key): self._import_sroute_value(item, resolver) for key, item in value.items()}
+        if resolver is not None and isinstance(value, str):
+            return self._resolve_ref(value, resolver)
+        return value
 
     def _export_domain_state(self, domain: VoltageDomain) -> Dict[str, Any]:
         return {"name": domain.getName(), "grids": [self._export_grid_state(grid) for grid in domain.getGrids()]}
@@ -841,6 +883,34 @@ class PdnGen:
         if resolver is None:
             return value
         return resolver(value)
+
+    def _resolve_renderer_selection(self, selected: Any, resolver: Any = None) -> Any:
+        """恢复 renderer 选择项，优先映射回当前 PDN 对象树。
+
+        renderer 快照只保存 type/name；导入时不做绘制，只把可识别的 domain/grid/component
+        对象挂回 selected 列表，无法识别时保留原始名称，便于报告 round trip。
+        """
+
+        if not isinstance(selected, Mapping):
+            return self._resolve_ref(selected, resolver)
+        name = selected.get("name")
+        selected_type = selected.get("type")
+        if selected_type in {"CoreGrid", "InstanceGrid", "BumpGrid", "ExistingGrid", "Grid"} and name is not None:
+            grid = self.getGridByName(str(name))
+            if grid is not None:
+                return grid
+        if selected_type == "VoltageDomain" and name is not None:
+            domain = self.findDomain(str(name))
+            if domain is not None:
+                return domain
+        if name is not None:
+            for domain in self.getDomains():
+                for grid in domain.getGrids():
+                    for component in grid.getGridComponents():
+                        if _name(component) == str(name) or component.type().value == str(name):
+                            return component
+            return self._resolve_ref(name, resolver)
+        return selected
 
     def _get_block(self) -> Any:
         if self.db is None:

@@ -5,7 +5,18 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Sequence, Set
 
-from .common import MoveType, OptoParams, RepairFlowState, RepairSetupConfig, _json_value, _not_translated, _obj_key
+from .common import (
+    EndpointRepairState,
+    MoveType,
+    OptoParams,
+    RepairFlowPhase,
+    RepairFlowState,
+    RepairPhaseEvent,
+    RepairSetupConfig,
+    _json_value,
+    _not_translated,
+    _obj_key,
+)
 from .moves import (
     BaseMove,
     BufferMove,
@@ -63,6 +74,9 @@ class RepairSetup:
         self.max_end_repairs_ = -1
         self.equiv_pin_map_: Dict[Any, Set[Any]] = {}
         self.config_ = RepairSetupConfig()
+        self.phase_ = RepairFlowPhase.IDLE
+        self.phase_history_: List[RepairPhaseEvent] = []
+        self.endpoint_states_: Dict[Any, EndpointRepairState] = {}
 
     def init(self) -> None:
         self.db_network_ = self.resizer_.db_network_
@@ -184,6 +198,7 @@ class RepairSetup:
                 skip_buffer_removal,
                 skip_vt_swap,
             )
+        self.setPhase(RepairFlowPhase.CONFIGURED, "configure")
         return self.config_
 
     def resetConfig(self) -> None:
@@ -192,6 +207,7 @@ class RepairSetup:
         self.move_sequence_.clear()
         self.move_sequence_types_.clear()
         self.config_ = RepairSetupConfig()
+        self.setPhase(RepairFlowPhase.IDLE, "reset_config")
 
     def config(self) -> RepairSetupConfig:
         return self.config_
@@ -246,10 +262,22 @@ class RepairSetup:
         key = _obj_key(endpoint_pin)
         count = self.endpoint_pass_counts_phase1_.get(key, 0) + 1
         self.endpoint_pass_counts_phase1_[key] = count
+        state = self.endpoint_states_.setdefault(key, EndpointRepairState(endpoint_pin))
+        state.begin()
         self.rejected_pin_moves_current_endpoint_.clear()
         if self.move_tracker_ is not None:
             self.move_tracker_.setCurrentEndpoint(endpoint_pin)
+        self.setPhase(RepairFlowPhase.REPAIRING, f"endpoint={_json_value(endpoint_pin)}")
         return count
+
+    def finishEndpointRepair(self, endpoint_pin: Any, committed: bool, reason: str = "") -> None:
+        """结束一个 endpoint repair 尝试，只更新状态机和统计。"""
+
+        key = _obj_key(endpoint_pin)
+        state = self.endpoint_states_.setdefault(key, EndpointRepairState(endpoint_pin))
+        state.finish(committed, reason)
+        phase = RepairFlowPhase.COMMITTED if committed else RepairFlowPhase.ROLLED_BACK
+        self.setPhase(phase, reason or f"endpoint={_json_value(endpoint_pin)}")
 
     def endpointRepairCount(self, endpoint_pin: Any) -> int:
         return self.endpoint_pass_counts_phase1_.get(_obj_key(endpoint_pin), 0)
@@ -272,6 +300,7 @@ class RepairSetup:
     def resetCounters(self) -> None:
         self.removed_buffer_count_ = 0
         self.endpoint_pass_counts_phase1_.clear()
+        self.endpoint_states_.clear()
         self.wns_no_progress_count_ = 0
         self.overall_no_progress_count_ = 0
         self.rejected_pin_moves_current_endpoint_.clear()
@@ -283,6 +312,7 @@ class RepairSetup:
             move.pending_count_ = 0
             move.rejected_count_ = 0
             move.accepted_count_ = 0
+        self.setPhase(RepairFlowPhase.IDLE, "reset_counters")
 
     def reportCounters(self) -> Dict[str, Any]:
         return {
@@ -291,6 +321,7 @@ class RepairSetup:
             "wns_no_progress": self.wns_no_progress_count_,
             "overall_no_progress": self.overall_no_progress_count_,
             "move_counts": {move.name(): move.moveCounters() for move in self.allMoves()},
+            "endpoint_states": self.reportEndpointStates(),
         }
 
     def reportMoveSummary(self) -> Dict[str, Any]:
@@ -302,7 +333,23 @@ class RepairSetup:
             "move_counts": move_counts,
             "tracker": self.move_tracker_.report() if self.move_tracker_ is not None else None,
             "config": self.reportConfig(),
+            "phase": self.phase_.value,
         }
+
+    def setPhase(self, phase: RepairFlowPhase, reason: str = "") -> None:
+        """记录 setup repair 状态机阶段。"""
+
+        self.phase_ = phase
+        self.phase_history_.append(RepairPhaseEvent(phase=phase, reason=reason, order=len(self.phase_history_)))
+
+    def phase(self) -> RepairFlowPhase:
+        return self.phase_
+
+    def phaseHistory(self) -> List[RepairPhaseEvent]:
+        return list(self.phase_history_)
+
+    def reportEndpointStates(self) -> List[Dict[str, Any]]:
+        return [state.as_dict() for state in self.endpoint_states_.values()]
 
     def validateBatch(self, batch: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
         """校验一组 setup 配置，供批处理入口先行 fail-fast。
@@ -354,6 +401,8 @@ class RepairSetup:
             config=self.reportConfig(),
             counters=self.reportCounters(),
             details=self.reportMoveSummary(),
+            phase=self.phase_,
+            history=self.phase_history_,
         ).as_dict()
 
     def statistics(self) -> Dict[str, Any]:

@@ -19,6 +19,10 @@ from .types import (
     _unsupported,
 )
 
+def _rect_is_valid(box: Rect) -> bool:
+    return box[0] <= box[2] and box[1] <= box[3]
+
+
 @dataclass
 class frLayer:
     """对应 ``db/tech/frLayer.h`` 的 routing/cut layer 对象。
@@ -66,11 +70,23 @@ class frLayer:
     def getMinWidth(self) -> frUInt4:
         return self.min_width
 
+    def setPitch(self, pitch: frUInt4) -> None:
+        self.pitch = pitch
+
     def getPitch(self) -> frUInt4:
         return 0 if self.fake_cut or self.fake_masterslice else self.pitch
 
+    def setDir(self, direction: dbTechLayerDir) -> None:
+        self.direction = direction
+
     def getDir(self) -> dbTechLayerDir:
         return dbTechLayerDir.NONE if self.fake_cut or self.fake_masterslice else self.direction
+
+    def setType(self, layer_type: dbTechLayerType) -> None:
+        self.layer_type = layer_type
+
+    def getType(self) -> dbTechLayerType:
+        return self.layer_type
 
     def isVertical(self) -> bool:
         return self.getDir() == dbTechLayerDir.VERTICAL
@@ -102,6 +118,20 @@ class frLayer:
 
     def getConstraints(self) -> List[Any]:
         return self.constraints
+
+    def validate(self) -> List[str]:
+        """只检查 Python 边界内的 layer 状态，不推导 PDK 规则。"""
+
+        errors: List[str] = []
+        if not self.getName():
+            errors.append("layer name is empty")
+        if self.layer_num < 0:
+            errors.append(f"layer {self.getName()} has negative layer_num")
+        if self.width < 0 or self.min_width < 0 or self.pitch < 0:
+            errors.append(f"layer {self.getName()} has negative width/min_width/pitch")
+        if self.isRoutable() and self.getDir() == dbTechLayerDir.NONE:
+            errors.append(f"routing layer {self.getName()} has no preferred direction")
+        return errors
 
     def to_dict(self) -> Dict[str, Any]:
         """返回 layer 的 Python 状态快照；约束仅保存名称，避免假装解析 LEF 语义。"""
@@ -149,6 +179,18 @@ class frViaDef:
 
     def isDefault(self) -> bool:
         return self.is_default
+
+    def validate(self) -> List[str]:
+        """检查 via def 的层号顺序；不检查 cut/metal 几何。"""
+
+        errors: List[str] = []
+        if not self.name:
+            errors.append("via def name is empty")
+        if self.layer1_num > self.layer2_num:
+            errors.append(f"via def {self.name} has layer1 above layer2")
+        if self.cut_layer_num and not (self.layer1_num <= self.cut_layer_num <= self.layer2_num):
+            errors.append(f"via def {self.name} cut layer is outside metal layer span")
+        return errors
 
     def to_dict(self) -> Dict[str, Any]:
         """返回 via def 的边界状态，不展开 cut/metal shape。"""
@@ -198,6 +240,11 @@ class frVia:
         x, y = self.origin
         return (x, y, x, y)
 
+    def validate(self) -> List[str]:
+        """检查 via 实例是否有 via def；不展开真实 via bbox。"""
+
+        return ["via has no via_def"] if self.via_def is None else []
+
     def to_dict(self) -> Dict[str, Any]:
         """返回 via 实例快照；真实 via 几何仍由后续 frViaDef 翻译负责。"""
 
@@ -237,6 +284,16 @@ class frShape:
     def setBBox(self, bbox: Rect) -> None:
         self.bbox = bbox
 
+    def validate(self) -> List[str]:
+        """检查 shape 的基本 bbox/layer 合法性，不做 DRC。"""
+
+        errors: List[str] = []
+        if self.layer_num < 0:
+            errors.append("shape has negative layer_num")
+        if not _rect_is_valid(self.bbox):
+            errors.append(f"shape has invalid bbox {self.bbox}")
+        return errors
+
     def to_dict(self) -> Dict[str, Any]:
         """返回 shape 边界状态；不区分 rect/pathseg/polygon 的内部点列。"""
 
@@ -267,6 +324,16 @@ class frGuide(frShape):
 
     def setEndLayerNum(self, layer_num: frLayerNum) -> None:
         self.end_layer_num = layer_num
+
+    def validate(self) -> List[str]:
+        """检查 guide 的层范围和 bbox；不计算 guide 覆盖率。"""
+
+        errors = super().validate()
+        if self.begin_layer_num > self.end_layer_num:
+            errors.append(f"guide has invalid layer span {self.begin_layer_num}>{self.end_layer_num}")
+        if self.layer_num and not (self.begin_layer_num <= self.layer_num <= self.end_layer_num):
+            errors.append("guide layer_num is outside begin/end layer span")
+        return errors
 
     def typeId(self) -> frBlockObjectEnum:
         return frBlockObjectEnum.frcGuide
@@ -316,6 +383,16 @@ class frMarker:
 
     def getOwner(self) -> Optional[Any]:
         return self.owner
+
+    def validate(self) -> List[str]:
+        """检查 marker 的基本状态；不判定违规类别或生成 marker。"""
+
+        errors: List[str] = []
+        if self.layer_num < 0:
+            errors.append("marker has negative layer_num")
+        if not _rect_is_valid(self.bbox):
+            errors.append(f"marker has invalid bbox {self.bbox}")
+        return errors
 
     def typeId(self) -> frBlockObjectEnum:
         return frBlockObjectEnum.frcMarker
@@ -503,6 +580,12 @@ class frNet:
     def setFirstNonRPinNode(self, node: Optional[frNode]) -> None:
         self.first_non_rpin_node = node
 
+    def getRouteObjCount(self) -> int:
+        return len(self.shapes) + len(self.vias) + len(self.patch_wires)
+
+    def getGuideCount(self) -> int:
+        return len(self.guides)
+
     def removeShape(self, shape: frShape) -> None:
         if shape in self.shapes:
             self.shapes.remove(shape)
@@ -619,6 +702,61 @@ class frNet:
     def getOwner(self) -> Optional["frBlock"]:
         return self.owner
 
+    def getGuideSummary(self) -> Dict[str, Any]:
+        """返回单 net 的 guide/route 摘要，不尝试评估真实覆盖。"""
+
+        layers: Dict[frLayerNum, int] = {}
+        for guide in self.guides:
+            for layer_num in range(guide.getBeginLayerNum(), guide.getEndLayerNum() + 1):
+                layers[layer_num] = layers.get(layer_num, 0) + 1
+        return {
+            "net": self.name,
+            "guides": len(self.guides),
+            "orig_guides": len(self.orig_guides),
+            "guide_layers": layers,
+            "route_objs": self.getRouteObjCount(),
+            "modified": self.modified,
+        }
+
+    def validateGuides(self) -> List[str]:
+        """检查 net guide 容器关系和基础几何；不做覆盖率或连通性判断。"""
+
+        errors: List[str] = []
+        for idx, guide in enumerate(self.guides):
+            for error in guide.validate():
+                errors.append(f"net {self.name} guide[{idx}]: {error}")
+            if guide.getNet() is not self:
+                errors.append(f"net {self.name} guide[{idx}] owner mismatch")
+        return errors
+
+    def validateRoutes(self) -> List[str]:
+        """检查 route 对象 owner 和基础 bbox；不修复拓扑。"""
+
+        errors: List[str] = []
+        for idx, shape in enumerate(self.shapes):
+            if hasattr(shape, "validate"):
+                for error in shape.validate():
+                    errors.append(f"net {self.name} shape[{idx}]: {error}")
+            if getattr(shape, "getNet", lambda: None)() is not self:
+                errors.append(f"net {self.name} shape[{idx}] owner mismatch")
+        for idx, via in enumerate(self.vias):
+            if hasattr(via, "validate"):
+                for error in via.validate():
+                    errors.append(f"net {self.name} via[{idx}]: {error}")
+            if via.getNet() is not self:
+                errors.append(f"net {self.name} via[{idx}] owner mismatch")
+        return errors
+
+    def validate(self) -> List[str]:
+        """检查 net 的 Python 容器一致性，不运行 detailed routing。"""
+
+        errors: List[str] = []
+        if not self.name:
+            errors.append("net name is empty")
+        errors.extend(self.validateGuides())
+        errors.extend(self.validateRoutes())
+        return errors
+
     def to_dict(self) -> Dict[str, Any]:
         """返回 net 的对象计数和状态位；不推导连通性或修复布线。"""
 
@@ -703,6 +841,30 @@ class frTechObject:
     def getViaDefs(self) -> List[frViaDef]:
         return list(self.via_defs.values())
 
+    def validate(self) -> List[str]:
+        """检查 tech 容器中的 layer/via def 基本关系。"""
+
+        errors: List[str] = []
+        seen_nums: Dict[frLayerNum, str] = {}
+        seen_names: Dict[str, frLayerNum] = {}
+        for layer in self.layers:
+            for error in layer.validate():
+                errors.append(f"tech layer {layer.getName()}: {error}")
+            if layer.getLayerNum() in seen_nums:
+                errors.append(f"duplicate layer_num {layer.getLayerNum()} for {seen_nums[layer.getLayerNum()]} and {layer.getName()}")
+            seen_nums[layer.getLayerNum()] = layer.getName()
+            if layer.getName() in seen_names:
+                errors.append(f"duplicate layer name {layer.getName()}")
+            seen_names[layer.getName()] = layer.getLayerNum()
+        for via_def in self.getViaDefs():
+            for error in via_def.validate():
+                errors.append(f"tech via {via_def.getName()}: {error}")
+            if via_def.getLayer1Num() and self.getLayer(via_def.getLayer1Num()) is None:
+                errors.append(f"via def {via_def.getName()} references missing layer1 {via_def.getLayer1Num()}")
+            if via_def.getLayer2Num() and self.getLayer(via_def.getLayer2Num()) is None:
+                errors.append(f"via def {via_def.getName()} references missing layer2 {via_def.getLayer2Num()}")
+        return errors
+
     def to_dict(self) -> Dict[str, Any]:
         """返回 tech 容器快照；只包含已加载到 Python 边界的 layer/via def。"""
 
@@ -756,6 +918,11 @@ class frBlock:
             marker.owner = None
         self.markers.clear()
 
+    def removeMarker(self, marker: frMarker) -> None:
+        if marker in self.markers:
+            self.markers.remove(marker)
+            marker.owner = None
+
     def setTrackPatterns(self, layer_num: frLayerNum, is_vertical: bool, patterns: Iterable[Any]) -> None:
         self.track_patterns[(layer_num, is_vertical)] = list(patterns)
 
@@ -774,6 +941,34 @@ class frBlock:
 
     def getName(self) -> str:
         return self.name
+
+    def getGuideSummary(self) -> List[Dict[str, Any]]:
+        return [net.getGuideSummary() for net in self.nets]
+
+    def getMarkerSummary(self) -> Dict[str, Any]:
+        by_layer: Dict[frLayerNum, int] = {}
+        for marker in self.markers:
+            by_layer[marker.getLayerNum()] = by_layer.get(marker.getLayerNum(), 0) + 1
+        return {"count": len(self.markers), "by_layer": by_layer}
+
+    def validate(self) -> List[str]:
+        """检查 block 下对象 owner 与基础几何；不做 DRC/连通性。"""
+
+        errors: List[str] = []
+        seen_nets: set[str] = set()
+        for net in self.nets:
+            if net.getName() in seen_nets:
+                errors.append(f"duplicate net {net.getName()}")
+            seen_nets.add(net.getName())
+            if net.getOwner() is not self:
+                errors.append(f"net {net.getName()} owner mismatch")
+            errors.extend(net.validate())
+        for idx, marker in enumerate(self.markers):
+            for error in marker.validate():
+                errors.append(f"marker[{idx}]: {error}")
+            if marker.getOwner() is not self:
+                errors.append(f"marker[{idx}] owner mismatch")
+        return errors
 
     def to_dict(self) -> Dict[str, Any]:
         """返回 block 快照；track pattern 仅记录数量，不展开 PDK 轨道对象。"""
@@ -935,6 +1130,30 @@ class frDesign:
 
     def getTopBlockName(self) -> str:
         return self.topBlock_.getName() if self.topBlock_ is not None else ""
+
+    def resolveLayerNum(self, layer_name: str) -> frLayerNum:
+        """按 layer 名称查层号；找不到时返回 0，保持轻量查询语义。"""
+
+        layer = self.tech_.getLayerByName(layer_name)
+        return layer.getLayerNum() if layer is not None else 0
+
+    def getGuideSummary(self) -> List[Dict[str, Any]]:
+        block = self.getTopBlock()
+        return block.getGuideSummary() if block is not None else []
+
+    def getMarkerSummary(self) -> Dict[str, Any]:
+        block = self.getTopBlock()
+        return block.getMarkerSummary() if block is not None else {"count": 0, "by_layer": {}}
+
+    def validate(self) -> List[str]:
+        """检查 frDesign Python 状态一致性；不读取或写回 ODB。"""
+
+        errors = self.tech_.validate()
+        if self.topBlock_ is not None:
+            if self.topBlock_.owner is not self:
+                errors.append("top block owner mismatch")
+            errors.extend(self.topBlock_.validate())
+        return errors
 
     def snapshot(self) -> Dict[str, Any]:
         """返回 frDesign 的状态快照；用于 Python 接口层报告和 smoke 验证。"""

@@ -46,11 +46,16 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
     long-wire/max-slew/max-cap/max-fanout counter、slew RC factor 等成员。
   - 新增 `RepairDesignLimits`、`RepairDesignViolationCounters`，用于记录
     long wire / max slew / max cap / max fanout 修复边界参数和统计。
+  - 第八轮新增 `NetBufferRelation` 和 repair phase 状态机，可记录一次
+    net repair 中 driver、load、endpoint、inserted/removed buffer 以及
+    buffer-to-load 的关系；该记录只服务 report/smoke，不修改 DB。
   - `configureLimits()` 采用合并式更新，`resetLimits()` 回到默认限制。
   - `configureLimits()`、`limits()`、`recordRepair()`、`resetViolationCounters()`、
     `violationCounters()`、`reportViolationCounters()`、
     `reportLimits()`、`insertedBufferCount()`、`resizedDriverCount()`、
-    `repairedNetCount()`、`setDebugGraphics()`、`getSlewRCFactor()` 等入口已建立。
+    `repairedNetCount()`、`recordNetBufferRelation()`、
+    `reportNetBufferRelations()`、`finishPass()`、`setDebugGraphics()`、
+    `getSlewRCFactor()` 等入口已建立。
   - 第七轮补齐 `importConfig()`、`exportConfig()`、`reportState()`、
     `statistics()`、`validateBatch()`；这些接口只处理状态/校验，不执行真实
     STA 查询、buffer insertion 或 DB mutation。
@@ -70,10 +75,13 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
     `setMoveTracker()`、`beginEndpointRepair()`、`recordRemovedBuffer()`、
     `resetCounters()`、`reportCounters()`、
     `endpointRepairCount()`、`recordRejectedMove()`、`rejectedMovesForPin()`、
-    `reportMoveSummary()` 补齐 endpoint / move tracker / report 边界。
+    `finishEndpointRepair()`、`reportEndpointStates()`、`reportMoveSummary()`
+    补齐 endpoint / move tracker / report 边界。
   - 第七轮补齐 `importConfig()`、`exportConfig()`、`reportState()`、
     `statistics()`、`to_json()`、`validateBatch()`，可用于批处理配置预检和
     JSON-safe 报告导出。
+  - 第八轮新增 `EndpointRepairState` 与 `RepairFlowPhase` 阶段历史，记录
+    configured / repairing / committed / rolled_back 等流程状态。
 
 - `RepairHold`
   - 对应 `src/rsz/src/RepairHold.hh`。
@@ -136,9 +144,12 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
   - 第七轮新增 `MoveTrackerState` 和 `state()`，把 endpoint、critical pins、
     violator、pending count 和 move summary 作为轻量状态对象导出。
 
-- `RepairFlowState`、`BufferedNetState`、`MoveTrackerState`
+- `RepairFlowPhase`、`RepairPhaseEvent`、`RepairFlowState`、`BufferedNetState`、
+  `MoveTrackerState`、`EndpointRepairState`、`NetBufferRelation`
   - 第七轮新增的状态对象。它们把配置、计数器、树形指标和 move summary
     统一压成 JSON-safe dict，方便上层 Tcl/Python report 和 smoke test 使用。
+  - 第八轮补齐 repair phase 历史、endpoint repair 结果和 net/buffer/load
+    关系快照。
 
 - `SwapArithModules`
   - 对应 `src/rsz/src/SwapArithModules.hh` 的抽象接口。
@@ -193,9 +204,15 @@ setup move 边界在 `moves.py`，各修复流程分别在 `repair_design.py`、
   `validateRepairHoldBatch()` / `reportRepairHoldState()`，
   `importRecoverPowerConfig()` / `exportRecoverPowerConfig()` /
   `validateRecoverPowerBatch()` / `reportRecoverPowerState()`
-- `MoveTracker.trackCriticalPins()` / `trackViolator()` /
-  `trackViolatorWithInfo()` / `trackMove()` / `commitMoves()` / `rejectMoves()` /
-  `moveSummary()` / `moveSummaryByType()` / `as_dict()` / `to_json()` / `report()`
+  - `MoveTracker.trackCriticalPins()` / `trackViolator()` /
+    `trackViolatorWithInfo()` / `trackMove()` / `commitMoves()` / `rejectMoves()` /
+    `moveSummary()` / `moveSummaryByType()` / `moveSummaryByPin()` /
+    `as_dict()` / `to_json()` / `report()`
+
+- 第八轮新增全局 repair 快照和聚合校验：
+  `Resizer.snapshotRepairConfig()` / `restoreRepairConfig()` /
+  `reportRepairStates()` / `validateRepairBatch()`，用于批处理前后保存和恢复
+  RepairDesign / RepairSetup / RepairHold / RecoverPower 的配置层状态。
 
 ## 未翻译的真实算法
 
@@ -234,7 +251,7 @@ OpenDB netlist mutation、estimated parasitics、global router 或 OpenDP，不�
 4. `BaseMove` 派生类建议按 C++ 文件逐个翻译：buffer、unbuffer、size up/down、
    clone、split load、pin swap、VT swap。
 
-## 第七轮验证命令
+## 第八轮验证命令
 
 ```powershell
 python -m py_compile D:\winroad_py\winroad\rsz\__init__.py D:\winroad_py\winroad\rsz\buffered_net.py D:\winroad_py\winroad\rsz\common.py D:\winroad_py\winroad\rsz\moves.py D:\winroad_py\winroad\rsz\repair_design.py D:\winroad_py\winroad\rsz\repair_setup.py D:\winroad_py\winroad\rsz\repair_hold.py D:\winroad_py\winroad\rsz\recover_power.py D:\winroad_py\winroad\rsz\resizer.py
@@ -243,50 +260,48 @@ python -m py_compile D:\winroad_py\winroad\rsz\__init__.py D:\winroad_py\winroad
 ```powershell
 $env:PYTHONPATH='D:\winroad_py'
 @'
-from winroad.rsz import BufferedNet, BufferedNetType, FixedDelay, MoveType, Resizer
+from winroad.rsz import MoveType, RepairFlowPhase, Resizer
 
 r = Resizer()
-
-root = BufferedNet(BufferedNetType.JUNCTION, (0, 0))
-load = BufferedNet(BufferedNetType.LOAD, (10, 5), load_pin_=object())
-buf = BufferedNet(BufferedNetType.BUFFER, (5, 0), buffer_cell_="BUF_X1")
-buf.setRef(load)
-root.setRef(buf)
-root.setSlack(FixedDelay.from_fs(12))
-assert root.serialize()["node_count"] == 3
-assert "children" in root.to_json()
-
-rd = r.repair_design_
-rd.configureLimits(max_wire_length=100.0, slew_margin=0.1, buffer_cells=["B1"])
-rd.configureLimits(max_slew=0.2)
-assert rd.reportLimits()["max_wire_length"] == 100.0
-rd.resetLimits()
-assert rd.reportLimits()["max_wire_length"] is None
+r.configureRepairDesign(max_wire_length=120.0, max_slew=0.3, buffer_cells=["BUF_X1"])
+r.recordNetBufferRelation(
+    net="n1",
+    driver_pin="u1/Y",
+    load_pins=["u2/A", "u3/A"],
+    inserted_buffers=["rsz_buf_1"],
+    endpoint_pins=["u3/A"],
+    buffer_to_loads={"rsz_buf_1": ["u2/A", "u3/A"]},
+)
+assert r.reportNetBufferRelations()[0]["net"] == "n1"
 
 rs = r.repair_setup_
 tracker = rs.makeMoveTracker()
-tracker.setCurrentEndpoint("EP")
-tracker.trackMoveAttempt("pin", "BufferMove")
-tracker.commitMoves()
-assert tracker.moveSummary()["attempt_commit"] == 1
-assert "moves" in tracker.to_json()
-rs.configure(setup_slack_margin=0.01, skip_size_down=True)
-rs.configure(max_repairs_per_pass=7)
-assert rs.reportConfig()["setup_slack_margin"] == 0.01
-rs.setupMoveSequence([MoveType.BUFFER, MoveType.SWAP, MoveType.SIZEDOWN], False, False, True, False, False, False)
+rs.configure(move_sequence=[MoveType.BUFFER, MoveType.SWAP, MoveType.SIZEDOWN], skip_size_down=True)
 assert rs.moveSequenceTypes() == [MoveType.BUFFER, MoveType.SWAP]
+rs.beginEndpointRepair("u3/A")
+tracker.trackMoveAttempt("u2/A", "BufferMove")
+tracker.commitMoves()
+r.finishEndpointRepair("u3/A", True, "accepted")
+assert rs.reportEndpointStates()[0]["committed_count"] == 1
+assert tracker.report()["move_summary_by_pin"]["u2/A"]["attempt_commit"] == 1
 
-rh = r.repair_hold_
-rh.configure(buffer_cell="BUF_X1", max_passes=2)
-rh.recordInsertedBuffer(2)
-assert rh.statistics()["inserted_buffers"] == 2
+r.configureRepairHold(buffer_cell="BUF_X2", max_passes=2)
+r.repair_hold_.recordInsertedBuffer(2)
+r.repair_hold_.finishPass(True, "hold pass committed")
+assert r.reportRepairHoldState()["phase"] == RepairFlowPhase.COMMITTED.value
 
-rp = r.recover_power_
-rp.configure(recover_power_percent=10.0, scene="slow")
-rp.configure(verbose=True)
-rp.recordSwap(1, 0.25)
-rp.recordSizeDown(2, 0.5)
-assert rp.statistics()["config"]["scene"] == "slow"
+r.configureRecoverPower(recover_power_percent=5.0, verbose=True)
+r.recover_power_.recordSwap(1, 0.25)
+r.recover_power_.finishPass(False, "slack guard")
+assert r.reportRecoverPowerState()["phase"] == RepairFlowPhase.ROLLED_BACK.value
+
+snap = r.snapshotRepairConfig()
+r.configureRepairDesign(max_wire_length=1.0)
+r.restoreRepairConfig(snap)
+assert r.reportRepairDesignLimits()["max_wire_length"] == 120.0
+
+batch = r.validateRepairBatch({"repair_setup": [{"move_sequence": ["buffer"], "skip_buffering": True}]})
+assert batch["valid"] is False
 
 try:
     r.repairDesign()

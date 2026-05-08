@@ -228,6 +228,12 @@ class Resizer:
     def reportRepairSetupState(self) -> Dict[str, Any]:
         return self.repair_setup_.reportState()
 
+    def finishEndpointRepair(self, endpoint_pin: Any, committed: bool, reason: str = "") -> None:
+        self.repair_setup_.finishEndpointRepair(endpoint_pin, committed, reason)
+
+    def reportEndpointRepairStates(self) -> List[Dict[str, Any]]:
+        return self.repair_setup_.reportEndpointStates()
+
     def rebufferNet(self, drvr_pin: Any) -> None:
         _not_translated("Resizer::rebufferNet")
 
@@ -360,6 +366,12 @@ class Resizer:
     def reportRepairDesignState(self) -> Dict[str, Any]:
         return self.repair_design_.reportState()
 
+    def recordNetBufferRelation(self, *args: Any, **kwargs: Any) -> Any:
+        return self.repair_design_.recordNetBufferRelation(*args, **kwargs)
+
+    def reportNetBufferRelations(self) -> List[Dict[str, Any]]:
+        return self.repair_design_.reportNetBufferRelations()
+
     def repairNet(self, *args: Any, **kwargs: Any) -> None:
         self.repair_design_.repairNet(*args, **kwargs)
 
@@ -403,6 +415,64 @@ class Resizer:
 
     def repairClkInverters(self) -> None:
         self.repair_design_.repairClkInverters()
+
+    def snapshotRepairConfig(self) -> Dict[str, Any]:
+        """导出所有 rsz repair 配置快照，不包含 DB/STA mutation。"""
+
+        return {
+            "repair_design": self.exportRepairDesignConfig(),
+            "repair_setup": self.exportRepairSetupConfig(),
+            "repair_hold": self.exportRepairHoldConfig(),
+            "recover_power": self.exportRecoverPowerConfig(),
+            "clock_buffers": {
+                "cells": list(self.clk_buffers_),
+                "string": self.clock_buffer_string_,
+                "footprint": self.clock_buffer_footprint_,
+            },
+            "max_utilization": self.max_utilization_,
+            "worst_slack_nets_percent": self.worst_slack_nets_percent_,
+        }
+
+    def restoreRepairConfig(self, snapshot: Dict[str, Any]) -> None:
+        """从 ``snapshotRepairConfig`` 的结果恢复配置层状态。"""
+
+        if "repair_design" in snapshot:
+            self.importRepairDesignConfig(snapshot["repair_design"])
+        if "repair_setup" in snapshot:
+            self.importRepairSetupConfig(snapshot["repair_setup"])
+        if "repair_hold" in snapshot:
+            self.importRepairHoldConfig(snapshot["repair_hold"])
+        if "recover_power" in snapshot:
+            self.importRecoverPowerConfig(snapshot["recover_power"])
+        clock = snapshot.get("clock_buffers", {})
+        self.clk_buffers_ = list(clock.get("cells", self.clk_buffers_))
+        self.clock_buffer_string_ = str(clock.get("string", self.clock_buffer_string_))
+        self.clock_buffer_footprint_ = str(clock.get("footprint", self.clock_buffer_footprint_))
+        if "max_utilization" in snapshot:
+            self.max_utilization_ = float(snapshot["max_utilization"])
+        if "worst_slack_nets_percent" in snapshot:
+            self.worst_slack_nets_percent_ = float(snapshot["worst_slack_nets_percent"])
+
+    def reportRepairStates(self) -> Dict[str, Any]:
+        """汇总四个 Repair* 子流程的状态机、配置和统计。"""
+
+        return {
+            "repair_design": self.reportRepairDesignState(),
+            "repair_setup": self.reportRepairSetupState(),
+            "repair_hold": self.reportRepairHoldState(),
+            "recover_power": self.reportRecoverPowerState(),
+        }
+
+    def validateRepairBatch(self, batch: Dict[str, Sequence[Dict[str, Any]]]) -> Dict[str, Any]:
+        """统一校验四类 repair 批处理配置。"""
+
+        checks = {
+            "repair_design": self.validateRepairDesignBatch(batch.get("repair_design", [])),
+            "repair_setup": self.validateRepairSetupBatch(batch.get("repair_setup", [])),
+            "repair_hold": self.validateRepairHoldBatch(batch.get("repair_hold", [])),
+            "recover_power": self.validateRecoverPowerBatch(batch.get("recover_power", [])),
+        }
+        return {"valid": all(item["valid"] for item in checks.values()), "checks": checks}
 
     def reportLongWires(self, count: int, digits: int) -> None:
         _not_translated("Resizer::reportLongWires")

@@ -5,7 +5,16 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional, Sequence
 
 from .buffered_net import BufferedNet
-from .common import RepairDesignLimits, RepairDesignViolationCounters, RepairFlowState, _not_translated
+from .common import (
+    NetBufferRelation,
+    RepairDesignLimits,
+    RepairDesignViolationCounters,
+    RepairFlowPhase,
+    RepairFlowState,
+    RepairPhaseEvent,
+    _not_translated,
+    _obj_key,
+)
 
 
 class ResizerObserver:
@@ -94,6 +103,9 @@ class RepairDesign:
         self.r_strongest_buffer_ = 0.0
         self.slew_rc_factor_: Optional[float] = None
         self.limits_ = RepairDesignLimits()
+        self.phase_ = RepairFlowPhase.IDLE
+        self.phase_history_: List[RepairPhaseEvent] = []
+        self.net_buffer_relations_: Dict[Any, NetBufferRelation] = {}
 
     def init(self) -> None:
         self.db_network_ = self.resizer_.db_network_
@@ -130,6 +142,7 @@ class RepairDesign:
             buffer_cells=list(prev.buffer_cells if buffer_cells is None else buffer_cells),
         )
         self._applyLimits()
+        self.setPhase(RepairFlowPhase.CONFIGURED, "configure_limits")
         return self.limits_
 
     def _applyLimits(self) -> None:
@@ -146,6 +159,7 @@ class RepairDesign:
     def resetLimits(self) -> None:
         self.limits_ = RepairDesignLimits()
         self._applyLimits()
+        self.setPhase(RepairFlowPhase.IDLE, "reset_limits")
 
     def limits(self) -> RepairDesignLimits:
         return self.limits_
@@ -178,6 +192,8 @@ class RepairDesign:
         self.max_slew_count_ = 0
         self.max_cap_count_ = 0
         self.max_fanout_count_ = 0
+        self.net_buffer_relations_.clear()
+        self.setPhase(RepairFlowPhase.IDLE, "reset_counters")
 
     def recordRepair(
         self,
@@ -209,6 +225,57 @@ class RepairDesign:
         self.inserted_buffer_count_ += inserted_buffers
         self.resize_count_ += resized_drivers
         self.repaired_net_count_ += repaired_nets
+        if repaired_nets or inserted_buffers or resized_drivers:
+            self.setPhase(RepairFlowPhase.REPAIRING, "record_repair")
+
+    def recordNetBufferRelation(
+        self,
+        net: Any,
+        driver_pin: Any = None,
+        load_pins: Optional[Sequence[Any]] = None,
+        inserted_buffers: Optional[Sequence[Any]] = None,
+        removed_buffers: Optional[Sequence[Any]] = None,
+        endpoint_pins: Optional[Sequence[Any]] = None,
+        buffer_to_loads: Optional[Dict[Any, Sequence[Any]]] = None,
+    ) -> NetBufferRelation:
+        """记录 net、driver/load endpoint 与 buffer 的关系。
+
+        该入口只维护报告状态；真正插入/删除 buffer 仍由 ``repairNet`` 等未翻译
+        方法负责。
+        """
+
+        relation = NetBufferRelation(
+            net=net,
+            driver_pin=driver_pin,
+            load_pins=list(load_pins or []),
+            inserted_buffers=list(inserted_buffers or []),
+            removed_buffers=list(removed_buffers or []),
+            endpoint_pins=list(endpoint_pins or []),
+        )
+        for buffer, loads in (buffer_to_loads or {}).items():
+            relation.add_buffer_loads(buffer, list(loads))
+        self.net_buffer_relations_[_obj_key(net)] = relation
+        return relation
+
+    def netBufferRelation(self, net: Any) -> Optional[NetBufferRelation]:
+        return self.net_buffer_relations_.get(_obj_key(net))
+
+    def reportNetBufferRelations(self) -> List[Dict[str, Any]]:
+        return [relation.as_dict() for relation in self.net_buffer_relations_.values()]
+
+    def clearNetBufferRelations(self) -> None:
+        self.net_buffer_relations_.clear()
+
+    def setPhase(self, phase: RepairFlowPhase, reason: str = "") -> None:
+        self.phase_ = phase
+        self.phase_history_.append(RepairPhaseEvent(phase=phase, reason=reason, order=len(self.phase_history_)))
+
+    def phase(self) -> RepairFlowPhase:
+        return self.phase_
+
+    def finishPass(self, committed: bool, reason: str = "") -> None:
+        phase = RepairFlowPhase.COMMITTED if committed else RepairFlowPhase.ROLLED_BACK
+        self.setPhase(phase, reason)
 
     def violationCounters(self) -> RepairDesignViolationCounters:
         return RepairDesignViolationCounters(
@@ -248,7 +315,10 @@ class RepairDesign:
                 "initial_design_area": self.initial_design_area_,
                 "slew_rc_factor": self.slew_rc_factor_,
                 "buffer_sizes": list(self.buffer_sizes_),
+                "net_buffer_relations": self.reportNetBufferRelations(),
             },
+            phase=self.phase_,
+            history=self.phase_history_,
         ).as_dict()
 
     def statistics(self) -> Dict[str, Any]:

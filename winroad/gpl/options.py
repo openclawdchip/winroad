@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import Any, Dict, List
 
 @dataclass
@@ -60,6 +61,31 @@ class PlaceOptions:
     def validate(self, logger: Any = None) -> None:
         """对应 `PlaceOptions::validate()` 的 Python 检查。"""
 
+        float_fields = {
+            "initialPlaceNetWeightScale": self.initialPlaceNetWeightScale,
+            "density": self.density,
+            "overflow": self.overflow,
+            "keepResizeBelowOverflow": self.keepResizeBelowOverflow,
+            "timingNetWeightMax": self.timingNetWeightMax,
+            "minPhiCoef": self.minPhiCoef,
+            "maxPhiCoef": self.maxPhiCoef,
+            "initDensityPenaltyFactor": self.initDensityPenaltyFactor,
+            "initWireLengthCoef": self.initWireLengthCoef,
+            "referenceHpwl": self.referenceHpwl,
+            "routabilityCheckOverflow": self.routabilityCheckOverflow,
+            "routabilitySnapshotOverflow": self.routabilitySnapshotOverflow,
+            "routabilityMaxDensity": self.routabilityMaxDensity,
+            "routabilityTargetRcMetric": self.routabilityTargetRcMetric,
+            "routabilityInflationRatioCoef": self.routabilityInflationRatioCoef,
+            "routabilityMaxInflationRatio": self.routabilityMaxInflationRatio,
+            "routabilityRcK1": self.routabilityRcK1,
+            "routabilityRcK2": self.routabilityRcK2,
+            "routabilityRcK3": self.routabilityRcK3,
+            "routabilityRcK4": self.routabilityRcK4,
+        }
+        for name, value in float_fields.items():
+            if not isfinite(value):
+                raise ValueError(f"{name} must be finite")
         if self.initialPlaceMaxIter < 0:
             raise ValueError("initialPlaceMaxIter must be non-negative")
         if self.initialPlaceMinDiffLength < 0:
@@ -110,6 +136,8 @@ class PlaceOptions:
             raise ValueError("routabilityMaxInflationRatio must be at least 1.0")
         if self.padLeft < 0 or self.padRight < 0:
             raise ValueError("padLeft/padRight must be non-negative")
+        if self.timingDrivenMode and not self.timingNetWeightOverflows:
+            raise ValueError("timingNetWeightOverflows must not be empty when timing-driven mode is enabled")
 
     def report(self) -> Dict[str, Any]:
         """Return a stable dictionary for smoke tests and higher-level reports."""

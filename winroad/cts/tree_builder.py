@@ -493,6 +493,72 @@ class SegmentBuilder:
     def getNumBufferLevels(self) -> int:
         return self.num_buffer_levels
 
+    def report(self) -> Dict[str, Any]:
+        validation = self.validate()
+        return {
+            "start": self._pointReport(self.start),
+            "end": self._pointReport(self.end),
+            "level": self.level,
+            "topology": self.topology.value,
+            "inst_prefix": self.inst_prefix,
+            "net_prefix": self.net_prefix,
+            "tech_char_wires": list(self.tech_char_wires),
+            "driving_subnet": self.driving_subnet.getName() if self.driving_subnet else None,
+            "num_buffer_levels": self.num_buffer_levels,
+            "length": self.length(),
+            "valid": not validation,
+            "validation_errors": validation,
+        }
+
+    def toDict(self) -> Dict[str, Any]:
+        return {
+            "start": self._pointReport(self.start),
+            "end": self._pointReport(self.end),
+            "level": self.level,
+            "topology": self.topology.value,
+            "inst_prefix": self.inst_prefix,
+            "net_prefix": self.net_prefix,
+            "tech_char_wires": list(self.tech_char_wires),
+            "driving_subnet": self.driving_subnet.getName() if self.driving_subnet else None,
+            "num_buffer_levels": self.num_buffer_levels,
+        }
+
+    @classmethod
+    def fromDict(
+        cls,
+        data: Dict[str, Any],
+        subnet_index: Optional[Dict[str, ClockSubNet]] = None,
+    ) -> "SegmentBuilder":
+        start = data.get("start", {})
+        end = data.get("end", {})
+        subnet_name = data.get("driving_subnet")
+        return cls(
+            start=Point(float(start.get("x", 0.0)), float(start.get("y", 0.0))),
+            end=Point(float(end.get("x", 0.0)), float(end.get("y", 0.0))),
+            level=int(data.get("level", 0)),
+            topology=LevelTopology(data.get("topology", LevelTopology.NONE.value)),
+            inst_prefix=str(data.get("inst_prefix", "")),
+            net_prefix=str(data.get("net_prefix", "")),
+            tech_char_wires=[int(idx) for idx in data.get("tech_char_wires", [])],
+            driving_subnet=(subnet_index or {}).get(subnet_name),
+            num_buffer_levels=int(data.get("num_buffer_levels", 0)),
+        )
+
+    def validate(self) -> List[str]:
+        errors: List[str] = []
+        if not isinstance(self.topology, LevelTopology):
+            errors.append("topology 必须是 LevelTopology")
+        if self.level < 0:
+            errors.append("level 不能为负数")
+        if self.num_buffer_levels < 0:
+            errors.append("num_buffer_levels 不能为负数")
+        if any(idx < 0 for idx in self.tech_char_wires):
+            errors.append("tech_char_wires 不能包含负索引")
+        return errors
+
+    def _pointReport(self, point: Point) -> Dict[str, float]:
+        return {"x": point.x, "y": point.y}
+
 
 @dataclass
 class HTreeBuilder(TreeBuilder):
@@ -585,6 +651,110 @@ class HTreeBuilder(TreeBuilder):
     def getSinkRegion(self) -> Optional[Box]:
         return self.sink_region
 
+    def exportTopologyState(self) -> Dict[str, Any]:
+        """导出 HTreeBuilder 拓扑容器状态，不执行真实构树。"""
+
+        return {
+            "level_topologies": [topology.value for topology in self.level_topologies],
+            "wire_segments": [segment.toDict() for segment in self.wire_segments],
+            "sink_region": self._boxReport(self.sink_region) if self.sink_region else None,
+            "branch_point_locs": [self._pointReport(point) for point in self.branch_point_locs],
+            "branch_point_parents": list(self.branch_point_parents),
+            "branch_driving_subnets": [
+                subnet.getName() if subnet else None for subnet in self.branch_driving_subnets
+            ],
+            "branch_sink_locs": [
+                [self._pointReport(point) for point in sinks] for sinks in self.branch_sink_locs
+            ],
+            "output_slew": self.output_slew,
+            "output_cap": self.output_cap,
+            "remaining_length": self.remaining_length,
+            "curr_wl": self.curr_wl,
+            "wire_segment_unit": self.wire_segment_unit,
+            "min_input_cap": self.min_input_cap,
+            "num_max_leaf_sinks": self.num_max_leaf_sinks,
+            "min_length_sink_region": self.min_length_sink_region,
+            "clock_tree_max_depth": self.clock_tree_max_depth,
+            "cluster_diameters": list(self.cluster_diameters_),
+            "cluster_sizes": list(self.cluster_sizes_),
+        }
+
+    def importTopologyState(self, data: Dict[str, Any], clear: bool = True) -> None:
+        """恢复 `exportTopologyState` 导出的 H-tree 纯状态。"""
+
+        if clear:
+            self.level_topologies.clear()
+            self.wire_segments.clear()
+            self.branch_point_locs.clear()
+            self.branch_point_parents.clear()
+            self.branch_driving_subnets.clear()
+            self.branch_sink_locs.clear()
+        subnet_index = {subnet.getName(): subnet for subnet in self.clock.getSubNets()}
+        self.level_topologies.extend(
+            LevelTopology(value) for value in data.get("level_topologies", [])
+        )
+        self.wire_segments.extend(
+            SegmentBuilder.fromDict(item, subnet_index)
+            for item in data.get("wire_segments", [])
+        )
+        region = data.get("sink_region")
+        if region:
+            self.sink_region = Box(
+                float(region.get("x_min", 0.0)),
+                float(region.get("y_min", 0.0)),
+                float(region.get("x_max", 0.0)),
+                float(region.get("y_max", 0.0)),
+            )
+        for point_data in data.get("branch_point_locs", []):
+            self.branch_point_locs.append(
+                Point(float(point_data.get("x", 0.0)), float(point_data.get("y", 0.0)))
+            )
+        self.branch_point_parents.extend(int(parent) for parent in data.get("branch_point_parents", []))
+        self.branch_driving_subnets.extend(
+            subnet_index.get(name) if name is not None else None
+            for name in data.get("branch_driving_subnets", [])
+        )
+        for sinks in data.get("branch_sink_locs", []):
+            self.branch_sink_locs.append(
+                [Point(float(item.get("x", 0.0)), float(item.get("y", 0.0))) for item in sinks]
+            )
+        self.output_slew = int(data.get("output_slew", self.output_slew))
+        self.output_cap = int(data.get("output_cap", self.output_cap))
+        self.remaining_length = int(data.get("remaining_length", self.remaining_length))
+        self.curr_wl = int(data.get("curr_wl", self.curr_wl))
+        self.wire_segment_unit = int(data.get("wire_segment_unit", self.wire_segment_unit))
+        self.min_input_cap = int(data.get("min_input_cap", self.min_input_cap))
+        self.num_max_leaf_sinks = int(data.get("num_max_leaf_sinks", self.num_max_leaf_sinks))
+        self.min_length_sink_region = int(
+            data.get("min_length_sink_region", self.min_length_sink_region)
+        )
+        self.clock_tree_max_depth = int(data.get("clock_tree_max_depth", self.clock_tree_max_depth))
+        self.cluster_diameters_ = [int(value) for value in data.get("cluster_diameters", self.cluster_diameters_)]
+        self.cluster_sizes_ = [int(value) for value in data.get("cluster_sizes", self.cluster_sizes_)]
+
+    def validateTopologyState(self) -> List[str]:
+        errors: List[str] = []
+        for idx, segment in enumerate(self.wire_segments):
+            errors.extend(f"wire_segments[{idx}]: {error}" for error in segment.validate())
+        if len(self.branch_point_locs) != len(self.branch_point_parents):
+            errors.append("branch_point_locs 与 branch_point_parents 数量不一致")
+        if len(self.branch_point_locs) != len(self.branch_driving_subnets):
+            errors.append("branch_point_locs 与 branch_driving_subnets 数量不一致")
+        if len(self.branch_point_locs) != len(self.branch_sink_locs):
+            errors.append("branch_point_locs 与 branch_sink_locs 数量不一致")
+        for idx, parent in enumerate(self.branch_point_parents):
+            if parent >= idx and parent != -1:
+                errors.append(f"branch_point_parents[{idx}] 不能指向自身或后续节点")
+        for attr in ("output_slew", "output_cap", "remaining_length", "curr_wl", "wire_segment_unit"):
+            if getattr(self, attr) < 0:
+                errors.append(f"{attr} 不能为负数")
+        if self.sink_region and (
+            self.sink_region.x_min > self.sink_region.x_max
+            or self.sink_region.y_min > self.sink_region.y_max
+        ):
+            errors.append("sink_region 边界反向")
+        return errors
+
     def legalizeOneBuffer(self, buffer_loc: Point, buffer_name: str) -> Point:
         _not_translated("HTreeBuilder::legalizeOneBuffer")
 
@@ -664,3 +834,17 @@ class HTreeBuilder(TreeBuilder):
 
     def resolveLocationCollision(self, legal_center: Point) -> Point:
         _not_translated("HTreeBuilder::resolveLocationCollision")
+
+    def snapshotState(self) -> Dict[str, Any]:
+        snapshot = super().snapshotState()
+        topology = self.exportTopologyState()
+        validation = self.validateTopologyState()
+        snapshot["topology"] = topology
+        snapshot["topology_report"] = {
+            **topology,
+            "num_wire_segments": len(self.wire_segments),
+            "num_branching_points": len(self.branch_point_locs),
+            "valid": not validation,
+            "validation_errors": validation,
+        }
+        return snapshot

@@ -229,6 +229,14 @@ class Instance:
             self.pins_.append(pin)
             pin.setInstance(self)
 
+    def removePin(self, pin: "Pin") -> None:
+        """断开 Instance -> Pin 的反向关系，供 DB callback 生命周期使用。"""
+
+        if pin in self.pins_:
+            self.pins_.remove(pin)
+        if pin.getInstance() is self:
+            pin.inst_ = None
+
     def getPins(self) -> List["Pin"]:
         return self.pins_
 
@@ -372,6 +380,12 @@ class Pin:
     def setNet(self, net: "Net") -> None:
         self.net_ = net
 
+    def clearInstance(self) -> None:
+        self.inst_ = None
+
+    def clearNet(self) -> None:
+        self.net_ = None
+
     def isPlaceInstConnected(self) -> bool:
         return bool(self.inst_ and self.inst_.isPlaceInstance())
 
@@ -465,6 +479,14 @@ class Net:
             self.pins_.append(pin)
             pin.setNet(self)
 
+    def removePin(self, pin: Pin) -> None:
+        """断开 Net -> Pin 的反向关系，保持 Python 对象图可恢复。"""
+
+        if pin in self.pins_:
+            self.pins_.remove(pin)
+        if pin.getNet() is self:
+            pin.net_ = None
+
     def report(self) -> Dict[str, Any]:
         """导出线网状态；HPWL 只使用已存在 pin 坐标，不做算法估算。"""
 
@@ -547,6 +569,8 @@ class PlacerBaseCommon:
         return None
 
     def _add_pin(self, term: Any, inst: Optional[Instance], net: Optional[Net], is_bterm: bool = False) -> Pin:
+        if term is None:
+            raise ValueError("Cannot create GPL Pin for a missing DB term")
         pin = self.pinMap_.get(id(term))
         if pin is None:
             pin = Pin(term_=term, inst_=inst, net_=net)
@@ -562,6 +586,53 @@ class PlacerBaseCommon:
             pin.updateLocation(inst)
         if net is not None:
             net.addPin(pin)
+        return pin
+
+    def addDbITerm(self, term_name: Any, term: Any) -> Pin:
+        """按当前 ODB 骨架新增/同步一个 ITerm pin。"""
+
+        inst = self._resolve_inst(getattr(term, "inst", None))
+        net = self._resolve_net(getattr(term, "net", None))
+        pin = self._add_pin(term, inst, net, False)
+        self.pinMap_[term_name] = pin
+        return pin
+
+    def addDbBTerm(self, term_name: Any, term: Any) -> Pin:
+        """按当前 ODB 骨架新增/同步一个 BTerm pin。"""
+
+        block = _get_block(self.db_)
+        bpins = getattr(block, "bpins", {}) if block is not None else {}
+        net = self._resolve_net(getattr(term, "net", None))
+        pin = self._add_pin(term, None, net, True)
+        pin.cx_, pin.cy_ = self._bterm_center(block, term, bpins)
+        self.pinMap_[term_name] = pin
+        return pin
+
+    def removeDbTerm(self, term_or_name: Any) -> Optional[Pin]:
+        """删除 ITerm/BTerm 对应 Pin，并同步 Instance/Net 两端反向关系。"""
+
+        try:
+            pin = self.pinMap_.pop(term_or_name, None)
+        except TypeError:
+            pin = None
+        if pin is None:
+            pin = self.pinMap_.pop(id(term_or_name), None)
+        if pin is None:
+            return None
+        for key, value in list(self.pinMap_.items()):
+            if value is pin:
+                self.pinMap_.pop(key, None)
+        inst = pin.getInstance()
+        net = pin.getNet()
+        if inst is not None:
+            inst.removePin(pin)
+        if net is not None:
+            net.removePin(pin)
+        for pins in (self.pins_, self.pinStor_):
+            if pin in pins:
+                pins.remove(pin)
+        pin.clearInstance()
+        pin.clearNet()
         return pin
 
     def _init_pins(self, block: Any) -> None:
@@ -661,8 +732,7 @@ class PlacerBaseCommon:
         # DB 删除实例时，先断开 pin 的实例端；net 端是否还存在由后续 ITerm
         # callback/rebuild 决定，避免留下指向已删除 Instance 的反向关系。
         for pin in list(inst.getPins()):
-            pin.inst_ = None
-        inst.pins_.clear()
+            inst.removePin(pin)
         for insts in (self.insts_, self.placeInsts_, self.instStor_):
             if inst in insts:
                 insts.remove(inst)
@@ -686,8 +756,7 @@ class PlacerBaseCommon:
             return None
         # 删除 net 时同步 pin 的 net 端，保持 Python 对象图没有悬挂 net。
         for pin in list(net.getPins()):
-            pin.net_ = None
-        net.pins_.clear()
+            net.removePin(pin)
         for nets in (self.nets_, self.netStor_):
             if net in nets:
                 nets.remove(net)

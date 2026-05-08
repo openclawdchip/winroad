@@ -164,7 +164,38 @@ class ClockSubNet:
             "name": self.name,
             "leaf_level": self.leaf_level,
             "instances": [inst.getName() for inst in self.instances],
+            "instance_payloads": [inst.toDict() for inst in self.instances],
         }
+
+    @classmethod
+    def fromDict(
+        cls,
+        data: Dict[str, Any],
+        name_index: Optional[Dict[str, ClockInst]] = None,
+    ) -> "ClockSubNet":
+        """从快照恢复 subnet。
+
+        如果传入 clock 的名称索引，就按 OpenROAD 的共享 instance 语义引用
+        既有 sink/buffer；否则用 payload 创建独立实例，方便单测或局部导入。
+        """
+
+        subnet = cls(str(data.get("name", "")))
+        subnet.setLeafLevel(bool(data.get("leaf_level", False)))
+        index = name_index or {}
+        payloads = {
+            str(item.get("name", "")): item for item in data.get("instance_payloads", [])
+        }
+        for inst_name in data.get("instances", []):
+            name = str(inst_name)
+            inst = index.get(name)
+            if inst is None and name in payloads:
+                inst = ClockInst.fromDict(payloads[name])
+            if inst is not None:
+                subnet.addInst(inst)
+        if not subnet.instances and not index:
+            for item in data.get("instance_payloads", []):
+                subnet.addInst(ClockInst.fromDict(item))
+        return subnet
 
     def validate(self) -> List[str]:
         """检查 subnet driver/sink 列表是否满足 CTS 网络状态约束。"""
@@ -219,6 +250,14 @@ class Clock:
     def addSubNetObj(self, subnet: ClockSubNet) -> None:
         self.sub_nets.append(subnet)
 
+    def addClockBufferInst(self, inst: ClockInst) -> None:
+        self.clock_buffers.append(inst)
+        self.name_to_inst[inst.getName()] = inst
+
+    def addSinkInst(self, inst: ClockInst) -> None:
+        self.sinks.append(inst)
+        self.name_to_inst[inst.getName()] = inst
+
     def addSink(
         self,
         name: str,
@@ -268,6 +307,9 @@ class Clock:
 
     def setSubNets(self, subnets: Iterable[ClockSubNet]) -> None:
         self.sub_nets = list(subnets)
+
+    def clearSubNets(self) -> None:
+        self.sub_nets.clear()
 
     def rebuildNameIndex(self) -> None:
         """从 buffer/sink 列表重建名称索引，供导入或手工改状态后修复。"""
@@ -335,13 +377,7 @@ class Clock:
             clock.sinks.append(inst)
             clock.name_to_inst[inst.getName()] = inst
         for subnet_data in data.get("sub_nets", []):
-            subnet = ClockSubNet(str(subnet_data.get("name", "")))
-            subnet.setLeafLevel(bool(subnet_data.get("leaf_level", False)))
-            for inst_name in subnet_data.get("instances", []):
-                inst = clock.findClockByName(str(inst_name))
-                if inst is not None:
-                    subnet.addInst(inst)
-            clock.addSubNetObj(subnet)
+            clock.addSubNetObj(ClockSubNet.fromDict(subnet_data, clock.name_to_inst))
         return clock
 
     def serialize(self, path: Optional[str] = None) -> Dict[str, Any]:
@@ -357,6 +393,13 @@ class Clock:
             with open(data_or_path, "r", encoding="utf-8") as stream:
                 data_or_path = json.load(stream)
         return cls.fromDict(data_or_path)
+
+    def exportNetwork(self, path: Optional[str] = None) -> Dict[str, Any]:
+        return self.serialize(path)
+
+    @classmethod
+    def importNetwork(cls, data_or_path: Any) -> "Clock":
+        return cls.deserialize(data_or_path)
 
     def snapshot(self) -> Dict[str, Any]:
         """返回带 report 与可反序列化 payload 的 clock network 快照。"""
@@ -375,6 +418,10 @@ class Clock:
         names: Set[str] = set()
         for inst in self.clock_buffers + self.sinks:
             errors.extend(inst.validate())
+            if inst in self.clock_buffers and not inst.isClockBuffer():
+                errors.append(f"{self.net_name}: buffer 列表中的 {inst.getName()} 类型不是 CLOCK_BUFFER")
+            if inst in self.sinks and not inst.isSink():
+                errors.append(f"{self.net_name}: sink 列表中的 {inst.getName()} 类型不是 CLOCK_SINK")
             if inst.getName() in names:
                 errors.append(f"{self.net_name}: instance {inst.getName()} 在 clock 内重复")
             names.add(inst.getName())

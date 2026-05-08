@@ -151,10 +151,14 @@ class GCell:
         return ",".join(names) if names else "FILLER"
 
     def addGPin(self, gPin: "GPin") -> None:
-        self.gPins_.append(gPin)
-        gPin.setGCell(self)
+        if gPin not in self.gPins_:
+            self.gPins_.append(gPin)
+            gPin.setGCell(self)
 
     def clearGPins(self) -> None:
+        for gpin in self.gPins_:
+            if gpin.getGCell() is self:
+                gpin.clearGCell()
         self.gPins_.clear()
 
     def updateLocations(self) -> None:
@@ -314,6 +318,38 @@ class GCell:
 
 
 @dataclass
+class GCellSnapshot:
+    """保存 Nesterov snapshot 中单个 GCell 的可恢复状态。"""
+
+    location: Tuple[int, int, int, int]
+    density_box: Tuple[int, int, int, int]
+    density_scale: float
+    gradient: Tuple[float, float]
+    change: GCellChange
+
+    @classmethod
+    def from_gcell(cls, gcell: GCell) -> "GCellSnapshot":
+        return cls(
+            location=(gcell.lx(), gcell.ly(), gcell.ux(), gcell.uy()),
+            density_box=(gcell.dLx(), gcell.dLy(), gcell.dUx(), gcell.dUy()),
+            density_scale=gcell.getDensityScale(),
+            gradient=(gcell.getGradientX(), gcell.getGradientY()),
+            change=gcell.changeType(),
+        )
+
+    def restore(self, gcell: GCell) -> None:
+        lx, ly, ux, uy = self.location
+        d_lx, d_ly, d_ux, d_uy = self.density_box
+        grad_x, grad_y = self.gradient
+        gcell.setAllLocations(lx, ly, ux, uy)
+        gcell.setDensityBox(d_lx, d_ly, d_ux, d_uy)
+        gcell.setDensityScale(self.density_scale)
+        gcell.setGradientX(grad_x)
+        gcell.setGradientY(grad_y)
+        gcell.setAreaChangeType(self.change)
+
+
+@dataclass
 class GPin:
     """对应 `gpl::GPin`。"""
 
@@ -354,6 +390,12 @@ class GPin:
 
     def setGNet(self, gNet: "GNet") -> None:
         self.gNet_ = gNet
+
+    def clearGCell(self) -> None:
+        self.gCell_ = None
+
+    def clearGNet(self) -> None:
+        self.gNet_ = None
 
     def cx(self) -> int:
         return self.cx_
@@ -508,10 +550,14 @@ class GNet:
         return self.customWeight_
 
     def addGPin(self, gPin: GPin) -> None:
-        self.gPins_.append(gPin)
-        gPin.setGNet(self)
+        if gPin not in self.gPins_:
+            self.gPins_.append(gPin)
+            gPin.setGNet(self)
 
     def clearGPins(self) -> None:
+        for gpin in self.gPins_:
+            if gpin.getGNet() is self:
+                gpin.clearGNet()
         self.gPins_.clear()
 
     def updateBox(self) -> None:
@@ -1196,6 +1242,7 @@ class NesterovBaseCommon:
         gcell = self.gCellMap_.pop(id(inst), None)
         if gcell is None:
             return None
+        gcell.clearGPins()
         for gcells in (self.nbc_gcells_, self.gCellStor_):
             if gcell in gcells:
                 gcells.remove(gcell)
@@ -1217,6 +1264,7 @@ class NesterovBaseCommon:
         gnet = self.gNetMap_.pop(id(net), None)
         if gnet is None:
             return None
+        gnet.clearGPins()
         for gnets in (self.gNets_, self.gNetStor_):
             if gnet in gnets:
                 gnets.remove(gnet)
@@ -1282,6 +1330,14 @@ class NesterovBaseCommon:
     def getDeletedGcellsCount(self) -> int:
         return self.deleted_gcells_count_
 
+    def resetLifecycleCounters(self) -> None:
+        """清理 callback 生命周期计数和 changed 队列。"""
+
+        self.delta_area_ = 0
+        self.new_gcells_count_ = 0
+        self.deleted_gcells_count_ = 0
+        self.clearChangedGCells()
+
     def resetNewGcellsCount(self) -> None:
         self.new_gcells_count_ = 0
         self.deleted_gcells_count_ = 0
@@ -1328,6 +1384,10 @@ class NesterovBase:
         self.reprint_iter_header_ = False
         self.snapshot_gcell_coordis_: List[FloatPoint] = []
         self.snapshot_density_coordis_: List[FloatPoint] = []
+        self.snapshot_gcell_states_: List[GCellSnapshot] = []
+        self.snapshot_overflow_: float = 0.0
+        self.snapshot_overflow_unscaled_: float = 0.0
+        self.snapshot_target_density_: float = self.targetDensity_
         self.prevSLPCoordi_: List[FloatPoint] = []
         self.curSLPCoordi_: List[FloatPoint] = []
         self.nextSLPCoordi_: List[FloatPoint] = []
@@ -1592,16 +1652,40 @@ class NesterovBase:
     def saveSnapshot(self) -> None:
         self.snapshot_gcell_coordis_ = [FloatPoint(cell.cx(), cell.cy()) for cell in self.nb_gcells_]
         self.snapshot_density_coordis_ = [FloatPoint(cell.dCx(), cell.dCy()) for cell in self.nb_gcells_]
+        self.snapshot_gcell_states_ = [GCellSnapshot.from_gcell(cell) for cell in self.nb_gcells_]
+        self.snapshot_overflow_ = self.sum_overflow_
+        self.snapshot_overflow_unscaled_ = self.sum_overflow_unscaled_
+        self.snapshot_target_density_ = self.targetDensity_
 
     def revertToSnapshot(self) -> bool:
-        if not self.snapshot_gcell_coordis_:
+        if not self.snapshot_gcell_states_:
             return False
-        self.updateGCellCenterLocation(self.snapshot_gcell_coordis_)
-        for gcell, coord in zip(self.nb_gcells_, self.snapshot_density_coordis_):
-            gcell.setDensityCenterLocation(int(round(coord.x)), int(round(coord.y)))
+        if len(self.snapshot_gcell_states_) != len(self.nb_gcells_):
+            raise RuntimeError("NesterovBase snapshot no longer matches current gcell count")
+        for gcell, state in zip(self.nb_gcells_, self.snapshot_gcell_states_):
+            state.restore(gcell)
+        self.sum_overflow_ = self.snapshot_overflow_
+        self.sum_overflow_unscaled_ = self.snapshot_overflow_unscaled_
+        self.setTargetDensity(self.snapshot_target_density_)
         self.nbc_.updatePinLocation()
         self.nbc_.updateGNetBox()
         return True
+
+    def clearSnapshot(self) -> None:
+        self.snapshot_gcell_coordis_.clear()
+        self.snapshot_density_coordis_.clear()
+        self.snapshot_gcell_states_.clear()
+
+    def reportSnapshot(self) -> Dict[str, Any]:
+        """导出 snapshot 边界状态，不执行任何优化判断。"""
+
+        return {
+            "saved": bool(self.snapshot_gcell_states_),
+            "gcells": len(self.snapshot_gcell_states_),
+            "overflow": self.snapshot_overflow_,
+            "overflow_unscaled": self.snapshot_overflow_unscaled_,
+            "target_density": self.snapshot_target_density_,
+        }
 
     def resetMinSumOverflow(self) -> None:
         return None
@@ -1634,6 +1718,7 @@ class NesterovBase:
             "converged": self.isConverged_,
             "diverged": self.isDiverged_,
             "snapshot_gcells": len(self.snapshot_gcell_coordis_),
+            "snapshot_state": self.reportSnapshot(),
             "prev_slp_coordis": len(self.prevSLPCoordi_),
             "cur_slp_coordis": len(self.curSLPCoordi_),
             "next_slp_coordis": len(self.nextSLPCoordi_),
@@ -1774,10 +1859,30 @@ class NesterovPlace:
             self.graphics_.addRoutabilitySnapshot(self.last_iter_)
 
     def revertToSnapshot(self) -> bool:
+        if not self.nbVec_ or not self.snapshot_saved_:
+            return False
         reverted = all(nb.revertToSnapshot() for nb in self.nbVec_)
         if reverted:
             self.updateDb()
+            self.updateOverflow()
         return reverted
+
+    def clearSnapshot(self) -> None:
+        for nb in self.nbVec_:
+            nb.clearSnapshot()
+        self.snapshot_saved_ = False
+        self.diverge_snapshot_average_overflow_unscaled_ = 0.0
+        self.diverge_snapshot_iter_ = 0
+
+    def reportSnapshot(self) -> Dict[str, Any]:
+        """导出 placer 级 snapshot/restore 状态。"""
+
+        return {
+            "saved": self.snapshot_saved_,
+            "diverge_snapshot_iter": self.diverge_snapshot_iter_,
+            "diverge_snapshot_average_overflow_unscaled": self.diverge_snapshot_average_overflow_unscaled_,
+            "bases": [nb.reportSnapshot() for nb in self.nbVec_],
+        }
 
     def checkConvergence(self, iter: int, routability_iter: int) -> bool:
         return all(nb.checkConvergence(iter, routability_iter, self.rb_) for nb in self.nbVec_)
@@ -1849,6 +1954,7 @@ class NesterovPlace:
             "routability_iter": self.routability_iter_,
             "snapshot_saved": self.snapshot_saved_,
             "diverge_snapshot_iter": self.diverge_snapshot_iter_,
+            "snapshot": self.reportSnapshot(),
             "diverge_code": self.divergeCode_,
             "diverge_message": self.divergeMsg_,
             "base_common": self.nbc_.reportStatus() if self.nbc_ is not None else {},
@@ -1898,14 +2004,25 @@ class NesterovPlace:
             if gcell not in nb.nb_gcells_:
                 nb.nb_gcells_.append(gcell)
                 nb.updateAreas()
+        self.nbc_.rebuildPinRelationships()
 
     def createGNet(self, net: DbNet) -> None:
         if self.pbc_ is None or self.nbc_ is None:
             return
         pb_net = self.pbc_.addDbNet(net)
         self.nbc_.addGNetForNet(pb_net)
+        self.nbc_.rebuildPinRelationships()
 
     def createCbkITerm(self, iterm: Any) -> None:
+        if self.pbc_ is not None:
+            name = getattr(iterm, "name", None)
+            if name is None and self.pbc_.db_ is not None:
+                for term_name, db_iterm in getattr(self.pbc_.db_, "iterms", {}).items():
+                    if db_iterm is iterm:
+                        name = term_name
+                        break
+            if name is not None:
+                self.pbc_.addDbITerm(name, iterm)
         if self.nbc_ is not None:
             self.nbc_.rebuildPinRelationships()
 
@@ -1922,6 +2039,7 @@ class NesterovPlace:
             if gcell in nb.nb_gcells_:
                 nb.nb_gcells_.remove(gcell)
                 nb.updateAreas()
+        self.nbc_.rebuildPinRelationships()
 
     def destroyCbkGNet(self, net: DbNet) -> None:
         if self.pbc_ is None or self.nbc_ is None:
@@ -1929,8 +2047,11 @@ class NesterovPlace:
         pb_net = self.pbc_.removeDbNet(net)
         if pb_net is not None:
             self.nbc_.removeGNetForNet(pb_net)
+            self.nbc_.rebuildPinRelationships()
 
     def destroyCbkITerm(self, iterm: Any) -> None:
+        if self.pbc_ is not None:
+            self.pbc_.removeDbTerm(iterm)
         if self.nbc_ is not None:
             self.nbc_.rebuildPinRelationships()
 

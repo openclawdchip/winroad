@@ -275,3 +275,37 @@
 
 - `python -m py_compile` 已覆盖 `winroad/pdn.py` 和 `winroad/pdn/*.py`。
 - smoke 覆盖 core domain/grid/ring/strap/connect 构建、shape obstruction 与 iterm connection state round trip、via failed reason 聚合、explicit failed via 聚合、sroute 参数保存、renderer selection snapshot、setup issue 聚合，并确认 `buildGrids()`、`writeToDb()`、`repairVias()` 仍抛 `NotImplementedError`。
+
+## 第八轮补充重点
+
+- lifecycle / state
+  - `SRoute.clear()` 清理 add_sroute_connect 参数缓存，不触发真实 special route ripup。
+  - `Connect.resetRuntimeState()` 同时清理 runtime vias 和 failed-via 记录，保留 connect 配置。
+  - `PDNRenderer.setGrids()` 现在通过 `addGrid()` 去重，新增 `removeGrid()` 并同步移除 selected 中的 grid。
+  - `PdnGen.updateRenderer()` 在 redraw 前刷新当前 domain/grid 列表，但 `redraw()` 仍保留同名入口并抛 `NotImplementedError`。
+
+- 配置/state round trip
+  - `PdnGen.exportConfig()` 对 sroute 参数做递归纯数据导出：list/tuple/set/mapping 保持结构，普通标量保持原值，ODB/WinRoad 对象按 `_name()` 引用。
+  - `PdnGen.importConfig()` 对 sroute 参数递归恢复；传入 resolver 时会把字符串引用恢复成本地对象。
+  - renderer selected 导入会优先把 `CoreGrid`/`InstanceGrid`/`BumpGrid`/`ExistingGrid`/`VoltageDomain` 快照恢复为当前对象树中的对象，无法识别时保留名称。
+
+- 参数校验与错误聚合
+  - `Straps.__post_init__()` 和 `checkLayerSpecifications()` 统一检查 `strap_start <= strap_end`。
+  - `PowerCell.collectSetupIssues()` 聚合 power switch master/control/switched/always-on/ground 缺失。
+  - `GridSwitchedPower.__post_init__()` 校验 grid/cell 并归一化 network，`collectSetupIssues()` 聚合 control 缺失。
+  - `Connect.collectSetupIssues()` 聚合空 layer、array cut pitch 缺失、split cut 空 layer/零 pitch。
+  - `Grid.collectSetupIssues()` 纳入 connect 自身问题、重复 connect pair warning、switched power cell 问题。
+  - `SRoute.collectSetupIssues()` 对缺少 net/layer 或 None 参数给 warning；`PDNRenderer.collectSetupIssues()` 对 selected grid 未注册给 warning。
+  - `checkSetup()` 只因 severity 为 `error` 的 issue 抛 `ValueError`，warning 仍通过 report 暴露，避免只读提示阻断真实算法同名入口的边界检查。
+
+- report
+  - `SRoute.report()` 增加 `setup_issues` 并对常见 net/layer 单值字段做 `_name()` 展示。
+  - `PdnGen.report()` 继续展示 sroute report；config 导出使用单独的 sroute config snapshot，避免 report 展示逻辑污染 round trip。
+
+- 真实算法边界
+  - `buildGrids()`、`writeToDb()`、`repairVias()`、`createSrouteWires()`、renderer `redraw()`、真实 shape/via/db 构造、ODB 写回、DRC/repair 算法继续显式抛 `NotImplementedError`。
+
+## 第八轮验证
+
+- `python -m py_compile` 已覆盖 `winroad/pdn.py` 和 `winroad/pdn/*.py`。
+- smoke 覆盖 core domain/grid/ring/strap/connect、shape/via failed state、explicit failed via、sroute config round trip、renderer selected 恢复、setup issue error/warning 聚合，并确认 `buildGrids()`、`writeToDb()`、`repairVias()`、`createSrouteWires()` 仍抛 `NotImplementedError`。

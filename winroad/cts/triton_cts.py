@@ -145,6 +145,14 @@ class TritonCTS:
         if "ndr_strategy" in data:
             self.setNdrStrategy(NdrStrategy(data["ndr_strategy"]))
         self.clock_roots = list(data.get("clock_roots", self.clock_roots))
+        self.options.setNumClockRoots(len(self.clock_roots))
+        self.sta_clock_nets = set(data.get("sta_clock_nets", []))
+        self.visited_clock_nets = set(data.get("visited_clock_nets", []))
+        metrics = data.get("metrics", {})
+        self.number_of_clocks = int(metrics.get("number_of_clocks", self.number_of_clocks))
+        self.num_clk_nets = int(metrics.get("num_clk_nets", len(self.visited_clock_nets)))
+        self.num_fixed_nets = int(metrics.get("num_fixed_nets", self.num_fixed_nets))
+        self.dummy_load_index = int(metrics.get("dummy_load_index", self.dummy_load_index))
 
         pending_parents: List[Tuple[TreeBuilder, Optional[str]]] = []
         by_name: Dict[str, TreeBuilder] = {}
@@ -163,6 +171,8 @@ class TritonCTS:
             if "blockages" not in legalization and "legalization_report" in item:
                 legalization = item["legalization_report"]
             builder.importLegalizationState(legalization)
+            if isinstance(builder, HTreeBuilder) and "topology" in item:
+                builder.importTopologyState(item["topology"])
             self.builders.append(builder)
             by_name[clock.getName()] = builder
             pending_parents.append((builder, item.get("parent")))
@@ -171,6 +181,16 @@ class TritonCTS:
             if parent_name and parent_name in by_name:
                 builder.parent = by_name[parent_name]
                 by_name[parent_name].children.append(builder)
+            self.net2builder[builder.getClock().getName()] = builder
+
+        for name in data.get("db_written_builders", []):
+            builder = by_name.get(str(name))
+            if builder is not None:
+                self.markBuilderWrittenToDb(builder)
+        for name in data.get("ndr_applied_builders", []):
+            builder = by_name.get(str(name))
+            if builder is not None:
+                self.markBuilderNdrApplied(builder)
 
     def reportStateSnapshot(self) -> Dict[str, Any]:
         return self.snapshotState(include_lut=False)
@@ -575,6 +595,10 @@ class TritonCTS:
             errors.extend(
                 f"builder {name}: {error}" for error in builder.validateLegalizationState()
             )
+            if isinstance(builder, HTreeBuilder):
+                errors.extend(
+                    f"builder {name}: {error}" for error in builder.validateTopologyState()
+                )
             parent = builder.getParent()
             if parent is not None and builder not in parent.getChildren():
                 errors.append(f"builder {name}: parent/children 关系不一致")
@@ -605,6 +629,7 @@ class TritonCTS:
             "clock": builder.getClock().toDict(),
             "legalization": builder.exportLegalizationState(),
             "legalization_report": builder.reportLegalizationState(),
+            **({"topology": builder.exportTopologyState()} if isinstance(builder, HTreeBuilder) else {}),
         }
 
     def _builderName(self, builder: TreeBuilder) -> str:

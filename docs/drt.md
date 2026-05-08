@@ -66,6 +66,29 @@
 
 ## 已实现轻量行为
 
+### 第八轮补充
+
+- `frLayer` / `frViaDef` / `frVia` / `frShape` / `frGuide` / `frMarker`：
+  - 补充 layer pitch/direction/type setter/getter。
+  - 新增 `validate()`，只检查 Python 容器内的基础字段、bbox、layer span、owner 关系可见问题；
+    不解析 PDK 规则、不运行 DRC。
+- `frNet` / `frBlock` / `frDesign` / `frTechObject`：
+  - 新增 route/guide/marker summary 与 `validate()` 系列接口。
+  - `frNet.getGuideSummary()` 统计已有 guide、orig guide、guide layer span 和 route object 数量；
+    不估算 guide coverage，也不修补 route guide。
+  - `frBlock.removeMarker()`、`frBlock.getMarkerSummary()`、`frDesign.resolveLayerNum()` 可用于上层 report/snapshot。
+- `TritonRoute`：
+  - 新增 `resolveRouterLayerNames()`，只把已加载 tech layer 名称同步到配置层号。
+  - 新增 `getMarkerRows()`、`validateConfiguration()`、`validateRouteGuides()`、`validateMarkers()`、
+    `validateState()` 与 `writeRouteGuideReport()`。
+  - `snapshot()` 现在包含 marker rows、route guide summary 与 validation errors。
+- `FlexDR` / `FlexGR` / `FlexGridGraph` / `FlexGCWorker`：
+  - `FlexDR` guide coverage report 增加 route object 数量，并提供 `validateGuides()`。
+  - `FlexGR.snapshot()` 包含 route guide summary。
+  - `FlexGridGraph.validate()` 检查坐标、维度、节点数、z height 与 preferred direction 数组一致性；
+    maze search 仍未实现。
+  - `FlexGCWorker` target object 容器改为去重 list，避免 Python 不可哈希对象无法加入；新增 marker summary。
+
 ### 第七轮补充
 
 - `frLayer` / `frViaDef` / `frVia` / `frShape` / `frGuide` / `frMarker` /
@@ -159,6 +182,8 @@
   - `fixMaxSpacing()`
   - `deleteInstancePAData()`
   - `addInstancePAData()`
+- `TritonRoute` 第八轮新增的 `validate*()` / `writeRouteGuideReport()` / `resolveRouterLayerNames()`
+  仅处理已存在的 Python 状态，不替代上述真实 routing/DRC/ODB/DEF 入口。
 - `FlexGR`：
   - `main()`
   - `init()`

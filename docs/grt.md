@@ -66,6 +66,12 @@
   - `GlobalRouter.getSegmentStatus()`、`validateSegment()`，提供单 segment 的方向、端点、bbox、layer span、unit resource edges 和结构化校验问题。
   - `GlobalRouter.validateRoute()`、`validateRoutes()`、`getNetRouteStatus()`、`getRoutesStatus()`，补齐 net/route 级状态查询，覆盖 segment 几何、连通性、pin 覆盖和资源校验。
   - `GlobalRouter.createRouteReport()`、`writeRouteReport()`、`writeBatchReports()`、`getEdgeResourceRecord()`、`getEdgeResourceRecords()`、`applyEdgeResourceRecords()`，提供 route/resource/congestion/state/validation 批量 report 写出接口。
+- 第八轮继续补齐导入导出、校验和批处理边界：
+  - guide 显式导入导出别名：`GlobalRouter.importGuides()`、`exportGuides()`、`importGuideFiles()`、`exportGuideFiles()`，仍只处理 WinRoad JSON/guide 文本，不写 OpenDB wire。
+  - guide 文件预检与报告：`inspectGuideFile()`、`validateGuideFile()`、`createGuideReport()`、`writeGuideReport()`，可在不污染当前 routes 的情况下检查磁盘 guide 文件。
+  - resource snapshot round-trip：`FastRouteCore.applyResourceSnapshot()`、`readResourceReport()`、`importResourceSnapshot()`、`exportResourceSnapshot()`，以及 `GlobalRouter.applyResourceSnapshot()`、`importResourceSnapshot()`、`exportResourceSnapshot()` 转发。
+  - congestion tile 批量查询：`FastRouteCore.iterTileCongestionRecords()`、`GlobalRouter.getTileCongestionRecords()`，支持按 layer 和 overflow-only 过滤。
+  - `GlobalRouter.writeBatchReports()` 新增 `guide`、`resource_validation`、`congestion_tiles` report 类型；原 `route`、`resource`、`congestion`、`state`、`validation` 保持兼容。
 - 已提供基础便利函数：
   - `create_global_router()`
   - `print_groute()`
@@ -226,6 +232,67 @@ for call in (r.fastroute().run, r.globalRoute):
     else:
         raise AssertionError("routing algorithms must stay unsupported")
 print("smoke ok")
+'@ | python -
+```
+
+## 第八轮验证命令
+
+```powershell
+python -m py_compile D:\winroad_py\winroad\grt\types.py D:\winroad_py\winroad\grt\guide.py D:\winroad_py\winroad\grt\congestion.py D:\winroad_py\winroad\grt\grid.py D:\winroad_py\winroad\grt\fast_route.py D:\winroad_py\winroad\grt\global_router.py D:\winroad_py\winroad\grt\__init__.py
+@'
+from pathlib import Path
+from winroad.grt import GSegment, GlobalRouter, Net, Pin
+
+base = Path("D:/winroad_py")
+r = GlobalRouter()
+r.grid.init((0, 0, 100, 100), 10, 10, 10, True, True, 4)
+r.fastroute().setGridsAndLayers(4, 4, 4)
+r.fastroute().setEdgeCapacity(0, 0, 1, 0, 1, 2)
+r.fastroute().setEdgeUsage(0, 0, 1, 0, 1, 3)
+
+net = "n8"
+wr_net = Net(net)
+wr_net.addPin(Pin(position=(0, 0), on_grid_position=(0, 0), layers=[1], connection_layer=1))
+r.db_net_map[net] = wr_net
+r.setRoute(net, [GSegment(0, 0, 1, 1, 0, 1), GSegment(1, 0, 1, 1, 0, 2)])
+
+guide_file = base / ".grt_round8.guide.json"
+guide_report = base / ".grt_round8_guide_report.json"
+res_file = base / ".grt_round8_resource.json"
+tiles_file = base / ".grt_round8_tiles.json"
+
+r.exportGuides(str(guide_file))
+assert r.inspectGuideFile(str(guide_file))["net_count"] == 1
+assert r.validateGuideFile(str(guide_file))["valid"]
+
+r2 = GlobalRouter()
+r2.grid.init((0, 0, 100, 100), 10, 10, 10, True, True, 4)
+import_result = r2.importGuideFiles([str(guide_file)], clear=True)
+assert import_result["valid"]
+assert len(r2.getRoute(net)) == 2
+
+r.exportResourceSnapshot(str(res_file))
+r3 = GlobalRouter()
+restored = r3.importResourceSnapshot(str(res_file), clear=True)
+assert restored["edge_record_count"] == 2
+assert r3.getEdgeResourceRecord(1, 0, 0, 0, 1)["usage"] == 3
+
+tiles = r.getTileCongestionRecords(overflow_only=True)
+assert tiles and tiles[0]["overflow"] == 1
+written = r.writeBatchReports({"guide": str(guide_report), "congestion_tiles": str(tiles_file)})
+assert set(written) == {"guide", "congestion_tiles"}
+
+for call in (r.fastroute().run, r.globalRoute):
+    try:
+        call()
+    except NotImplementedError:
+        pass
+    else:
+        raise AssertionError("routing algorithms must stay unsupported")
+
+for path in (guide_file, guide_report, res_file, tiles_file):
+    path.unlink(missing_ok=True)
+print("round8 smoke ok")
 '@ | python -
 ```
 

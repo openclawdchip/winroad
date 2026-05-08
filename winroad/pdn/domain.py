@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
 from .grid import Grid
-from .types import PdnIssue, PowerSwitchNetworkType, Rect, _name, _not_implemented
+from .types import PdnIssue, PowerSwitchNetworkType, Rect, _name, _normalize_power_switch_network, _not_implemented
 
 @dataclass
 class VoltageDomain:
@@ -96,7 +96,7 @@ class VoltageDomain:
         _not_implemented("VoltageDomain::getRows")
 
     def checkSetup(self) -> None:
-        issues = self.collectSetupIssues()
+        issues = [issue for issue in self.collectSetupIssues() if issue.severity == "error"]
         if issues:
             raise ValueError("; ".join(f"{issue.path}: {issue.message}" for issue in issues))
 
@@ -165,6 +165,21 @@ class PowerCell:
     def hasAcknowledge(self) -> bool:
         return self.acknowledge is not None
 
+    def collectSetupIssues(self, path: str = "") -> List[PdnIssue]:
+        issues: List[PdnIssue] = []
+        base = path or f"power_cell:{self.getName()}"
+        if self.master is None:
+            issues.append(PdnIssue(base, "power switch cell master is required"))
+        for field_name, value in (
+            ("control", self.control),
+            ("switched_power", self.switched_power),
+            ("alwayson_power", self.alwayson_power),
+            ("ground", self.ground),
+        ):
+            if value is None:
+                issues.append(PdnIssue(base, f"power switch cell {field_name} pin/net is required"))
+        return issues
+
     def appliesToRow(self, row: Any) -> bool:
         _not_implemented("PowerCell::appliesToRow")
 
@@ -191,6 +206,13 @@ class GridSwitchedPower:
     control: Any
     network: PowerSwitchNetworkType
 
+    def __post_init__(self) -> None:
+        if self.grid is None:
+            raise ValueError("switched power grid requires a grid")
+        if self.cell is None:
+            raise ValueError("switched power grid requires a power cell")
+        self.network = _normalize_power_switch_network(self.network)
+
     def build(self) -> None:
         _not_implemented("GridSwitchedPower::build")
 
@@ -204,3 +226,14 @@ class GridSwitchedPower:
             "control": _name(self.control),
             "network": self.network.value,
         }
+
+    def collectSetupIssues(self, path: str = "") -> List[PdnIssue]:
+        issues: List[PdnIssue] = []
+        base = path or f"switched_power:{self.grid.getLongName()}"
+        if self.grid is None:
+            issues.append(PdnIssue(base, "switched power object has no grid"))
+        if self.cell is None:
+            issues.append(PdnIssue(base, "switched power object has no power cell"))
+        elif self.control is None:
+            issues.append(PdnIssue(base, "switched power control net is required"))
+        return issues

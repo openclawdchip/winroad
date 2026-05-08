@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Optional, Set
+from typing import Any, Dict, Iterable, List, Optional
 
 from .fr import frDesign, frMarker, frTechObject
 from .types import Rect, RouterConfiguration, _unsupported
@@ -24,7 +24,7 @@ class FlexGCWorker:
         self.ext_box_: Rect = (0, 0, 0, 0)
         self.drc_box_: Rect = (0, 0, 0, 0)
         self.target_net_: Optional[Any] = None
-        self.target_objs_: Set[Any] = set()
+        self.target_objs_: List[Any] = []
         self.markers_: List[frMarker] = []
         self.pwires_: List[Any] = []
         self.ignore_db_: bool = False
@@ -47,10 +47,13 @@ class FlexGCWorker:
         self.target_net_ = None
 
     def addTargetObj(self, obj: Any) -> None:
-        self.target_objs_.add(obj)
+        if obj not in self.target_objs_:
+            self.target_objs_.append(obj)
 
     def setTargetObjs(self, objs: Iterable[Any]) -> None:
-        self.target_objs_ = set(objs)
+        self.target_objs_ = []
+        for obj in objs:
+            self.addTargetObj(obj)
 
     def setIgnoreDB(self) -> None:
         self.ignore_db_ = True
@@ -64,7 +67,7 @@ class FlexGCWorker:
     def getDrcBox(self) -> Rect:
         return self.drc_box_
 
-    def getTargetObjs(self) -> Set[Any]:
+    def getTargetObjs(self) -> List[Any]:
         return self.target_objs_
 
     def addMarker(self, marker: frMarker) -> None:
@@ -78,6 +81,12 @@ class FlexGCWorker:
     def getMarkers(self) -> List[frMarker]:
         return self.markers_
 
+    def getMarkerSummary(self) -> Dict[str, Any]:
+        by_layer: Dict[int, int] = {}
+        for marker in self.markers_:
+            by_layer[marker.getLayerNum()] = by_layer.get(marker.getLayerNum(), 0) + 1
+        return {"count": len(self.markers_), "by_layer": by_layer}
+
     def getPWires(self) -> List[Any]:
         return self.pwires_
 
@@ -89,6 +98,7 @@ class FlexGCWorker:
             "drc_box": self.drc_box_,
             "target_net": getattr(self.target_net_, "getName", lambda: str(self.target_net_))() if self.target_net_ is not None else "",
             "target_objs": len(self.target_objs_),
+            "marker_summary": self.getMarkerSummary(),
             "markers": [marker.to_dict() if hasattr(marker, "to_dict") else str(marker) for marker in self.markers_],
             "pwires": len(self.pwires_),
             "ignore_db": self.ignore_db_,

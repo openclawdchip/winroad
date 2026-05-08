@@ -165,7 +165,7 @@ class Grid:
         self.resetShapes()
 
     def checkSetup(self) -> None:
-        issues = self.collectSetupIssues()
+        issues = [issue for issue in self.collectSetupIssues() if issue.severity == "error"]
         if issues:
             raise ValueError("; ".join(f"{issue.path}: {issue.message}" for issue in issues))
 
@@ -183,8 +183,15 @@ class Grid:
             connect_path = f"{base}/connect[{index}]"
             if connect.getGrid() is not self:
                 issues.append(PdnIssue(connect_path, f"connect {_name(connect.layer0)}->{_name(connect.layer1)} is attached to the wrong grid"))
-            if connect.layer0 is None or connect.layer1 is None:
-                issues.append(PdnIssue(connect_path, "connect requires both lower and upper layers"))
+            issues.extend(connect.collectSetupIssues(connect_path))
+        seen_pairs: Set[tuple[str, str]] = set()
+        for connect in self.connect:
+            pair = tuple(sorted((_name(connect.layer0), _name(connect.layer1))))
+            if pair in seen_pairs:
+                issues.append(PdnIssue(base, f"duplicate connect rule between {pair[0]} and {pair[1]}", severity="warning"))
+            seen_pairs.add(pair)
+        if self.switched_power_cell is not None:
+            issues.extend(self.switched_power_cell.collectSetupIssues(f"{base}/switched_power_cell"))
         return issues
 
     def report(self) -> Dict[str, Any]:

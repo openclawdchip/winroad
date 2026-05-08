@@ -171,3 +171,27 @@
 - `cts`：补 Clock network 合法性校验、CtsOptions profile 校验、TechChar LUT/WireSegment 校验、TreeBuilder 合法化状态导入导出、TritonCTS snapshot 往返。
 - `pdn`：补 PdnIssue/setup issue 聚合、shape/connection/repair/via 几何参数校验、failed via reason 归一化、config/state import 重复与版本校验。
 - `drt`：补 frDesign/frBlock/frNet/frVia/frLayer/FlexDR/FlexGR/FlexGridGraph/FlexPA/GC/TritonRoute 状态访问、snapshot、guide/marker/report 汇总和配置接口。
+
+## 2026-05-07 第八轮
+
+本轮继续 6 线程并行。`gpl/grt/rsz/cts/pdn/drt` 继续逐 C++ 源码边界补接口层，
+重点推进 lifecycle、state round-trip、合法性校验、report 与批处理入口。真实 EDA 算法仍只保留
+同名入口并抛 `NotImplementedError`。`odb` 仍放到最后。
+
+| 模块 | 线程 id | 昵称 | 状态 | 负责范围 |
+| --- | --- | --- | --- | --- |
+| `gpl` | `019e02ab-28b6-7f73-806f-525ef15949a2` | Kant | 已完成 | `winroad/gpl/*`, `docs/gpl.md` |
+| `grt` | `019e02ab-28de-7fc0-891c-cff8a48c8102` | Confucius | 已完成 | `winroad/grt/*`, `docs/grt.md` |
+| `rsz` | `019e02ab-2902-7090-af5b-c4ef7763deee` | Turing | 已完成 | `winroad/rsz/*`, `docs/rsz.md` |
+| `cts` | `019e02ab-29fd-7541-bda2-bdb233a7166e` | Carver | 已完成 | `winroad/cts/*`, `docs/cts.md` |
+| `pdn` | `019e02ab-2abd-7bf2-a4c6-9d8ac0553297` | Anscombe | 已完成 | `winroad/pdn/*`, `docs/pdn.md` |
+| `drt` | `019e02ab-2ada-7621-a915-ed760dbd9e37` | Aquinas | 已完成 | `winroad/drt/*`, `docs/drt.md` |
+
+### 第八轮已完成摘要
+
+- `gpl`：补 Instance/Pin/Net 的生命周期断开、双向关系清理、GCell/GPin 快照恢复、时序检查点校验、线程与迭代参数校验，并导出 `GCellSnapshot`。
+- `grt`：补资源快照导入导出、guide 文件检查与校验、tile 拥塞批量查询、批处理报告写出，以及 `GlobalRouter` 顶层转发入口。
+- `rsz`：补 repair flow 状态机、endpoint 修复状态、net-buffer 关系快照、MoveTracker 统计、全局 repair 配置快照恢复和批量校验。
+- `cts`：补 Clock/SubNet 导入导出、CtsOptions profile、TechChar solution map 与 LUT 校验、Segment/HTree 拓扑状态，以及 TritonCTS 快照载入与聚合校验。
+- `pdn`：补 strap 生命周期校验、setup warning 聚合、switched-power/connect/sroute/renderer 状态报告、sroute 配置往返和 warning 非阻塞 setup 检查。
+- `drt`：补 frDesign/frBlock/frNet/frVia/frLayer 摘要与校验、route guide/marker/snapshot/config 状态、FlexDR/FlexGR/GridGraph/GC 校验入口。

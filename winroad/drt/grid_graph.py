@@ -326,7 +326,28 @@ class FlexGridGraph:
             "blocked_edges": blocked_count,
             "grid_cost_edges": grid_cost_count,
             "special_vias": sum(int(node.has_special_via) for node in self.nodes_),
+            "validation_errors": self.validate(),
         }
+
+    def validate(self) -> List[str]:
+        """检查 grid graph 容器维度一致性；不运行 maze search。"""
+
+        errors: List[str] = []
+        x_dim, y_dim, z_dim = self.getDim()
+        expected_nodes = x_dim * y_dim * z_dim
+        if len(self.nodes_) != expected_nodes:
+            errors.append(f"nodes size {len(self.nodes_)} != dim product {expected_nodes}")
+        if self.xCoords_ != sorted(set(self.xCoords_)):
+            errors.append("x coordinates are not sorted/unique")
+        if self.yCoords_ != sorted(set(self.yCoords_)):
+            errors.append("y coordinates are not sorted/unique")
+        if self.zCoords_ != sorted(set(self.zCoords_)):
+            errors.append("z coordinates are not sorted/unique")
+        if len(self.zHeights_) not in (0, z_dim):
+            errors.append(f"zHeights size {len(self.zHeights_)} != z dim {z_dim}")
+        if len(self.layerRouteDirections_) not in (0, z_dim):
+            errors.append(f"layerRouteDirections size {len(self.layerRouteDirections_)} != z dim {z_dim}")
+        return errors
 
     def isValidIdx(self, x: frMIdx, y: frMIdx, z: frMIdx) -> bool:
         x_dim, y_dim, z_dim = self.getDim()

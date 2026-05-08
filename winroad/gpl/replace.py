@@ -106,9 +106,14 @@ class Replace:
         if getattr(block, "die_area", None) is None and getattr(block, "bbox", None) is None:
             raise ValueError("No rows/core area defined in design")
 
+    def _validate_threads(self, threads: int) -> None:
+        if not isinstance(threads, int) or threads <= 0:
+            raise ValueError("threads must be a positive integer")
+
     def doIncrementalPlace(self, threads: int, options: Optional[PlaceOptions] = None) -> None:
         options = options or PlaceOptions()
         options.validate(self.log_)
+        self._validate_threads(threads)
         self.checkHasCoreRows()
         if self.pbc_ is None:
             self.pbc_ = PlacerBaseCommon(self.db_, options, self.log_)  # type: ignore[arg-type]
@@ -131,12 +136,14 @@ class Replace:
     def doPlace(self, threads: int, options: Optional[PlaceOptions] = None) -> None:
         options = options or PlaceOptions()
         options.validate(self.log_)
+        self._validate_threads(threads)
         self.doInitialPlace(threads, options)
         self.doNesterovPlace(threads, options)
 
     def doInitialPlace(self, threads: int, options: Optional[PlaceOptions] = None) -> None:
         options = options or PlaceOptions()
         options.validate(self.log_)
+        self._validate_threads(threads)
         self.checkHasCoreRows()
         if self.pbc_ is None:
             self.pbc_ = PlacerBaseCommon(self.db_, options, self.log_)  # type: ignore[arg-type]
@@ -151,6 +158,9 @@ class Replace:
     def doNesterovPlace(self, threads: int, options: Optional[PlaceOptions] = None, start_iter: int = 0) -> int:
         options = options or PlaceOptions()
         options.validate(self.log_)
+        self._validate_threads(threads)
+        if start_iter < 0:
+            raise ValueError("start_iter must be non-negative")
         self.checkHasCoreRows()
         if not self.initNesterovPlace(options, threads, True):
             return 0
@@ -284,6 +294,7 @@ class Replace:
 
     def initNesterovPlace(self, options: PlaceOptions, threads: int, check_density: bool) -> bool:
         options.validate(self.log_)
+        self._validate_threads(threads)
         if self.pbc_ is None:
             self.pbc_ = PlacerBaseCommon(self.db_, options, self.log_)  # type: ignore[arg-type]
             self.pbVec_.append(PlacerBase(self.db_, self.pbc_, self.log_, check_density))
