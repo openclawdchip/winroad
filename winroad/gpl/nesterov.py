@@ -13,6 +13,8 @@ from .options import PlaceOptions
 from .placer_base import Instance, Net, Pin, PlacerBase, PlacerBaseCommon
 
 _EXP_CLAMP = 60.0
+REPLACE_SQRT2 = math.sqrt(2.0)
+REPLACE_FFT_PI = math.pi
 
 
 def _safe_exp(value: float) -> float:
@@ -681,8 +683,8 @@ class Bin:
     density_: float = 0.0
     targetDensity_: float = 0.0
     electroPhi_: float = 0.0
-    electroFieldX_: float = 0.0
-    electroFieldY_: float = 0.0
+    electroForceX_: float = 0.0
+    electroForceY_: float = 0.0
 
     def x(self) -> int:
         return self.x_
@@ -718,20 +720,16 @@ class Bin:
         return self.electroPhi_
 
     def electroFieldX(self) -> float:
-        return self.electroFieldX_
+        return self.electroForceX_
 
     def electroFieldY(self) -> float:
-        return self.electroFieldY_
+        return self.electroForceY_
 
     def electroForceX(self) -> float:
-        """C++ 旧命名兼容：当前源码中等价于 electroFieldX。"""
-
-        return self.electroFieldX_
+        return self.electroForceX_
 
     def electroForceY(self) -> float:
-        """C++ 旧命名兼容：当前源码中等价于 electroFieldY。"""
-
-        return self.electroFieldY_
+        return self.electroForceY_
 
     def getTargetDensity(self) -> float:
         return self.targetDensity_
@@ -745,13 +743,16 @@ class Bin:
     def setBinTargetDensity(self, density: float) -> None:
         self.targetDensity_ = density
 
+    def setTargetDensity(self, density: float) -> None:
+        self.targetDensity_ = density
+
     def setElectroField(self, electroFieldX: float, electroFieldY: float) -> None:
-        self.electroFieldX_, self.electroFieldY_ = electroFieldX, electroFieldY
+        # Compatibility wrapper; canonical fields follow C++
+        # Bin::setElectroForce translated from nesterovBase.cpp.
+        self.setElectroForce(electroFieldX, electroFieldY)
 
     def setElectroForce(self, electroForceX: float, electroForceY: float) -> None:
-        """C++ 旧命名兼容：当前源码中等价于 setElectroField。"""
-
-        self.setElectroField(electroForceX, electroForceY)
+        self.electroForceX_, self.electroForceY_ = electroForceX, electroForceY
 
     def setElectroPhi(self, phi: float) -> None:
         self.electroPhi_ = phi
@@ -832,8 +833,8 @@ class Bin:
 
     def resetElectro(self) -> None:
         self.electroPhi_ = 0.0
-        self.electroFieldX_ = 0.0
-        self.electroFieldY_ = 0.0
+        self.electroForceX_ = 0.0
+        self.electroForceY_ = 0.0
 
     def report(self) -> Dict[str, Any]:
         return {
@@ -843,8 +844,90 @@ class Bin:
             "target_density": self.targetDensity_,
             "overflow_density": self.getOverflowDensity(),
             "electro_phi": self.electroPhi_,
-            "electro_field": (self.electroFieldX_, self.electroFieldY_),
+            "electro_force": (self.electroForceX_, self.electroForceY_),
         }
+
+
+class _TranslatedFFT:
+    """Pure-Python translation of `gpl::FFT`'s public density/force contract.
+
+    OpenROAD uses Ooura DCT/DST kernels.  This backend keeps the same method
+    sequence used by NesterovBase::updateDensityForceBin: updateDensity(),
+    doFFT(), getElectroForce(), getElectroPhi().  The direct cosine/sine series
+    is intentionally small and deterministic for Python smoke flows.
+    """
+
+    def __init__(self, binCntX: int, binCntY: int, binSizeX: float, binSizeY: float):
+        self.binCntX_ = max(1, binCntX)
+        self.binCntY_ = max(1, binCntY)
+        self.binSizeX_ = float(binSizeX)
+        self.binSizeY_ = float(binSizeY)
+        self.binDensity_ = [[0.0 for _ in range(self.binCntY_)] for _ in range(self.binCntX_)]
+        self.electroPhi_ = [[0.0 for _ in range(self.binCntY_)] for _ in range(self.binCntX_)]
+        self.electroForceX_ = [[0.0 for _ in range(self.binCntY_)] for _ in range(self.binCntX_)]
+        self.electroForceY_ = [[0.0 for _ in range(self.binCntY_)] for _ in range(self.binCntX_)]
+        self.wx_ = [REPLACE_FFT_PI * i / self.binCntX_ for i in range(self.binCntX_)]
+        y_scale = self.binSizeY_ / self.binSizeX_ if abs(self.binSizeX_) > 1e-30 else 1.0
+        self.wy_ = [REPLACE_FFT_PI * j / self.binCntY_ * y_scale for j in range(self.binCntY_)]
+
+    def updateDensity(self, x: int, y: int, density: float) -> None:
+        self.binDensity_[x][y] = density
+
+    def getElectroForce(self, x: int, y: int) -> Tuple[float, float]:
+        return (self.electroForceX_[x][y], self.electroForceY_[x][y])
+
+    def getElectroPhi(self, x: int, y: int) -> float:
+        return self.electroPhi_[x][y]
+
+    def doFFT(self) -> None:
+        nx, ny = self.binCntX_, self.binCntY_
+        rho_hat = [[0.0 for _ in range(ny)] for _ in range(nx)]
+        for k in range(nx):
+            for l in range(ny):
+                total = 0.0
+                for x in range(nx):
+                    cx = math.cos(REPLACE_FFT_PI * k * (x + 0.5) / nx)
+                    for y in range(ny):
+                        cy = math.cos(REPLACE_FFT_PI * l * (y + 0.5) / ny)
+                        total += self.binDensity_[x][y] * cx * cy
+                norm = 4.0 / nx / ny
+                if k == 0:
+                    norm *= 0.5
+                if l == 0:
+                    norm *= 0.5
+                rho_hat[k][l] = total * norm
+
+        phi_hat = [[0.0 for _ in range(ny)] for _ in range(nx)]
+        ex_hat = [[0.0 for _ in range(ny)] for _ in range(nx)]
+        ey_hat = [[0.0 for _ in range(ny)] for _ in range(nx)]
+        for k in range(nx):
+            wx = self.wx_[k]
+            for l in range(ny):
+                wy = self.wy_[l]
+                if k == 0 and l == 0:
+                    continue
+                phi = rho_hat[k][l] / (wx * wx + wy * wy)
+                phi_hat[k][l] = phi
+                ex_hat[k][l] = phi * wx
+                ey_hat[k][l] = phi * wy
+
+        for x in range(nx):
+            for y in range(ny):
+                phi = 0.0
+                force_x = 0.0
+                force_y = 0.0
+                for k in range(nx):
+                    cos_x = math.cos(REPLACE_FFT_PI * k * (x + 0.5) / nx)
+                    sin_x = math.sin(REPLACE_FFT_PI * k * (x + 0.5) / nx)
+                    for l in range(ny):
+                        cos_y = math.cos(REPLACE_FFT_PI * l * (y + 0.5) / ny)
+                        sin_y = math.sin(REPLACE_FFT_PI * l * (y + 0.5) / ny)
+                        phi += phi_hat[k][l] * cos_x * cos_y
+                        force_x += ex_hat[k][l] * sin_x * cos_y
+                        force_y += ey_hat[k][l] * cos_x * sin_y
+                self.electroPhi_[x][y] = phi
+                self.electroForceX_[x][y] = force_x
+                self.electroForceY_[x][y] = force_y
 
 
 @dataclass
@@ -884,7 +967,7 @@ class BinGrid:
     def setBinTargetDensity(self, density: float) -> None:
         self.targetDensity_ = density
         for bin_obj in self.bins_:
-            bin_obj.setBinTargetDensity(density)
+            bin_obj.setTargetDensity(density)
 
     def setNumThreads(self, num_threads: int) -> None:
         self.num_threads_ = num_threads
@@ -907,37 +990,40 @@ class BinGrid:
 
     def updateBinsGCellDensityArea(self, cells: Sequence[GCell]) -> None:
         for bin_obj in self.bins_:
-            bin_obj.setInstPlacedArea(0)
             bin_obj.setInstPlacedAreaUnscaled(0)
             bin_obj.setFillerArea(0)
-            bin_obj.setDensity(0.0)
         for gcell in cells:
             min_x, max_x = self.getDensityMinMaxIdxX(gcell)
             min_y, max_y = self.getDensityMinMaxIdxY(gcell)
-            for y in range(min_y, max_y + 1):
-                for x in range(min_x, max_x + 1):
+            for y in range(min_y, max_y):
+                for x in range(min_x, max_x):
                     bin_obj = self.bins_[y * self.binCntX_ + x]
-                    overlap = self._overlap_area(
-                        (gcell.dLx(), gcell.dLy(), gcell.dUx(), gcell.dUy()),
-                        (bin_obj.lx(), bin_obj.ly(), bin_obj.ux(), bin_obj.uy()),
-                    )
+                    overlap = self.getOverlapDensityArea(bin_obj, gcell) * gcell.getDensityScale()
                     if overlap <= 0:
                         continue
                     if gcell.isFiller():
                         bin_obj.addFillerArea(overlap)
+                    elif gcell.isMacroInstance():
+                        bin_obj.addInstPlacedAreaUnscaled(overlap * bin_obj.getTargetDensity())
                     else:
-                        bin_obj.addInstPlacedArea(overlap)
                         bin_obj.addInstPlacedAreaUnscaled(overlap)
         self.sumOverflowArea_ = 0
         self.sumOverflowAreaUnscaled_ = 0
         for bin_obj in self.bins_:
-            bin_area = max(1, bin_obj.getBinArea())
-            place_area = bin_obj.instPlacedArea() + bin_obj.getFillerArea()
-            density = place_area / bin_area
-            bin_obj.setDensity(density)
-            allowed = int(round(bin_area * bin_obj.getTargetDensity()))
-            overflow = max(0, place_area + bin_obj.getNonPlaceArea() - allowed)
-            overflow_unscaled = max(0, bin_obj.getInstPlacedAreaUnscaled() + bin_obj.getNonPlaceAreaUnscaled() - allowed)
+            bin_obj.setInstPlacedArea(bin_obj.getInstPlacedAreaUnscaled())
+            scaled_bin_area = float(bin_obj.getBinArea()) * bin_obj.getTargetDensity()
+            if abs(scaled_bin_area) <= 1e-30:
+                bin_obj.setDensity(0.0)
+                continue
+            bin_obj.setDensity(
+                (float(bin_obj.instPlacedArea()) + float(bin_obj.getFillerArea()) + float(bin_obj.getNonPlaceArea()))
+                / scaled_bin_area
+            )
+            overflow = max(0.0, float(bin_obj.instPlacedArea()) + float(bin_obj.getNonPlaceArea()) - scaled_bin_area)
+            overflow_unscaled = max(
+                0.0,
+                float(bin_obj.getInstPlacedAreaUnscaled()) + float(bin_obj.getNonPlaceAreaUnscaled()) - scaled_bin_area,
+            )
             self.sumOverflowArea_ += overflow
             self.sumOverflowAreaUnscaled_ += overflow_unscaled
 
@@ -991,10 +1077,10 @@ class BinGrid:
         return self.sumOverflowAreaUnscaled_
 
     def getDensityMinMaxIdxX(self, gcell: GCell) -> Tuple[int, int]:
-        return self._range_to_bin_idx(gcell.dLx(), gcell.dUx(), self.lx_, self.binSizeX_, self.binCntX_)
+        return self._range_to_bin_idx_exclusive(gcell.dLx(), gcell.dUx(), self.lx_, self.binSizeX_, self.binCntX_)
 
     def getDensityMinMaxIdxY(self, gcell: GCell) -> Tuple[int, int]:
-        return self._range_to_bin_idx(gcell.dLy(), gcell.dUy(), self.ly_, self.binSizeY_, self.binCntY_)
+        return self._range_to_bin_idx_exclusive(gcell.dLy(), gcell.dUy(), self.ly_, self.binSizeY_, self.binCntY_)
 
     def getBinByIdx(self, x: int, y: int) -> Bin:
         return self.bins_[y * self.binCntX_ + x]
@@ -1009,18 +1095,22 @@ class BinGrid:
         return self.getBinByIdx(idx_x, idx_y)
 
     def getMinMaxIdxX(self, inst: Instance) -> Tuple[int, int]:
-        return self._range_to_bin_idx(inst.lx(), inst.ux(), self.lx_, self.binSizeX_, self.binCntX_)
+        return self._range_to_bin_idx_exclusive(inst.lx(), inst.ux(), self.lx_, self.binSizeX_, self.binCntX_)
 
     def getMinMaxIdxY(self, inst: Instance) -> Tuple[int, int]:
-        return self._range_to_bin_idx(inst.ly(), inst.uy(), self.ly_, self.binSizeY_, self.binCntY_)
+        return self._range_to_bin_idx_exclusive(inst.ly(), inst.uy(), self.ly_, self.binSizeY_, self.binCntY_)
 
     def _range_to_bin_idx(self, low: int, high: int, origin: int, size: float, count: int) -> Tuple[int, int]:
+        lower, upper = self._range_to_bin_idx_exclusive(low, high, origin, size, count)
+        return (lower, max(lower, upper - 1))
+
+    def _range_to_bin_idx_exclusive(self, low: int, high: int, origin: int, size: float, count: int) -> Tuple[int, int]:
         if count <= 0 or size <= 0:
             return (0, 0)
         min_idx = int((low - origin) // size)
-        max_idx = int(((high - origin) - 1) // size) if high > low else min_idx
+        max_idx = int(math.ceil((high - origin) / size))
         min_idx = min(max(min_idx, 0), count - 1)
-        max_idx = min(max(max_idx, 0), count - 1)
+        max_idx = min(max(max_idx, 0), count)
         return (min_idx, max_idx)
 
     def getBins(self) -> List[Bin]:
@@ -1039,12 +1129,13 @@ class BinGrid:
             min_x, max_x = self.getMinMaxIdxX(inst)
             min_y, max_y = self.getMinMaxIdxY(inst)
             inst_rect = (inst.lx(), inst.ly(), inst.ux(), inst.uy())
-            for y in range(min_y, max_y + 1):
-                for x in range(min_x, max_x + 1):
+            for y in range(min_y, max_y):
+                for x in range(min_x, max_x):
                     bin_obj = self.bins_[y * self.binCntX_ + x]
                     overlap = self._overlap_area(inst_rect, (bin_obj.lx(), bin_obj.ly(), bin_obj.ux(), bin_obj.uy()))
-                    bin_obj.addNonPlaceArea(overlap)
-                    bin_obj.addNonPlaceAreaUnscaled(overlap)
+                    scaled = overlap * bin_obj.getTargetDensity()
+                    bin_obj.addNonPlaceArea(scaled)
+                    bin_obj.addNonPlaceAreaUnscaled(scaled)
 
     def resetBinAreas(self) -> None:
         for bin_obj in self.bins_:
@@ -1056,93 +1147,21 @@ class BinGrid:
         for bin_obj in self.bins_:
             bin_obj.resetElectro()
 
-    def updateLocalDensityField(self, phi_coef: float = 1.0, iterations: Optional[int] = None) -> None:
-        """Build a pure-Python local density field for smoke-sized designs.
-
-        The production OpenROAD path solves Poisson with FFT.  This fallback keeps
-        that boundary explicit: it uses a small deterministic Jacobi relaxation on
-        signed bin density charge, then takes finite differences of the resulting
-        local potential.  It is intentionally local and not a fake FFT substitute.
-        """
-
-        if not self.bins_:
-            return
-        phi_coef = max(0.0, phi_coef)
-        bin_count = len(self.bins_)
-        charges = [self._density_charge(bin_obj) for bin_obj in self.bins_]
-        mean_charge = sum(charges) / bin_count
-        charges = [charge - mean_charge for charge in charges]
-        if all(abs(charge) <= 1e-18 for charge in charges):
-            self.resetElectro()
-            return
-
-        if iterations is None:
-            iterations = max(8, min(64, 2 * (self.binCntX_ + self.binCntY_)))
-        iterations = max(1, iterations)
-        phi = [0.0 for _ in self.bins_]
-        for _ in range(iterations):
-            next_phi = phi[:]
-            for y in range(self.binCntY_):
-                for x in range(self.binCntX_):
-                    idx = y * self.binCntX_ + x
-                    left = phi[y * self.binCntX_ + max(0, x - 1)]
-                    right = phi[y * self.binCntX_ + min(self.binCntX_ - 1, x + 1)]
-                    down = phi[max(0, y - 1) * self.binCntX_ + x]
-                    up = phi[min(self.binCntY_ - 1, y + 1) * self.binCntX_ + x]
-                    next_phi[idx] = 0.25 * (left + right + down + up + charges[idx])
-            mean_phi = sum(next_phi) / bin_count
-            phi = [value - mean_phi for value in next_phi]
-
-        for bin_obj, value in zip(self.bins_, phi):
-            bin_obj.setElectroPhi(phi_coef * value)
-        self._update_electro_field_from_phi()
-
-    def _density_charge(self, bin_obj: Bin) -> float:
-        bin_area = max(1, bin_obj.getBinArea())
-        blocked_density = bin_obj.getNonPlaceArea() / bin_area
-        return bin_obj.getDensity() + blocked_density - bin_obj.getTargetDensity()
-
-    def _update_electro_field_from_phi(self) -> None:
-        dx = max(self.binSizeX_, 1.0)
-        dy = max(self.binSizeY_, 1.0)
-        for y in range(self.binCntY_):
-            for x in range(self.binCntX_):
-                center = self.getBinByIdx(x, y)
-                if self.binCntX_ == 1:
-                    field_x = 0.0
-                elif x == 0:
-                    right = self.getBinByIdx(x + 1, y)
-                    field_x = -_safe_div(right.electroPhi() - center.electroPhi(), dx)
-                elif x == self.binCntX_ - 1:
-                    left = self.getBinByIdx(x - 1, y)
-                    field_x = -_safe_div(center.electroPhi() - left.electroPhi(), dx)
-                else:
-                    left = self.getBinByIdx(x - 1, y)
-                    right = self.getBinByIdx(x + 1, y)
-                    field_x = -_safe_div(right.electroPhi() - left.electroPhi(), 2.0 * dx)
-
-                if self.binCntY_ == 1:
-                    field_y = 0.0
-                elif y == 0:
-                    up = self.getBinByIdx(x, y + 1)
-                    field_y = -_safe_div(up.electroPhi() - center.electroPhi(), dy)
-                elif y == self.binCntY_ - 1:
-                    down = self.getBinByIdx(x, y - 1)
-                    field_y = -_safe_div(center.electroPhi() - down.electroPhi(), dy)
-                else:
-                    down = self.getBinByIdx(x, y - 1)
-                    up = self.getBinByIdx(x, y + 1)
-                    field_y = -_safe_div(up.electroPhi() - down.electroPhi(), 2.0 * dy)
-
-                center.setElectroField(field_x, field_y)
+    def getOverlapDensityArea(self, bin_obj: Bin, cell: GCell) -> float:
+        return float(
+            self._overlap_area(
+                (bin_obj.lx(), bin_obj.ly(), bin_obj.ux(), bin_obj.uy()),
+                (cell.dLx(), cell.dLy(), cell.dUx(), cell.dUy()),
+            )
+        )
 
     def getInterpolatedElectroField(self, x: float, y: float) -> FloatPoint:
-        """返回点所在 bin 的 field；暂不做双线性插值。"""
+        """Compatibility wrapper for older callers; translated path uses forces."""
 
         bin_obj = self.getBinAtPoint(x, y)
         if bin_obj is None:
             return FloatPoint()
-        return FloatPoint(bin_obj.electroFieldX(), bin_obj.electroFieldY())
+        return FloatPoint(bin_obj.electroForceX(), bin_obj.electroForceY())
 
     def getAverageDensity(self) -> float:
         if not self.bins_:
@@ -1585,6 +1604,12 @@ class NesterovBase:
         self.prevSLPGradient_: List[FloatPoint] = []
         self.curSLPGradient_: List[FloatPoint] = []
         self.nextSLPGradient_: List[FloatPoint] = []
+        self.prevSLPSumGrads_: List[FloatPoint] = []
+        self.curSLPSumGrads_: List[FloatPoint] = []
+        self.nextSLPSumGrads_: List[FloatPoint] = []
+        self.curCoordi_: List[FloatPoint] = []
+        self.nextCoordi_: List[FloatPoint] = []
+        self.fft_: Optional[_TranslatedFFT] = None
         self._init_bin_grid()
 
     def _init_bin_grid(self) -> None:
@@ -1593,6 +1618,7 @@ class NesterovBase:
         self.bg_.setBinCnt(self.nbVars_.binCntX or 1, self.nbVars_.binCntY or 1)
         self.bg_.setBinTargetDensity(self.targetDensity_)
         self.bg_.initBins()
+        self.fft_ = _TranslatedFFT(self.bg_.getBinCntX(), self.bg_.getBinCntY(), self.bg_.getBinSizeX(), self.bg_.getBinSizeY())
 
     def getFillerGCell(self, index: int) -> GCell:
         return self.fillerStor_[index]
@@ -1649,6 +1675,15 @@ class NesterovBase:
 
     def getBinsConst(self) -> List[Bin]:
         return self.bg_.getBinsConst()
+
+    def binCntX(self) -> int:
+        return self.bg_.getBinCntX()
+
+    def binCntY(self) -> int:
+        return self.bg_.getBinCntY()
+
+    def bins(self) -> List[Bin]:
+        return self.bg_.getBins()
 
     def getFillerDx(self) -> int:
         return self.fillerDx_
@@ -1770,7 +1805,20 @@ class NesterovBase:
 
     def updateDensitySize(self) -> None:
         for gcell in self.nb_gcells_:
-            gcell.setDensitySize(gcell.dx(), gcell.dy())
+            if gcell.dx() < REPLACE_SQRT2 * self.bg_.getBinSizeX():
+                scale_x = float(gcell.dx()) / float(REPLACE_SQRT2 * self.bg_.getBinSizeX())
+                density_size_x = REPLACE_SQRT2 * self.bg_.getBinSizeX()
+            else:
+                scale_x = 1.0
+                density_size_x = float(gcell.dx())
+            if gcell.dy() < REPLACE_SQRT2 * self.bg_.getBinSizeY():
+                scale_y = float(gcell.dy()) / float(REPLACE_SQRT2 * self.bg_.getBinSizeY())
+                density_size_y = REPLACE_SQRT2 * self.bg_.getBinSizeY()
+            else:
+                scale_y = 1.0
+                density_size_y = float(gcell.dy())
+            gcell.setDensitySize(int(round(density_size_x)), int(round(density_size_y)))
+            gcell.setDensityScale(scale_x * scale_y)
 
     def getNesterovInstsArea(self) -> int:
         return sum(cell.dx() * cell.dy() for cell in self.nb_gcells_)
@@ -1808,10 +1856,17 @@ class NesterovBase:
             self.updateAreas()
 
     def updateDensityCoordiLayoutInside(self, gcell: GCell) -> None:
-        gcell.setDensityCenterLocation(
-            int(self.getDensityCoordiLayoutInsideX(gcell, gcell.dCx())),
-            int(self.getDensityCoordiLayoutInsideY(gcell, gcell.dCy())),
-        )
+        target_lx = float(gcell.dLx())
+        target_ly = float(gcell.dLy())
+        if target_lx < self.bg_.lx():
+            target_lx = float(self.bg_.lx())
+        if target_ly < self.bg_.ly():
+            target_ly = float(self.bg_.ly())
+        if target_lx + gcell.dDx() > self.bg_.ux():
+            target_lx = float(self.bg_.ux() - gcell.dDx())
+        if target_ly + gcell.dDy() > self.bg_.uy():
+            target_ly = float(self.bg_.uy() - gcell.dDy())
+        gcell.setDensityLocation(int(round(target_lx)), int(round(target_ly)))
 
     def getDensityCoordiLayoutInsideX(self, gCell: GCell, cx: float) -> float:
         half = gCell.dDx() / 2
@@ -1822,26 +1877,47 @@ class NesterovBase:
         return min(max(cy, self.bg_.ly() + half), self.bg_.uy() - half)
 
     def getDensityPreconditioner(self, gCell: GCell) -> FloatPoint:
-        area = max(1.0, float(gCell.densityArea() or gCell.area()))
-        scale = max(1.0, gCell.getDensityScale() or 1.0)
-        precond = area * scale / max(1.0, float(self.bg_.getBinSizeX() * self.bg_.getBinSizeY()))
-        return FloatPoint(max(1.0, precond), max(1.0, precond))
+        area_val = float(gCell.dx()) * float(gCell.dy())
+        return FloatPoint(area_val, area_val)
 
     def getDensityGradient(self, gCell: GCell) -> FloatPoint:
-        field = self.bg_.getInterpolatedElectroField(gCell.dCx(), gCell.dCy())
-        area_scale = max(1.0, float(gCell.densityArea() or gCell.area())) * max(1.0, gCell.getDensityScale() or 1.0)
-        return FloatPoint(field.x * area_scale, field.y * area_scale)
+        pair_x = self.bg_.getDensityMinMaxIdxX(gCell)
+        pair_y = self.bg_.getDensityMinMaxIdxY(gCell)
+        electro_force = FloatPoint()
+        for i in range(pair_x[0], pair_x[1]):
+            for j in range(pair_y[0], pair_y[1]):
+                bin_obj = self.bg_.getBinsConst()[j * self.binCntX() + i]
+                overlap_area = self.bg_.getOverlapDensityArea(bin_obj, gCell) * gCell.getDensityScale()
+                electro_force.x += overlap_area * bin_obj.electroForceX()
+                electro_force.y += overlap_area * bin_obj.electroForceY()
+        return electro_force
 
-    def updateDensityFieldBin(self) -> None:
-        """Update bin electrostatic state through the pure-Python fallback.
-
-        Full FFT/Poisson support belongs behind this method when translated.  For
-        now the method refreshes density metrics and builds a local relaxation
-        field, which is enough for small smoke flows without pretending to be FFT.
-        """
+    def updateDensityForceBin(self) -> None:
+        """Translated from OpenROAD NesterovBase::updateDensityForceBin."""
 
         self.refreshDensityMetrics()
-        self.bg_.updateLocalDensityField(self.phiCoef_)
+        if self.fft_ is None:
+            self.fft_ = _TranslatedFFT(
+                self.bg_.getBinCntX(),
+                self.bg_.getBinCntY(),
+                self.bg_.getBinSizeX(),
+                self.bg_.getBinSizeY(),
+            )
+        for bin_obj in self.bins():
+            self.fft_.updateDensity(bin_obj.x(), bin_obj.y(), bin_obj.getDensity())
+        self.fft_.doFFT()
+        self.sumPhi_ = 0.0
+        for bin_obj in self.bins():
+            force_x, force_y = self.fft_.getElectroForce(bin_obj.x(), bin_obj.y())
+            bin_obj.setElectroForce(force_x, force_y)
+            electro_phi = self.fft_.getElectroPhi(bin_obj.x(), bin_obj.y())
+            bin_obj.setElectroPhi(electro_phi)
+            self.sumPhi_ += electro_phi * float(bin_obj.getNonPlaceArea() + bin_obj.instPlacedArea() + bin_obj.getFillerArea())
+
+    def updateDensityFieldBin(self) -> None:
+        """Compatibility wrapper; main logic is the C++ updateDensityForceBin translation."""
+
+        self.updateDensityForceBin()
 
     def updateWireLengthForceWA(self, wlCoeffX: float, wlCoeffY: float) -> None:
         self.nbc_.updateWireLengthForceWA(wlCoeffX, wlCoeffY)
@@ -1855,22 +1931,108 @@ class NesterovBase:
             self.updateDensityCoordiLayoutInside(gcell)
 
     def updateInitialPrevSLPCoordi(self) -> None:
-        self.prevSLPCoordi_ = [FloatPoint(cell.cx(), cell.cy()) for cell in self.nb_gcells_]
+        self.curCoordi_ = [FloatPoint(cell.cx(), cell.cy()) for cell in self.nb_gcells_]
+        if not self.curSLPGradient_:
+            self.updateCurGradient()
+        prev_update_coef = self.npVars_.initialPrevCoordiUpdateCoef if self.npVars_ is not None else 100.0
+        self.prevSLPCoordi_ = []
+        for gcell, cur, grad in zip(self.nb_gcells_, self.curCoordi_, self.curSLPGradient_):
+            prev_x = self.getDensityCoordiLayoutInsideX(gcell, cur.x - prev_update_coef * grad.x)
+            prev_y = self.getDensityCoordiLayoutInsideY(gcell, cur.y - prev_update_coef * grad.y)
+            self.prevSLPCoordi_.append(FloatPoint(prev_x, prev_y))
+        self.updateDensityCenterPrevSLP()
 
     def updateCurSLPCoordi(self) -> None:
-        self.curSLPCoordi_ = [FloatPoint(cell.cx(), cell.cy()) for cell in self.nb_gcells_]
+        self.curCoordi_ = [FloatPoint(cell.cx(), cell.cy()) for cell in self.nb_gcells_]
+        self.curSLPCoordi_ = [FloatPoint(cell.dCx(), cell.dCy()) for cell in self.nb_gcells_]
 
     def updateNextSLPCoordi(self) -> None:
-        self.nextSLPCoordi_ = [FloatPoint(cell.cx(), cell.cy()) for cell in self.nb_gcells_]
+        self.nextSLPCoordi_ = [FloatPoint(cell.dCx(), cell.dCy()) for cell in self.nb_gcells_]
 
     def updatePrevGradient(self) -> None:
-        self.prevSLPGradient_ = list(self.curSLPGradient_)
+        self.prevSLPGradient_ = [FloatPoint(g.x, g.y) for g in self.curSLPGradient_]
+        self.prevSLPSumGrads_ = [FloatPoint(g.x, g.y) for g in self.curSLPGradient_]
 
     def updateCurGradient(self) -> None:
+        self.curCoordi_ = [FloatPoint(cell.cx(), cell.cy()) for cell in self.nb_gcells_]
+        self.curSLPCoordi_ = [FloatPoint(cell.dCx(), cell.dCy()) for cell in self.nb_gcells_]
         self.curSLPGradient_ = [self._getCombinedGradient(gcell) for gcell in self.nb_gcells_]
+        self.curSLPSumGrads_ = [FloatPoint(g.x, g.y) for g in self.curSLPGradient_]
 
     def updateNextGradient(self) -> None:
         self.nextSLPGradient_ = [self._getCombinedGradient(gcell) for gcell in self.nb_gcells_]
+        self.nextSLPSumGrads_ = [FloatPoint(g.x, g.y) for g in self.nextSLPGradient_]
+
+    def updateDensityCenterPrevSLP(self) -> None:
+        self.updateGCellDensityCenterLocation(self.prevSLPCoordi_)
+
+    def updateDensityCenterNextSLP(self) -> None:
+        self.updateGCellDensityCenterLocation(self.nextSLPCoordi_)
+
+    def nesterovUpdateCoordinates(self, coeff: float) -> None:
+        if self.isConverged_:
+            return
+        if not self.curSLPCoordi_:
+            self.updateCurGradient()
+            self.updateCurSLPCoordi()
+        if not self.curSLPSumGrads_:
+            self.curSLPSumGrads_ = [FloatPoint(g.x, g.y) for g in self.curSLPGradient_]
+        self.nextCoordi_ = []
+        self.nextSLPCoordi_ = []
+        for gcell, cur_coord, cur_slp, grad in zip(self.nb_gcells_, self.curCoordi_, self.curSLPCoordi_, self.curSLPSumGrads_):
+            next_x = cur_slp.x + self.stepLength_ * grad.x
+            next_y = cur_slp.y + self.stepLength_ * grad.y
+            next_sx = next_x + coeff * (next_x - cur_coord.x)
+            next_sy = next_y + coeff * (next_y - cur_coord.y)
+            self.nextCoordi_.append(
+                FloatPoint(
+                    self.getDensityCoordiLayoutInsideX(gcell, next_x),
+                    self.getDensityCoordiLayoutInsideY(gcell, next_y),
+                )
+            )
+            self.nextSLPCoordi_.append(
+                FloatPoint(
+                    self.getDensityCoordiLayoutInsideX(gcell, next_sx),
+                    self.getDensityCoordiLayoutInsideY(gcell, next_sy),
+                )
+            )
+        self.updateDensityCenterNextSLP()
+        self.updateDensityForceBin()
+
+    def nesterovUpdateStepLength(self) -> bool:
+        if self.isConverged_:
+            return True
+        if not self.curSLPCoordi_ or not self.nextSLPCoordi_:
+            return True
+        delta_sum = 0.0
+        grad_sum = 0.0
+        for cur, nxt, grad in zip(self.curSLPCoordi_, self.nextSLPCoordi_, self.curSLPSumGrads_ or self.curSLPGradient_):
+            delta_sum += abs(nxt.x - cur.x) + abs(nxt.y - cur.y)
+            grad_sum += abs(grad.x) + abs(grad.y)
+        if grad_sum <= 1e-30:
+            self.isDiverged_ = True
+            return False
+        new_step = delta_sum / grad_sum
+        if not math.isfinite(new_step):
+            self.isDiverged_ = True
+            return False
+        if new_step > self.stepLength_ * 0.95:
+            self.stepLength_ = new_step
+            return False
+        if new_step < 0.01:
+            self.stepLength_ = 0.01
+            return False
+        self.stepLength_ = new_step
+        return True
+
+    def nesterovAdjustPhi(self) -> None:
+        if self.isConverged_:
+            return
+        if self.npVars_ is None:
+            return
+        if not getattr(self.nbVars_, "isMaxPhiCoefChanged", False) and self.sum_overflow_unscaled_ < 0.35:
+            self.nbVars_.isMaxPhiCoefChanged = True
+            self.nbVars_.maxPhiCoef *= 0.99
 
     def _getCombinedGradient(self, gcell: GCell) -> FloatPoint:
         wl_grad = self.nbc_.getWireLengthGradientWA(gcell, self.baseWireLengthCoef_ or 1.0, self.baseWireLengthCoef_ or 1.0)
@@ -1889,6 +2051,29 @@ class NesterovBase:
 
     def updatePrevSLPCoordi(self) -> None:
         self.prevSLPCoordi_ = list(self.curSLPCoordi_)
+
+    def updateNextIter(self, iter: int) -> None:
+        if self.isConverged_:
+            return
+        self.iter_ = iter
+        if self.nextSLPCoordi_:
+            self.prevSLPCoordi_, self.curSLPCoordi_ = self.curSLPCoordi_, self.nextSLPCoordi_
+        if self.nextSLPGradient_:
+            self.prevSLPGradient_, self.curSLPGradient_ = self.curSLPGradient_, self.nextSLPGradient_
+            self.prevSLPSumGrads_, self.curSLPSumGrads_ = self.curSLPSumGrads_, self.nextSLPSumGrads_
+        if self.nextCoordi_:
+            self.curCoordi_ = self.nextCoordi_
+        for index, gcell in enumerate(self.nb_gcells_):
+            if gcell.isInstance() and gcell.isLocked():
+                if index < len(self.prevSLPCoordi_) and index < len(self.curSLPCoordi_):
+                    self.curSLPCoordi_[index] = self.prevSLPCoordi_[index]
+                if index < len(self.prevSLPGradient_) and index < len(self.curSLPGradient_):
+                    self.curSLPGradient_[index] = self.prevSLPGradient_[index]
+                if index < len(self.curCoordi_):
+                    self.curCoordi_[index] = FloatPoint(gcell.cx(), gcell.cy())
+        self.updateGCellCenterLocation(self.curCoordi_)
+        self.updateGCellDensityCenterLocation(self.curSLPCoordi_)
+        self.refreshDensityMetrics()
 
     def updateDensityCenterCoordiLayoutInside(self) -> None:
         for gcell in self.nb_gcells_:
@@ -1984,7 +2169,13 @@ class NesterovBase:
         self.nbVars_.isMaxPhiCoefChanged = maxPhiCoefChanged
 
     def checkConvergence(self, gpl_iter_count: int, routability_gpl_iter_count: int, rb: Optional["RouteBase"]) -> bool:
-        return self.isConverged_
+        if self.isConverged_:
+            return True
+        target = self.npVars_.targetOverflow if self.npVars_ is not None else self.targetDensity_
+        if self.sum_overflow_unscaled_ <= target:
+            self.isConverged_ = True
+            return True
+        return False
 
     def resetConverged(self) -> None:
         self.isConverged_ = False
@@ -2148,20 +2339,20 @@ class NesterovPlace:
             self.reportStatus()
             return self.last_iter_
         self.init()
-        max_iter = max(start_iter, self.npVars_.maxNesterovIter)
-        for iter_num in range(start_iter, max_iter):
+        curA = 1.0
+        for iter_num in range(start_iter, self.npVars_.maxNesterovIter):
             self.last_iter_ = iter_num
-            self.updateNextIter(iter_num)
-            self.updateWireLengthCoef(self.average_overflow_)
+            prevA = curA
+            curA = (1.0 + math.sqrt(4.0 * prevA * prevA + 1.0)) * 0.5
+            coeff = (prevA - 1.0) / curA
+            self.doBackTracking(coeff)
             for nb in self.nbVec_:
-                nb.updatePhiCoef(nb.getSumOverflow())
-                nb.updateDensityFieldBin()
-                nb.updateDensityPenalty(nb.getSumOverflow())
-                nb.updateWireLengthForceWA(self.wireLengthCoefX_, self.wireLengthCoefY_)
-                nb.updateGradSum()
+                nb.nesterovAdjustPhi()
+            if self.num_region_diverged_ > 0:
+                break
+            self.updateNextIter(iter_num)
+            for nb in self.nbVec_:
                 nb.updateCurGradient()
-                self._takePurePythonStep(nb)
-            self.updateDensityCenterCoordiLayoutInside()
             self.updateOverflow()
             self.updateDb()
             hpwl = self.nbc_.getHpwl() if self.nbc_ is not None else 0
@@ -2171,7 +2362,7 @@ class NesterovPlace:
             else:
                 self.is_min_hpwl_ = False
             self.reportStatus()
-            if self.average_overflow_ <= self.npVars_.targetOverflow:
+            if self.checkConvergence(iter_num, self.routability_iter_):
                 for nb in self.nbVec_:
                     nb.isConverged_ = True
                 break
@@ -2188,12 +2379,20 @@ class NesterovPlace:
         for nb in self.nbVec_:
             nb.setNpVars(self.npVars_)
             nb.initBaseWireLengthCoef()
-        self.initWireLengthCoef()
-        for nb in self.nbVec_:
-            nb.initDensityPenalty(max(1e-12, self.npVars_.initDensityPenalty))
             nb.initDensity1()
-            nb.initDensity2(self.wireLengthCoefX_, self.wireLengthCoefY_)
+        self.updateOverflow()
+        self.initWireLengthCoef()
+        self.updateWireLengthCoef(self.average_overflow_)
+        if self.nbc_ is not None:
+            self.nbc_.updateWireLengthForceWA(self.wireLengthCoefX_, self.wireLengthCoefY_)
+        for nb in self.nbVec_:
             nb.updateCurGradient()
+            nb.updateInitialPrevSLPCoordi()
+            nb.updateDensityCenterPrevSLP()
+            nb.updateDensityForceBin()
+            nb.updatePrevGradient()
+            nb.initDensityPenalty(max(1e-12, self.npVars_.initDensityPenalty))
+            nb.initDensity2(self.wireLengthCoefX_, self.wireLengthCoefY_)
         self.updateOverflow()
         if not self.snapshot_saved_:
             self.saveSnapshot()
@@ -2209,17 +2408,52 @@ class NesterovPlace:
         self.wireLengthCoefY_ = max(1e-9, self.baseWireLengthCoef_ * init_coef)
 
     def updateWireLengthCoef(self, overflow: float) -> None:
-        """随 overflow 调整 WA gamma。
+        if overflow > 1.0:
+            self.wireLengthCoefX_ = self.wireLengthCoefY_ = 0.1
+        elif overflow < 0.1:
+            self.wireLengthCoefX_ = self.wireLengthCoefY_ = 10.0
+        else:
+            self.wireLengthCoefX_ = self.wireLengthCoefY_ = 1.0 / pow(10.0, (overflow - 0.1) * 20 / 9.0 - 1.0)
+        self.wireLengthCoefX_ *= self.baseWireLengthCoef_
+        self.wireLengthCoefY_ *= self.baseWireLengthCoef_
+        if self.log_ is not None and hasattr(self.log_, "debug"):
+            try:
+                self.log_.debug("NewWireLengthCoef: %g", self.wireLengthCoefX_)
+            except Exception:
+                pass
 
-        完整 OpenROAD 会按 HPWL/density force 比例调参；这里保持同名状态更新，
-        使外层循环可验证但不声称复刻生产数值。
-        """
-
-        target = self.npVars_.targetOverflow if self.npVars_ is not None else 0.1
-        ratio = max(0.25, min(4.0, overflow / max(target, 1e-6)))
-        coef = max(1e-9, self.baseWireLengthCoef_ * (0.5 + 0.5 * ratio))
-        self.wireLengthCoefX_ = coef
-        self.wireLengthCoefY_ = coef
+    def doBackTracking(self, coeff: float) -> None:
+        num_backtrak = 0
+        for num_backtrak in range(self.npVars_.maxBackTrack if self.npVars_ is not None else 0):
+            for nb in self.nbVec_:
+                nb.nesterovUpdateCoordinates(coeff)
+            if self.nbc_ is not None:
+                self.nbc_.updateWireLengthForceWA(self.wireLengthCoefX_, self.wireLengthCoefY_)
+            self.num_region_diverged_ = 0
+            for nb in self.nbVec_:
+                nb.updateNextGradient()
+                self.num_region_diverged_ += 1 if nb.checkDivergence() else 0
+            if self.num_region_diverged_ > 0:
+                self.divergeMsg_ = "RePlAce diverged at wire/density gradient Sum."
+                self.divergeCode_ = 306
+                break
+            step_length_limit_ok = 0
+            self.num_region_diverged_ = 0
+            for nb in self.nbVec_:
+                if nb.nesterovUpdateStepLength():
+                    step_length_limit_ok += 1
+                self.num_region_diverged_ += 1 if nb.checkDivergence() else 0
+            if self.num_region_diverged_ > 0:
+                self.divergeMsg_ = "RePlAce diverged during gradient descent calculation, resulting in an invalid step length (Inf or NaN)."
+                self.divergeCode_ = 305
+                break
+            if step_length_limit_ok != len(self.nbVec_):
+                break
+        if num_backtrak + 1 > 0 and self.log_ is not None and hasattr(self.log_, "debug"):
+            try:
+                self.log_.debug("NumBackTrak: %d", num_backtrak + 1)
+            except Exception:
+                pass
 
     def _takePurePythonStep(self, nb: NesterovBase) -> None:
         """执行一小步可验证的 SLP 更新；真实 backtracking/动量仍未复刻。"""
@@ -2276,8 +2510,25 @@ class NesterovPlace:
             nb.updatePrevSLPCoordi()
 
     def updateNextIter(self, iter: int) -> None:
+        self.total_sum_overflow_ = 0.0
+        self.total_sum_overflow_unscaled_ = 0.0
         for nb in self.nbVec_:
-            nb.setIter(iter)
+            nb.updateNextIter(iter)
+            self.total_sum_overflow_ += nb.getSumOverflow()
+            self.total_sum_overflow_unscaled_ += nb.getSumOverflowUnscaled()
+        count = max(1, len(self.nbVec_))
+        self.average_overflow_ = self.total_sum_overflow_ / count
+        self.average_overflow_unscaled_ = self.total_sum_overflow_unscaled_ / count
+        self.updateWireLengthCoef(self.average_overflow_)
+        if self.npVars_ is not None and not self.npVars_.disableRevertIfDiverge and self.nbc_ is not None:
+            hpwl = self.nbc_.getHpwl()
+            if hpwl < self.min_hpwl_ and self.average_overflow_unscaled_ <= 0.25:
+                self.min_hpwl_ = hpwl
+                self.diverge_snapshot_average_overflow_unscaled_ = self.average_overflow_unscaled_
+                self.diverge_snapshot_iter_ = iter + 1
+                self.is_min_hpwl_ = True
+            else:
+                self.is_min_hpwl_ = False
 
     def updateDb(self) -> None:
         if self.nbc_ is not None:

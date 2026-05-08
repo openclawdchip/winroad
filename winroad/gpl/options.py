@@ -43,6 +43,7 @@ class PlaceOptions:
     routabilityTargetRcMetric: float = 1.01
     routabilityInflationRatioCoef: float = 2.0
     routabilityMaxInflationRatio: float = 3.0
+    routabilityMaxInflationIter: int = 4
     routabilityRcK1: float = 1.0
     routabilityRcK2: float = 1.0
     routabilityRcK3: float = 0.0
@@ -134,6 +135,8 @@ class PlaceOptions:
             raise ValueError("routabilityInflationRatioCoef must be non-negative")
         if self.routabilityMaxInflationRatio < 1.0:
             raise ValueError("routabilityMaxInflationRatio must be at least 1.0")
+        if self.routabilityMaxInflationIter < 0:
+            raise ValueError("routabilityMaxInflationIter must be non-negative")
         if self.padLeft < 0 or self.padRight < 0:
             raise ValueError("padLeft/padRight must be non-negative")
         if self.timingDrivenMode and not self.timingNetWeightOverflows:
@@ -175,6 +178,7 @@ class PlaceOptions:
             "routability_target_rc_metric": self.routabilityTargetRcMetric,
             "routability_inflation_ratio_coef": self.routabilityInflationRatioCoef,
             "routability_max_inflation_ratio": self.routabilityMaxInflationRatio,
+            "routability_max_inflation_iter": self.routabilityMaxInflationIter,
             "routability_rc_coefficients": (
                 self.routabilityRcK1,
                 self.routabilityRcK2,

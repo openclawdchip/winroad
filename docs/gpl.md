@@ -267,6 +267,27 @@ Nesterov filler、Nesterov density field、RouteBase GRT adapter、TimingBase ho
 - Nesterov density field 已有局部 fallback，但真实 FFT/Poisson solver 仍未复刻。
 - `runMBFF()` 的真实聚类与 DB 写回仍未接入。
 
+## 第十一轮补充
+
+本轮按 OpenROAD 源码直译，只修改 `placer_base.py`、`replace.py`、`options.py`、`graphics.py` 和本文档。
+参考源码为 `placerBase.cpp/.h`、`replace.cpp`、`mbff.cpp/.h`、`graphics.cpp/.h`、`Replace.h`。
+
+- Replace / Options
+  - `Replace.init()` 对齐 C++ `Replace::init()`，可重新绑定 `db/sta/resizer/router/logger`。
+  - 新增 `default_options_`，让 C++ 风格 setter 先改默认状态，再由 `doPlace()`、`doInitialPlace()`、`doNesterovPlace()`、`getUniformTargetDensity()` 使用。
+  - 补齐 `Replace.h` 中 initial-place、Nesterov、density/overflow、phi、reference HPWL、skip-IO、disable-revert、routability、pad、timing net weight、keep-resize 等 setter 边界。
+  - `PlaceOptions` 增加 `routabilityMaxInflationIter` 字段、校验和报告项，对应 C++ `routabilityMaxInflationIter_`。
+
+- PlacerBase
+  - 补 `Instance.area()` 别名，对齐 C++ `Instance::area()` 使用点。
+  - 补 `fastModulo`、`getMinMaxIdx`、`isCoreAreaOverlap`、`getOverlapWithCoreArea` 的 Python 等价实现。
+  - 新增 `PlacerBase.initInstsForUnusableSites()`，按 C++ site grid 流程从 rows/blockages/fixed insts 生成 dummy instance；当前轻量 ODB 缺 row/site 数据时保持空操作。
+  - `PlacerBase.init()` 对 fixed/core overlap、dummy/non-place area 统计更贴近 `placerBase.cpp`。
+
+- Graphics / MBFF 边界
+  - `AbstractGraphics` 补齐 `graphics.h` 中 renderer/heatmap 查询、绘制、选择、截图标签等无 GUI 可调用入口，仍只记录事件，不打开 GUI。
+  - `Replace.runMBFF()` 继续不伪造聚类或 DB 写回，但报告中记录 `MBFF::Run(max_sz, alpha, beta)` 及主要 helper 边界，明确真实 Liberty/STA/Resizer/OpenDB 依赖未接入。
+
 ### 验证命令
 
 ```powershell

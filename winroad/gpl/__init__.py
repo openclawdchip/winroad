@@ -7,6 +7,7 @@ the historical ``winroad.gpl`` public API.
 from __future__ import annotations
 
 from .common import Cluster, Clusters
+from .fft import FFT, ddct, ddct2d, ddcst2d, ddsct2d, ddst, ddst2d
 from .graphics import AbstractGraphics, GraphicsNone
 from .initial_place import InitialPlace, InitialPlaceVars
 from .nesterov import (
@@ -39,6 +40,7 @@ __all__ = [
     "Clusters",
     "Die",
     "FloatPoint",
+    "FFT",
     "GCell",
     "GCellChange",
     "GCellSnapshot",
@@ -66,6 +68,12 @@ __all__ = [
     "Tile",
     "TileGrid",
     "TimingBase",
+    "ddct",
+    "ddct2d",
+    "ddcst2d",
+    "ddsct2d",
+    "ddst",
+    "ddst2d",
     "isValidSigType",
     "make_replace",
     "nesterovDbCbk",

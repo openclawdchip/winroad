@@ -66,6 +66,21 @@ class Replace:
         self.last_error_: Optional[Dict[str, Any]] = None
         self.mbff_options_: Optional[MBFFOptions] = None
         self.mbff_report_: Dict[str, Any] = {}
+        self.default_options_ = PlaceOptions()
+
+    def init(
+        self,
+        odb: Optional[DbDatabase],
+        sta: Any = None,
+        resizer: Any = None,
+        router: Any = None,
+        logger: Any = None,
+    ) -> None:
+        self.db_ = odb
+        self.sta_ = sta
+        self.rs_ = resizer
+        self.fr_ = router
+        self.log_ = logger
 
     def setGraphicsInterface(self, graphics: AbstractGraphics) -> None:
         self.graphics_ = graphics.MakeNew(self.log_)
@@ -84,6 +99,21 @@ class Replace:
         self.last_error_ = None
         self.mbff_options_ = None
         self.mbff_report_ = {}
+        self.default_options_ = PlaceOptions()
+
+    def _target_options(self, options: Optional[PlaceOptions]) -> PlaceOptions:
+        return options if options is not None else self.default_options_
+
+    def _split_option_arg(self, first: Any, rest: tuple[Any, ...], expected: int) -> tuple[PlaceOptions, tuple[Any, ...]]:
+        if isinstance(first, PlaceOptions):
+            args = rest
+            options = first
+        else:
+            args = (first,) + rest
+            options = self.default_options_
+        if len(args) != expected:
+            raise TypeError(f"expected {expected} value argument(s), got {len(args)}")
+        return options, args
 
     def addPlacementCluster(self, cluster: Cluster) -> None:
         self.clusters_.append(list(cluster))
@@ -165,7 +195,7 @@ class Replace:
         return result
 
     def doIncrementalPlace(self, threads: int, options: Optional[PlaceOptions] = None) -> None:
-        options = options or PlaceOptions()
+        options = options or self.default_options_
         options.validate(self.log_)
         self._validate_threads(threads)
         self.checkHasCoreRows()
@@ -188,7 +218,7 @@ class Replace:
             self.doNesterovPlace(threads, final_options, iter_count + 1)
 
     def doPlace(self, threads: int, options: Optional[PlaceOptions] = None) -> None:
-        options = options or PlaceOptions()
+        options = options or self.default_options_
         options.validate(self.log_)
         self._validate_threads(threads)
         def action() -> None:
@@ -198,7 +228,7 @@ class Replace:
         self._run_stage("doPlace", action, options, {"threads": threads})
 
     def doInitialPlace(self, threads: int, options: Optional[PlaceOptions] = None) -> None:
-        options = options or PlaceOptions()
+        options = options or self.default_options_
         options.validate(self.log_)
         self._validate_threads(threads)
         self.checkHasCoreRows()
@@ -216,7 +246,7 @@ class Replace:
         self._run_stage("doInitialPlace", action, options, {"threads": threads})
 
     def doNesterovPlace(self, threads: int, options: Optional[PlaceOptions] = None, start_iter: int = 0) -> int:
-        options = options or PlaceOptions()
+        options = options or self.default_options_
         options.validate(self.log_)
         self._validate_threads(threads)
         if start_iter < 0:
@@ -247,13 +277,29 @@ class Replace:
         self.mbff_report_ = {
             "status": "not_run",
             "implemented": False,
-            "reason": "OpenROAD MBFF clustering has not been translated; no clustering was created or modified.",
+            "reason": "OpenROAD MBFF clustering requires Liberty/STA/Resizer/OpenDB mutation; this Python pass only records the translated boundary.",
             "config": options.report(),
             "design": {
                 "has_block": block is not None,
                 "inst_count": len(insts),
                 "movable_inst_count": len(movable),
                 "placeable_insts": self.total_placeable_insts_,
+            },
+            "translated_cpp_boundary": {
+                "class": "gpl::MBFF",
+                "constructor_multistart": 20,
+                "entry": "MBFF::Run(max_sz, alpha, beta)",
+                "major_helpers": [
+                    "ReadFFs",
+                    "ReadPaths",
+                    "ReadLibs",
+                    "SetTrayNames",
+                    "SeparateFlops",
+                    "SetVars",
+                    "SetRatios",
+                    "RunClustering",
+                    "ModifyPinConnections",
+                ],
             },
             "clusters_before": len(self.clusters_),
             "clusters_after": len(self.clusters_),
@@ -345,51 +391,207 @@ class Replace:
             "nesterov_base_common": self.nbc_.reportStatus() if self.nbc_ is not None else {},
         }
 
-    def setInitialPlaceMaxIter(self, options: PlaceOptions, max_iter: int) -> None:
+    def setInitialPlaceMaxIter(self, options: Optional[PlaceOptions] | int, max_iter: Optional[int] = None) -> None:
+        options, args = self._split_option_arg(options, () if max_iter is None else (max_iter,), 1)
+        max_iter = args[0]
         options.initialPlaceMaxIter = max_iter
         options.validate(self.log_)
 
-    def setNesterovPlaceMaxIter(self, options: PlaceOptions, max_iter: int) -> None:
-        options.nesterovPlaceMaxIter = max_iter
+    def setInitialPlaceMinDiffLength(self, options: Optional[PlaceOptions] | int, length: Optional[int] = None) -> None:
+        options, args = self._split_option_arg(options, () if length is None else (length,), 1)
+        length = args[0]
+        options.initialPlaceMinDiffLength = length
         options.validate(self.log_)
 
-    def setTargetDensity(self, options: PlaceOptions, density: float) -> None:
+    def setInitialPlaceMaxSolverIter(self, options: Optional[PlaceOptions] | int, max_iter: Optional[int] = None) -> None:
+        options, args = self._split_option_arg(options, () if max_iter is None else (max_iter,), 1)
+        max_iter = args[0]
+        options.initialPlaceMaxSolverIter = max_iter
+        options.validate(self.log_)
+
+    def setInitialPlaceMaxFanout(self, options: Optional[PlaceOptions] | int, fanout: Optional[int] = None) -> None:
+        options, args = self._split_option_arg(options, () if fanout is None else (fanout,), 1)
+        fanout = args[0]
+        options.initialPlaceMaxFanout = fanout
+        options.validate(self.log_)
+
+    def setInitialPlaceNetWeightScale(self, options: Optional[PlaceOptions] | float, scale: Optional[float] = None) -> None:
+        options, args = self._split_option_arg(options, () if scale is None else (scale,), 1)
+        scale = args[0]
+        options.initialPlaceNetWeightScale = scale
+        options.validate(self.log_)
+
+    def setNesterovPlaceMaxIter(self, options: Optional[PlaceOptions] | int, max_iter: Optional[int] = None) -> None:
+        options, args = self._split_option_arg(options, () if max_iter is None else (max_iter,), 1)
+        max_iter = args[0]
+        options.nesterovPlaceMaxIter = max_iter
+        options.validate(self.log_)
+        if self.np_ is not None:
+            self.np_.setMaxIters(max_iter)
+
+    def setTargetDensity(self, options: Optional[PlaceOptions] | float, density: Optional[float] = None) -> None:
+        options, args = self._split_option_arg(options, () if density is None else (density,), 1)
+        density = args[0]
         options.density = density
         options.validate(self.log_)
 
-    def setTargetOverflow(self, options: PlaceOptions, overflow: float) -> None:
-        options.overflow = overflow
+    def setUniformTargetDensityMode(self, options: Optional[PlaceOptions] | bool, mode: Optional[bool] = None) -> None:
+        options, args = self._split_option_arg(options, () if mode is None else (mode,), 1)
+        mode = args[0]
+        options.uniformTargetDensityMode = bool(mode)
         options.validate(self.log_)
 
-    def setTimingDrivenMode(self, options: PlaceOptions, enabled: bool) -> None:
+    def setTargetOverflow(self, options: Optional[PlaceOptions] | float, overflow: Optional[float] = None) -> None:
+        options, args = self._split_option_arg(options, () if overflow is None else (overflow,), 1)
+        overflow = args[0]
+        options.overflow = overflow
+        options.validate(self.log_)
+        if self.np_ is not None:
+            self.np_.setTargetOverflow(overflow)
+
+    def setInitDensityPenalityFactor(self, options: Optional[PlaceOptions], penalty_factor: float) -> None:
+        options = self._target_options(options)
+        options.initDensityPenaltyFactor = penalty_factor
+        options.validate(self.log_)
+
+    def setInitDensityPenaltyFactor(self, options: Optional[PlaceOptions], penalty_factor: float) -> None:
+        self.setInitDensityPenalityFactor(options, penalty_factor)
+
+    def setInitWireLengthCoef(self, options: Optional[PlaceOptions], coef: float) -> None:
+        options = self._target_options(options)
+        options.initWireLengthCoef = coef
+        options.validate(self.log_)
+
+    def setMinPhiCoef(self, options: Optional[PlaceOptions], min_phi_coef: float) -> None:
+        options = self._target_options(options)
+        options.minPhiCoef = min_phi_coef
+        options.validate(self.log_)
+
+    def setMaxPhiCoef(self, options: Optional[PlaceOptions], max_phi_coef: float) -> None:
+        options = self._target_options(options)
+        options.maxPhiCoef = max_phi_coef
+        options.validate(self.log_)
+
+    def setReferenceHpwl(self, options: Optional[PlaceOptions], ref_hpwl: float) -> None:
+        options = self._target_options(options)
+        options.referenceHpwl = ref_hpwl
+        options.validate(self.log_)
+
+    def setTimingDrivenMode(self, options: Optional[PlaceOptions], enabled: bool) -> None:
+        options = self._target_options(options)
         options.timingDrivenMode = enabled
         options.validate(self.log_)
 
-    def setRoutabilityDrivenMode(self, options: PlaceOptions, enabled: bool) -> None:
+    def setSkipIoMode(self, options: Optional[PlaceOptions], mode: bool) -> None:
+        options = self._target_options(options)
+        options.skipIoMode = bool(mode)
+        options.validate(self.log_)
+
+    def setDisableRevertIfDiverge(self, options: Optional[PlaceOptions], mode: bool) -> None:
+        options = self._target_options(options)
+        options.disableRevertIfDiverge = bool(mode)
+        options.validate(self.log_)
+
+    def setRoutabilityDrivenMode(self, options: Optional[PlaceOptions], enabled: bool) -> None:
+        options = self._target_options(options)
         options.routabilityDrivenMode = enabled
         options.validate(self.log_)
 
-    def setBinGridCnt(self, options: PlaceOptions, bin_cnt_x: int, bin_cnt_y: int) -> None:
+    def setRoutabilityUseGrt(self, options: Optional[PlaceOptions], mode: bool) -> None:
+        options = self._target_options(options)
+        options.routabilityUseRudy = not bool(mode)
+        options.validate(self.log_)
+
+    def setRoutabilityCheckOverflow(self, options: Optional[PlaceOptions], overflow: float) -> None:
+        options = self._target_options(options)
+        options.routabilityCheckOverflow = overflow
+        options.validate(self.log_)
+
+    def setRoutabilityMaxDensity(self, options: Optional[PlaceOptions], density: float) -> None:
+        options = self._target_options(options)
+        options.routabilityMaxDensity = density
+        options.validate(self.log_)
+
+    def setRoutabilityMaxInflationIter(self, options: Optional[PlaceOptions], max_iter: int) -> None:
+        options = self._target_options(options)
+        options.routabilityMaxInflationIter = max_iter
+        options.validate(self.log_)
+
+    def setRoutabilityTargetRcMetric(self, options: Optional[PlaceOptions], rc: float) -> None:
+        options = self._target_options(options)
+        options.routabilityTargetRcMetric = rc
+        options.validate(self.log_)
+
+    def setRoutabilityInflationRatioCoef(self, options: Optional[PlaceOptions], coef: float) -> None:
+        options = self._target_options(options)
+        options.routabilityInflationRatioCoef = coef
+        options.validate(self.log_)
+
+    def setRoutabilityMaxInflationRatio(self, options: Optional[PlaceOptions], ratio: float) -> None:
+        options = self._target_options(options)
+        options.routabilityMaxInflationRatio = ratio
+        options.validate(self.log_)
+
+    def setRoutabilityRcCoefficients(self, options: Optional[PlaceOptions], k1: float, k2: float, k3: float, k4: float) -> None:
+        options = self._target_options(options)
+        options.routabilityRcK1 = k1
+        options.routabilityRcK2 = k2
+        options.routabilityRcK3 = k3
+        options.routabilityRcK4 = k4
+        options.validate(self.log_)
+
+    def setEnableRoutingCongestion(self, options: Optional[PlaceOptions], mode: bool) -> None:
+        options = self._target_options(options)
+        options.enable_routing_congestion = bool(mode)
+        options.validate(self.log_)
+
+    def setBinGridCnt(self, options: Optional[PlaceOptions], bin_cnt_x: int, bin_cnt_y: int) -> None:
+        options = self._target_options(options)
         options.binGridCntX = bin_cnt_x
         options.binGridCntY = bin_cnt_y
         options.validate(self.log_)
 
-    def setPad(self, options: PlaceOptions, pad_left: int, pad_right: int) -> None:
+    def setPad(self, options: Optional[PlaceOptions], pad_left: int, pad_right: int) -> None:
+        options = self._target_options(options)
         options.padLeft = pad_left
         options.padRight = pad_right
         options.validate(self.log_)
 
-    def setTimingNetWeightOverflows(self, options: PlaceOptions, overflows: List[int]) -> None:
+    def setPadLeft(self, options: Optional[PlaceOptions], padding: int) -> None:
+        options = self._target_options(options)
+        options.padLeft = padding
+        options.validate(self.log_)
+
+    def setPadRight(self, options: Optional[PlaceOptions], padding: int) -> None:
+        options = self._target_options(options)
+        options.padRight = padding
+        options.validate(self.log_)
+
+    def setTimingNetWeightOverflows(self, options: Optional[PlaceOptions], overflows: List[int]) -> None:
+        options = self._target_options(options)
         options.timingNetWeightOverflows = list(overflows)
         options.validate(self.log_)
         if self.tb_ is not None:
             self.tb_.setTimingNetWeightOverflows(options.timingNetWeightOverflows)
 
-    def setTimingNetWeightMax(self, options: PlaceOptions, max_weight: float) -> None:
+    def addTimingNetWeightOverflow(self, options: Optional[PlaceOptions], overflow: int) -> None:
+        options = self._target_options(options)
+        options.timingNetWeightOverflows.append(overflow)
+        options.validate(self.log_)
+        if self.tb_ is not None:
+            self.tb_.setTimingNetWeightOverflows(options.timingNetWeightOverflows)
+
+    def setTimingNetWeightMax(self, options: Optional[PlaceOptions], max_weight: float) -> None:
+        options = self._target_options(options)
         options.timingNetWeightMax = max_weight
         options.validate(self.log_)
         if self.tb_ is not None:
             self.tb_.setTimingNetWeightMax(max_weight)
+
+    def setKeepResizeBelowOverflow(self, options: Optional[PlaceOptions], overflow: float) -> None:
+        options = self._target_options(options)
+        options.keepResizeBelowOverflow = overflow
+        options.validate(self.log_)
 
     def initNesterovPlace(self, options: PlaceOptions, threads: int, check_density: bool) -> bool:
         options.validate(self.log_)
@@ -435,7 +637,7 @@ class Replace:
         return self._run_stage("initNesterovPlace", action, options, {"threads": threads, "check_density": check_density})
 
     def getUniformTargetDensity(self, options: Optional[PlaceOptions] = None, threads: int = 1) -> float:
-        options = options or PlaceOptions()
+        options = options or self.default_options_
         options_no_io = PlaceOptions(**{**options.__dict__})
         options_no_io.skipIo()
         if self.initNesterovPlace(options_no_io, threads, False) and self.nbVec_:

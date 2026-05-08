@@ -88,6 +88,83 @@ class AbstractGraphics:
     def status(self, message: str) -> None:
         self._record("status", message)
 
+    def drawObjects(self, painter: Any = None) -> None:
+        self._record("draw_objects", {"painter": painter is not None})
+
+    def select(self, layer: Any = None, x: int = 0, y: int = 0) -> List[Any]:
+        self._record("select", {"layer": getattr(layer, "name", None), "x": x, "y": y})
+        return []
+
+    def canAdjustGrid(self) -> bool:
+        return False
+
+    def getGridXSize(self) -> float:
+        return 0.0
+
+    def getGridYSize(self) -> float:
+        return 0.0
+
+    def getBounds(self) -> Tuple[int, int, int, int]:
+        return (0, 0, 0, 0)
+
+    def populateMap(self) -> bool:
+        self._record("populate_map", None)
+        return False
+
+    def combineMapData(self, base_has_value: bool, base: float, new_data: float) -> Tuple[bool, float]:
+        return bool(base_has_value), base if base_has_value else new_data
+
+    def populateXYGrid(self) -> None:
+        self._record("populate_xy_grid", None)
+
+    @staticmethod
+    def guiActive() -> bool:
+        return False
+
+    def addFrameLabel(self, gui: Any, bbox: Any, label: str, label_name: str, image_width_px: int) -> None:
+        self._record(
+            "frame_label",
+            {"label": label, "label_name": label_name, "image_width_px": image_width_px},
+        )
+
+    def saveLabeledImage(self, path: str, label: str, label_name: str = "", image_width_px: int = 0) -> None:
+        self._record(
+            "save_labeled_image",
+            {"path": path, "label": label, "label_name": label_name, "image_width_px": image_width_px},
+        )
+
+    def getGuiObjectFromGraphics(self) -> None:
+        return None
+
+    def drawForce(self, painter: Any = None) -> None:
+        self._record("draw_force", {"painter": painter is not None})
+
+    def drawCells(self, cells: Sequence[Any], painter: Any = None) -> None:
+        self._record("draw_cells", {"cells": len(cells), "painter": painter is not None})
+
+    def drawSingleGCell(self, gCell: Any, painter: Any = None) -> None:
+        self._record("draw_single_gcell", {"gcell": getattr(gCell, "name", None), "painter": painter is not None})
+
+    def initHeatmap(self) -> None:
+        self._record("init_heatmap", None)
+
+    def drawNesterov(self, painter: Any = None) -> None:
+        self._record("draw_nesterov", {"painter": painter is not None})
+
+    def drawInitial(self, painter: Any = None) -> None:
+        self._record("draw_initial", {"painter": painter is not None})
+
+    def drawMBFF(self, painter: Any = None) -> None:
+        self._record("draw_mbff", {"painter": painter is not None})
+
+    def drawBounds(self, painter: Any = None) -> None:
+        self._record("draw_bounds", {"painter": painter is not None})
+
+    def reportSelected(self) -> Dict[str, Any]:
+        report = {"selected": 0}
+        self._record("report_selected", report)
+        return report
+
     def enabled(self) -> bool:
         return self.debug_on
 

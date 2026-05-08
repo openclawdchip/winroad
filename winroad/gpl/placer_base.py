@@ -218,6 +218,9 @@ class Instance:
     def getArea(self) -> int:
         return _area((self.lx_, self.ly_, self.ux_, self.uy_))
 
+    def area(self) -> int:
+        return self.getArea()
+
     def setExtId(self, extId: int) -> None:
         self.extId_ = extId
 
@@ -853,9 +856,40 @@ class PlacerBase:
         if pbCommon is not None:
             self.init(check_density)
 
+    @staticmethod
+    def _fastModulo(input_value: int, ceil: int) -> int:
+        return input_value % ceil if ceil > 0 and input_value >= ceil else input_value
+
+    @classmethod
+    def _getMinMaxIdx(cls, ll: int, uu: int, coreLL: int, siteSize: int, minIdx: int, maxIdx: int) -> Tuple[int, int]:
+        if siteSize <= 0:
+            return minIdx, minIdx
+        lower_idx = (ll - coreLL) // siteSize
+        upper_idx = (uu - coreLL) // siteSize if cls._fastModulo(uu - coreLL, siteSize) == 0 else (uu - coreLL) // siteSize + 1
+        return max(minIdx, lower_idx), min(maxIdx, upper_idx)
+
+    @staticmethod
+    def _isCoreAreaOverlap(die: Die, inst: Instance) -> bool:
+        rect_lx = max(die.coreLx(), inst.lx())
+        rect_ly = max(die.coreLy(), inst.ly())
+        rect_ux = min(die.coreUx(), inst.ux())
+        rect_uy = min(die.coreUy(), inst.uy())
+        return not (rect_lx >= rect_ux or rect_ly >= rect_uy)
+
+    @staticmethod
+    def _getOverlapWithCoreArea(die: Die, inst: Instance) -> int:
+        rect_lx = max(die.coreLx(), inst.lx())
+        rect_ly = max(die.coreLy(), inst.ly())
+        rect_ux = min(die.coreUx(), inst.ux())
+        rect_uy = min(die.coreUy(), inst.uy())
+        if rect_lx >= rect_ux or rect_ly >= rect_uy:
+            return 0
+        return (rect_ux - rect_lx) * (rect_uy - rect_ly)
+
     def init(self, check_density: bool) -> None:
         for inst in self.pbCommon_.getInsts():  # type: ignore[union-attr]
-            self.pb_insts_.append(inst)
+            if inst.dbInst() is not None and self.group_ is not None and getattr(inst.dbInst(), "group", None) != self.group_:
+                continue
             if inst.isPlaceInstance():
                 self.placeInsts_.append(inst)
                 self.placeInstsArea_ += inst.getArea()
@@ -864,9 +898,90 @@ class PlacerBase:
                 else:
                     self.stdInstsArea_ += inst.getArea()
             else:
-                self.fixedInsts_.append(inst)
+                if self._isCoreAreaOverlap(self.die_, inst):
+                    self.fixedInsts_.append(inst)
+                    self.nonPlaceInsts_.append(inst)
+                    self.nonPlaceInstsArea_ += self._getOverlapWithCoreArea(self.die_, inst)
+            self.pb_insts_.append(inst)
+        self.initInstsForUnusableSites()
+        for inst in self.instStor_:
+            if inst.isDummy():
+                self.dummyInsts_.append(inst)
                 self.nonPlaceInsts_.append(inst)
-                self.nonPlaceInstsArea_ += inst.getArea()
+                self.nonPlaceInstsArea_ += inst.area()
+            self.pb_insts_.append(inst)
+
+    def initInstsForUnusableSites(self) -> None:
+        """对应 C++ `PlacerBase::initInstsForUnusableSites()` 的数据层直译。
+
+        当前 ODB 骨架可能缺少 row/blockage/power-domain 类；缺失 site/row 数据时保持空 dummy 集合。
+        """
+
+        block = _get_block(self.db_)
+        if block is None or self.siteSizeX_ <= 0 or self.siteSizeY_ <= 0:
+            return
+        site_count_x = (self.die_.coreUx() - self.die_.coreLx()) // self.siteSizeX_
+        site_count_y = (self.die_.coreUy() - self.die_.coreLy()) // self.siteSizeY_
+        if site_count_x <= 0 or site_count_y <= 0:
+            return
+        empty, row, fixed_inst = 0, 1, 2
+        site_grid = [empty] * (site_count_x * site_count_y)
+        rows = list(getattr(block, "rows", []) or [])
+        group_boundaries = list(getattr(getattr(self.group_, "region", None), "boundaries", []) or [])
+        if self.group_ is not None and group_boundaries:
+            rects = [getattr(boundary, "box", boundary) for boundary in group_boundaries]
+        else:
+            rects = [getattr(row_obj, "bbox", getattr(row_obj, "rect", row_obj)) for row_obj in rows]
+        for rect in rects:
+            lx, ly, ux, uy = rect
+            pair_x = self._getMinMaxIdx(lx, ux, self.die_.coreLx(), self.siteSizeX_, 0, site_count_x)
+            pair_y = self._getMinMaxIdx(ly, uy, self.die_.coreLy(), self.siteSizeY_, 0, site_count_y)
+            for i in range(pair_x[0], pair_x[1]):
+                for j in range(pair_y[0], pair_y[1]):
+                    site_grid[j * site_count_x + i] = row
+        for blockage in list(getattr(block, "blockages", []) or []):
+            inst = getattr(blockage, "inst", getattr(blockage, "instance", None))
+            if inst is not None and getattr(inst, "status", PlacementStatus.UNPLACED) not in {PlacementStatus.FIXED, PlacementStatus.COVER, PlacementStatus.LOCKED}:
+                continue
+            bbox = getattr(blockage, "bbox", getattr(blockage, "rect", getattr(blockage, "box", None)))
+            if bbox is None:
+                continue
+            max_density = getattr(blockage, "max_density", getattr(blockage, "maxDensity", 0))
+            filler_density = (100 - max_density) / 100
+            lx, ly, ux, uy = bbox
+            pair_x = self._getMinMaxIdx(lx, ux, self.die_.coreLx(), self.siteSizeX_, 0, site_count_x)
+            pair_y = self._getMinMaxIdx(ly, uy, self.die_.coreLy(), self.siteSizeY_, 0, site_count_y)
+            cells = filled = 0
+            for j in range(pair_y[0], pair_y[1]):
+                for i in range(pair_x[0], pair_x[1]):
+                    if cells == 0 or filled / float(cells) <= filler_density:
+                        site_grid[j * site_count_x + i] = empty
+                        filled += 1
+                    cells += 1
+        for inst in self.pbCommon_.getInsts() if self.pbCommon_ is not None else []:
+            if not inst.isFixed():
+                continue
+            pair_x = self._getMinMaxIdx(inst.lx(), inst.ux(), self.die_.coreLx(), self.siteSizeX_, 0, site_count_x)
+            pair_y = self._getMinMaxIdx(inst.ly(), inst.uy(), self.die_.coreLy(), self.siteSizeY_, 0, site_count_y)
+            for i in range(pair_x[0], pair_x[1]):
+                for j in range(pair_y[0], pair_y[1]):
+                    site_grid[j * site_count_x + i] = fixed_inst
+        for j in range(site_count_y):
+            i = 0
+            while i < site_count_x:
+                if site_grid[j * site_count_x + i] == empty:
+                    start_x = i
+                    while i < site_count_x and site_grid[j * site_count_x + i] == empty:
+                        i += 1
+                    self.instStor_.append(
+                        Instance.dummy(
+                            self.die_.coreLx() + self.siteSizeX_ * start_x,
+                            self.die_.coreLy() + self.siteSizeY_ * j,
+                            self.die_.coreLx() + self.siteSizeX_ * i,
+                            self.die_.coreLy() + self.siteSizeY_ * (j + 1),
+                        )
+                    )
+                i += 1
 
     def reset(self) -> None:
         self.pb_insts_.clear()

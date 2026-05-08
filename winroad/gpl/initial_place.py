@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .options import PlaceOptions
 from .placer_base import PlacerBase, PlacerBaseCommon
+from .solver import cpuSparseSolve
 
 @dataclass
 class InitialPlaceVars:
@@ -58,6 +59,8 @@ class InitialPlace:
         self.fixedInstForceVecX_: List[float] = []
         self.instLocVecY_: List[float] = []
         self.fixedInstForceVecY_: List[float] = []
+        self.placeInstForceMatrixX_: List[List[Tuple[int, float]]] = []
+        self.placeInstForceMatrixY_: List[List[Tuple[int, float]]] = []
         self.sparseMatrix_: List[List[Tuple[int, float]]] = []
         self.rhsVecX_: List[float] = []
         self.rhsVecY_: List[float] = []
@@ -76,27 +79,33 @@ class InitialPlace:
         self.last_threads_ = threads
         self.solver_failed_ = False
         self.last_solver_report_ = {}
-        if self.ipVars_.maxIter == 0:
-            return
+        error_x = error_y = math.inf
         self.setPlaceInstExtId()
-        self.placeInstsInitialPositions()
-        self.updatePinInfo()
-        self.createSparseMatrix()
-        if not self.matrix_is_b2b_stamped_:
-            self.solver_failed_ = True
-            self.last_solver_report_ = {
-                "status": "not_stamped",
-                "message": (
-                    "OpenROAD InitialPlace B2B net stamping has not been translated; "
-                    "the base sparse matrix is only a safe identity placeholder."
-                ),
-                "matrix": self.reportMatrix(sample_limit=3),
-            }
-            raise NotImplementedError(self.last_solver_report_["message"])
-        self.solveLinearSystem()
-        self.instLocVecX_ = list(self.solutionVecX_)
-        self.instLocVecY_ = list(self.solutionVecY_)
-        self.updateCoordi()
+        self.placeInstsCenter()
+        for iteration in range(1, self.ipVars_.maxIter + 1):
+            self.updatePinInfo()
+            self.createSparseMatrix()
+            error, solver_report = cpuSparseSolve(
+                self.ipVars_.maxSolverIter,
+                iteration,
+                self.placeInstForceMatrixX_,
+                self.fixedInstForceVecX_,
+                self.instLocVecX_,
+                self.placeInstForceMatrixY_,
+                self.fixedInstForceVecY_,
+                self.instLocVecY_,
+                self.log_,
+                threads,
+            )
+            error_x, error_y = error.x, error.y
+            self.last_solver_report_ = solver_report
+            if math.isnan(error.x) or math.isnan(error.y):
+                self.solver_failed_ = True
+                break
+            self.updateCoordi()
+            if max(error.x, error.y) <= 1e-5 and iteration >= 5:
+                break
+        self.solver_failed_ = bool(math.isnan(error_x) or math.isnan(error_y))
 
     def resizeReusableState(self, place_inst_count: int) -> None:
         """Resize reusable matrix/vector storage without translating the solver."""
@@ -108,6 +117,8 @@ class InitialPlace:
         else:
             self.sparseMatrix_ = [[] for _ in range(place_inst_count)]
             self.matrix_reuse_count_ = 0
+        self.placeInstForceMatrixX_ = [[] for _ in range(place_inst_count)]
+        self.placeInstForceMatrixY_ = [[] for _ in range(place_inst_count)]
         self.rhsVecX_ = [0.0 for _ in range(place_inst_count)]
         self.rhsVecY_ = [0.0 for _ in range(place_inst_count)]
         self.solutionVecX_ = [0.0 for _ in range(place_inst_count)]
@@ -118,7 +129,33 @@ class InitialPlace:
         self.matrix_nonzero_count_ = 0
         self.matrix_is_b2b_stamped_ = False
 
+    def placeInstsCenter(self) -> None:
+        """Corresponds to ``gpl::InitialPlace::placeInstsCenter``."""
+
+        die = self.pbc_.getDie()
+        center_x, center_y = die.coreCx(), die.coreCy()
+        for inst in self.pbc_.placeInsts():
+            if inst.isLocked():
+                continue
+            db_inst = inst.dbInst()
+            is_placed = bool(getattr(db_inst, "isPlaced", lambda: False)()) if db_inst is not None else False
+            if self.pbc_.isSkipIoMode() and is_placed:
+                inst.copyDbLocation(self.pbc_)
+            else:
+                inst.setCenterLocation(center_x, center_y)
+        self.instLocVecX_ = [float(inst.cx()) for inst in self.pbc_.placeInsts()]
+        self.instLocVecY_ = [float(inst.cy()) for inst in self.pbc_.placeInsts()]
+        self.resizeReusableState(len(self.instLocVecX_))
+        self.is_initialized_ = True
+        if self.ipVars_.debug and self.graphics_ is not None:
+            self.graphics_.debugForInitialPlace(self.pbc_, self.pbVec_)
+
     def placeInstsInitialPositions(self) -> None:
+        """Compatibility wrapper for older callers."""
+
+        self.placeInstsCenter()
+
+    def _placeInstsInitialPositions_compat(self) -> None:
         die = self.pbc_.getDie()
         center_x, center_y = die.coreCx(), die.coreCy()
         self.instLocVecX_ = []
@@ -134,31 +171,152 @@ class InitialPlace:
             self.graphics_.debugForInitialPlace(self.pbc_, self.pbVec_)
 
     def setPlaceInstExtId(self) -> None:
+        for inst in self.pbc_.getInsts():
+            inst.setExtId(2**31 - 1)
         for index, inst in enumerate(self.pbc_.placeInsts()):
             inst.setExtId(index)
 
     def updatePinInfo(self) -> None:
         for pin in self.pbc_.getPins():
+            pin.unsetMinPinX()
+            pin.unsetMinPinY()
+            pin.unsetMaxPinX()
+            pin.unsetMaxPinY()
             pin.updateCoordi()
+        for net in self.pbc_.getNets():
+            pin_min_x = pin_min_y = pin_max_x = pin_max_y = None
+            lx = ly = 2**31 - 1
+            ux = uy = -(2**31)
+            for pin in net.getPins():
+                if lx > pin.cx():
+                    if pin_min_x is not None:
+                        pin_min_x.unsetMinPinX()
+                    lx = pin.cx()
+                    pin_min_x = pin
+                    pin_min_x.setMinPinX()
+                if ux < pin.cx():
+                    if pin_max_x is not None:
+                        pin_max_x.unsetMaxPinX()
+                    ux = pin.cx()
+                    pin_max_x = pin
+                    pin_max_x.setMaxPinX()
+                if ly > pin.cy():
+                    if pin_min_y is not None:
+                        pin_min_y.unsetMinPinY()
+                    ly = pin.cy()
+                    pin_min_y = pin
+                    pin_min_y.setMinPinY()
+                if uy < pin.cy():
+                    if pin_max_y is not None:
+                        pin_max_y.unsetMaxPinY()
+                    uy = pin.cy()
+                    pin_max_y = pin
+                    pin_max_y.setMaxPinY()
 
     def createSparseMatrix(self) -> None:
         place_insts = self.pbc_.placeInsts()
-        if len(self.sparseMatrix_) != len(place_insts):
-            self.resizeReusableState(len(place_insts))
-        else:
-            for row in self.sparseMatrix_:
-                row.clear()
-            self.matrix_nonzero_count_ = 0
+        place_count = len(place_insts)
+        self.instLocVecX_ = [0.0 for _ in range(place_count)]
+        self.fixedInstForceVecX_ = [0.0 for _ in range(place_count)]
+        self.instLocVecY_ = [0.0 for _ in range(place_count)]
+        self.fixedInstForceVecY_ = [0.0 for _ in range(place_count)]
+        rows_x: List[Dict[int, float]] = [{} for _ in range(place_count)]
+        rows_y: List[Dict[int, float]] = [{} for _ in range(place_count)]
         for index, inst in enumerate(place_insts):
-            self.sparseMatrix_[index].append((index, 1.0))
-            self.rhsVecX_[index] = float(inst.cx())
-            self.rhsVecY_[index] = float(inst.cy())
-            self.solutionVecX_[index] = float(inst.cx())
-            self.solutionVecY_[index] = float(inst.cy())
-        self.matrix_nonzero_count_ = sum(len(row) for row in self.sparseMatrix_)
-        self.matrix_is_b2b_stamped_ = False
-        if self.stampSparseMatrixFromPlaceBaseNets(raise_on_empty=False).get("stamped"):
-            return
+            idx = inst.getExtId()
+            self.instLocVecX_[idx] = float(inst.cx())
+            self.instLocVecY_[idx] = float(inst.cy())
+
+        for net in self.pbc_.getNets():
+            pins = net.getPins()
+            if len(pins) <= 1:
+                continue
+            if len(pins) >= self.ipVars_.maxFanout:
+                continue
+            net_weight = self.ipVars_.netWeightScale / (len(pins) - 1)
+            for pin_idx1 in range(1, len(pins)):
+                pin1 = pins[pin_idx1]
+                for pin_idx2 in range(pin_idx1):
+                    pin2 = pins[pin_idx2]
+                    if pin1.getInstance() is pin2.getInstance():
+                        continue
+                    if pin1.isMinPinX() or pin1.isMaxPinX() or pin2.isMinPinX() or pin2.isMaxPinX():
+                        diff_x = abs(pin1.cx() - pin2.cx())
+                        weight_x = net_weight / (diff_x if diff_x > self.ipVars_.minDiffLength else self.ipVars_.minDiffLength)
+                        self._stamp_openroad_pair(
+                            rows_x,
+                            self.fixedInstForceVecX_,
+                            pin1,
+                            pin2,
+                            weight_x,
+                            "x",
+                        )
+                    if pin1.isMinPinY() or pin1.isMaxPinY() or pin2.isMinPinY() or pin2.isMaxPinY():
+                        diff_y = abs(pin1.cy() - pin2.cy())
+                        weight_y = net_weight / (diff_y if diff_y > self.ipVars_.minDiffLength else self.ipVars_.minDiffLength)
+                        self._stamp_openroad_pair(
+                            rows_y,
+                            self.fixedInstForceVecY_,
+                            pin1,
+                            pin2,
+                            weight_y,
+                            "y",
+                        )
+
+        self.placeInstForceMatrixX_ = self._rows_from_dicts(rows_x)
+        self.placeInstForceMatrixY_ = self._rows_from_dicts(rows_y)
+        self.sparseMatrix_ = self.placeInstForceMatrixX_
+        self.rhsVecX_ = self.fixedInstForceVecX_
+        self.rhsVecY_ = self.fixedInstForceVecY_
+        self.solutionVecX_ = self.instLocVecX_
+        self.solutionVecY_ = self.instLocVecY_
+        self.markSparseMatrixStamped(True)
+
+    def _rows_from_dicts(self, rows: List[Dict[int, float]]) -> List[List[Tuple[int, float]]]:
+        return [
+            sorted(
+                ((col, value) for col, value in row.items() if abs(value) > 1e-15),
+                key=lambda item: item[0],
+            )
+            for row in rows
+        ]
+
+    def _stamp_openroad_pair(
+        self,
+        rows: List[Dict[int, float]],
+        rhs: List[float],
+        pin1: Any,
+        pin2: Any,
+        weight: float,
+        axis: str,
+    ) -> None:
+        coord = "cx" if axis == "x" else "cy"
+        pin1_coord = float(getattr(pin1, coord)())
+        pin2_coord = float(getattr(pin2, coord)())
+        inst1 = pin1.getInstance()
+        inst2 = pin2.getInstance()
+
+        if pin1.isPlaceInstConnected() and pin2.isPlaceInstConnected():
+            inst1_idx = inst1.getExtId()
+            inst2_idx = inst2.getExtId()
+            self._add_matrix_value(rows, inst1_idx, inst1_idx, weight)
+            self._add_matrix_value(rows, inst2_idx, inst2_idx, weight)
+            self._add_matrix_value(rows, inst1_idx, inst2_idx, -weight)
+            self._add_matrix_value(rows, inst2_idx, inst1_idx, -weight)
+            inst1_coord = float(getattr(inst1, coord)())
+            inst2_coord = float(getattr(inst2, coord)())
+            rhs[inst1_idx] += -weight * ((pin1_coord - inst1_coord) - (pin2_coord - inst2_coord))
+            rhs[inst2_idx] += -weight * ((pin2_coord - inst2_coord) - (pin1_coord - inst1_coord))
+        elif not pin1.isPlaceInstConnected() and pin2.isPlaceInstConnected():
+            inst2_idx = inst2.getExtId()
+            self._add_matrix_value(rows, inst2_idx, inst2_idx, weight)
+            inst2_coord = float(getattr(inst2, coord)())
+            rhs[inst2_idx] += weight * (pin1_coord - (pin2_coord - inst2_coord))
+        elif pin1.isPlaceInstConnected() and not pin2.isPlaceInstConnected():
+            inst1_idx = inst1.getExtId()
+            self._add_matrix_value(rows, inst1_idx, inst1_idx, weight)
+            inst1_coord = float(getattr(inst1, coord)())
+            rhs[inst1_idx] += weight * (pin2_coord - (pin1_coord - inst1_coord))
 
     def _add_matrix_value(self, rows: List[Dict[int, float]], row: int, col: int, value: float) -> None:
         if value == 0.0:

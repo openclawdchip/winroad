@@ -242,3 +242,26 @@ OpenDB/FastRoute/STA/FFT 的 Python 可落地逻辑补上；真实外部依赖�
 - `route_base`：GR 四个入口改为可注入 router/global-route adapter 的结构化边界，可消费 congestion/resource/guide 数据；缺 adapter 时给出 `GrtAdapterError`。
 - `timing_base`：`runResizerForTiming()` 与 `resetFillerCells()` 改为可注入 Resizer/Replace/Nesterov hook，记录 hook/result；缺 hook 时返回 `False` 和 `missing_hook`。
 - `docs`：记录只做 GPL 的主线约束、线程分工、剩余真实边界和验证命令；其他模块暂停。
+
+## 2026-05-08 第十一轮
+
+本轮按用户要求从“自行补边界”切回“按 OpenROAD GPL 源码直译”。源码根目录固定为
+`C:\Users\yh-PC-003\Desktop\codex\OpenROAD`，翻译范围只限 `src/gpl`，其他模块暂停。
+
+| 模块 | 线程 id | 昵称 | 状态 | 负责范围 |
+| --- | --- | --- | --- | --- |
+| `gpl` | `019e05c5-b95b-74d0-98d6-976b3fd8e6cb` | Carson | 已完成 | `fft.cpp/.h`, `fftsg*.cpp` -> `winroad/gpl/fft.py` |
+| `gpl` | `019e05c5-b995-7451-ac5c-a973857c69ee` | Epicurus | 已完成 | `nesterovBase.cpp/.h` density/FFT -> `winroad/gpl/nesterov.py` |
+| `gpl` | `019e05c5-b9e0-7bc2-86f3-9e8c3028aacf` | Descartes | 已完成 | `nesterovPlace.cpp/.h` main loop -> `winroad/gpl/nesterov.py` |
+| `gpl` | `019e05c5-b9fa-7dd3-8d07-d78c60633bb4` | Nietzsche | 已完成 | `initialPlace.cpp/.h`, `solver.cpp/.h` -> `winroad/gpl/initial_place.py`, `winroad/gpl/solver.py` |
+| `gpl` | `019e05c5-ba16-7f91-8c63-d6dddff3b856` | Meitner | 已完成 | `routeBase.cpp/.h`, `timingBase.cpp/.h` -> `winroad/gpl/route_base.py`, `winroad/gpl/timing_base.py` |
+| `gpl` | `019e05c5-ba31-7651-b4e1-519544696600` | Pasteur | 已完成 | `placerBase.cpp/.h`, `replace.cpp`, `mbff.cpp/.h`, `graphics.cpp/.h`, `Replace.h` -> GPL package/docs |
+
+### 第十一轮已完成摘要
+
+- `fft`：新增 `FFT` 与 DCT/DST helper，按 `fft.cpp/fft.h/fftsg*.cpp` 翻译 density、phi、force 数组和 `doFFT()` 流程。
+- `nesterovBase`：按 `nesterovBase.cpp` 对齐 bin density area、non-place area、density size、preconditioner、density gradient、density force/FFT 路径。
+- `nesterovPlace`：按 `nesterovPlace.cpp` 对齐 `init -> doBackTracking -> nesterovAdjustPhi -> updateNextIter -> timing/divergence/convergence/updateDb` 主循环顺序。
+- `initialPlace/solver`：按 `initialPlace.cpp` 与 `solver.cpp` 翻译 B2B sparse matrix stamping、min/max pin 标记、BiCGSTAB `cpuSparseSolve()` 调用形状。
+- `routeBase/timingBase`：按 `routeBase.cpp`、`timingBase.cpp` 对齐 RUDY/GR congestion、routability 回退、timing overflow checkpoint 和 timing-driven weight update。
+- `replace/placer/graphics/mbff`：补 `Replace.h` setter、`Replace::init`、`Instance::area`、core overlap helpers、unusable site init、graphics heatmap/no-GUI 入口和 MBFF 边界报告。
